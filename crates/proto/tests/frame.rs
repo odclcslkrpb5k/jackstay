@@ -1,6 +1,6 @@
 use jackstay_proto::{
     Announce, DecodeError, EntryId, FRAME_HEADER_LEN, LimitError, MAX_INLINE_LEN, MAX_PAYLOAD_LEN,
-    MAX_TARGETS, Message, Target, TargetName, decode, encode,
+    MAX_TARGET_NAME_LEN, MAX_TARGETS, Message, Target, TargetName, decode, encode,
 };
 use proptest::prelude::*;
 
@@ -272,4 +272,55 @@ proptest! {
         let rest = bytes.get(first_len..).unwrap_or_default();
         prop_assert_eq!(decode(rest), Ok(Some((b, rest.len()))));
     }
+}
+
+#[test]
+fn accessors_return_what_was_built() {
+    let Message::Announce(a) = sample();
+    assert_eq!(a.id(), EntryId::new(7));
+    assert_eq!(a.id().get(), 7);
+    let [text, image] = a.targets() else { panic!("expected two targets") };
+    assert_eq!(
+        (text.name().as_str(), text.size(), text.inline_data()),
+        ("UTF8_STRING", 5, Some(&b"hello"[..]))
+    );
+    assert_eq!(
+        (image.name().as_str(), image.size(), image.inline_data()),
+        ("image/png", 3_000_000, None)
+    );
+}
+
+#[test]
+fn target_name_limit_is_inclusive() {
+    let longest = vec![b'x'; MAX_TARGET_NAME_LEN];
+    assert!(TargetName::parse(&longest).is_ok());
+    let payload = announce_payload(&longest, 1, None);
+    assert!(matches!(decode(&raw_frame(1, &payload)), Ok(Some(_))));
+    let too_long = vec![b'x'; MAX_TARGET_NAME_LEN + 1];
+    assert_eq!(
+        TargetName::parse(&too_long),
+        Err(LimitError::TargetNameTooLong { len: MAX_TARGET_NAME_LEN + 1 })
+    );
+}
+
+#[test]
+fn inline_limit_is_inclusive_when_decoding() {
+    let data = vec![7; MAX_INLINE_LEN];
+    let len = ok(u32::try_from(MAX_INLINE_LEN));
+    let payload = announce_payload(b"image/png", u64::from(len), Some((len, &data)));
+    let Ok(Some((Message::Announce(a), _))) = decode(&raw_frame(1, &payload)) else {
+        panic!("a target of exactly MAX_INLINE_LEN must decode")
+    };
+    assert_eq!(a.targets().first().and_then(Target::inline_data), Some(data.as_slice()));
+}
+
+#[test]
+fn errors_describe_themselves() {
+    assert_eq!(DecodeError::FrameTooLarge { len: 9 }.to_string(), "frame payload of 9 bytes");
+    assert_eq!(DecodeError::BadFlag(2).to_string(), "flag byte 2");
+    assert_eq!(
+        DecodeError::Limit(LimitError::DuplicateTarget { name: name("TEXT") }).to_string(),
+        "duplicate target TEXT"
+    );
+    assert_eq!(LimitError::InlineTooLarge { len: 3 }.to_string(), "inline data of 3 bytes");
 }

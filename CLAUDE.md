@@ -24,6 +24,12 @@ proposals, never edit it.
 - **ER-2, decoders** Crates that decode untrusted bytes deny `indexing_slicing`,
   `arithmetic_side_effects`, `unwrap_used`, `expect_used`, `panic`, `string_slice`, `unreachable`,
   `todo`, `unimplemented` at crate level, and read through a bounds-checked `Reader`.
+- **TS-16** Every decoder has property tests and a cargo-fuzz target (`crates/proto/fuzz`); the
+  minimized corpus replays as an ordinary test. `./dev tools/fuzz 60` fuzzes; CI runs it.
+- **TS-5** `cargo mutants --package <crate>` on decoder crates; read `missed.txt`, not only the
+  exit status (3 for a timeout masks 2 for missed).
+- **TS-8** `./check` builds into its own tree's `.cache/target`; never share a target directory
+  between copies of the tree (cargo names members' artifacts by relative path).
 - **TS-6** cargo-deny runs on the whole build graph (it skips dev-dependencies' licenses
   otherwise), and the gate asserts its graph equals cargo's.
 

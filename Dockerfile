@@ -37,7 +37,7 @@ RUN cargo +1.99.1 install --locked --root /opt/cargo \
  && chmod -R a+rX /opt/rustup /opt/cargo
 
 # Per-run caches live in the bind-mounted tree (gitignored), so the container runs as the host user.
-ENV JACKSTAY_DEV_CONTAINER=1 CARGO_HOME=/work/.cache/cargo CARGO_TARGET_DIR=/work/.cache/target \
+ENV JACKSTAY_DEV_CONTAINER=1 CARGO_HOME=/work/.cache/cargo \
     RUSTUP_TOOLCHAIN=1.99.1 \
     FUZZ_NIGHTLY=${FUZZ_NIGHTLY}
 WORKDIR /work

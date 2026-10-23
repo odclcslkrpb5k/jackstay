@@ -5,9 +5,11 @@ and `Cargo.lock` is committed; builds run `--locked`.
 
 | Crate | Version | Used by | Why | Alternatives rejected |
 |---|---|---|---|---|
+| `libfuzzer-sys` | 0.4.13 | `jackstay-proto-fuzz` only | libFuzzer for cargo-fuzz (TS-16); its bundled libFuzzer is NCSA, allowed for this crate alone in `deny.toml` | `afl` (needs an instrumenting toolchain outside cargo); `honggfuzz` (less maintained bindings) |
 | `proptest` | 1.12.0 | `jackstay-proto` tests only | Property tests for every decoder (TS-16): round trips, prefixes, arbitrary bytes | `quickcheck` (no shrinking strategies as composable); hand-rolled generators |
 
-Spikes under `spikes/` have their own lockfiles and are not part of the product.
+Spikes under `spikes/` have their own lockfiles and are not part of the product. The fuzz crate
+(`crates/proto/fuzz`) has its own lockfile, and the gate builds it and checks it with cargo-deny.
 
 ## Tools in the image
 

@@ -14,11 +14,6 @@ impl<'a> Reader<'a> {
         Reader { rest: bytes }
     }
 
-    #[must_use]
-    pub fn remaining(&self) -> usize {
-        self.rest.len()
-    }
-
     /// # Errors
     /// [`DecodeError::Truncated`] if fewer than `n` bytes remain.
     pub fn take(&mut self, n: usize) -> Result<&'a [u8], DecodeError> {
@@ -35,12 +30,6 @@ impl<'a> Reader<'a> {
     /// [`DecodeError::Truncated`] at the end of input.
     pub fn u8(&mut self) -> Result<u8, DecodeError> {
         Ok(u8::from_be_bytes(self.array()?))
-    }
-
-    /// # Errors
-    /// [`DecodeError::Truncated`] if fewer than 2 bytes remain.
-    pub fn u16(&mut self) -> Result<u16, DecodeError> {
-        Ok(u16::from_be_bytes(self.array()?))
     }
 
     /// # Errors

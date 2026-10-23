@@ -8,6 +8,10 @@ cd "$(dirname "$0")"
 if [[ "${JACKSTAY_DEV_CONTAINER:-}" != 1 ]]; then
   exec ./dev ./check "$@"
 fi
+# Build artifacts belong to the tree being checked. Cargo names a workspace member's artifacts by
+# its path relative to the workspace root, so two copies of the tree sharing a target directory
+# share artifacts, and cargo's mtime freshness can then run a binary built from the other copy.
+export CARGO_TARGET_DIR="$PWD/.cache/target"
 
 step() {
   printf '\n== %s\n' "$1"
@@ -38,7 +42,7 @@ deny_whole_graph() {
   local mirror=.cache/deny-graph manifest
   rm -rf "$mirror"
   mkdir -p "$mirror"
-  cp -r Cargo.toml Cargo.lock deny.toml crates "$mirror"/
+  git ls-files -z -- Cargo.toml Cargo.lock deny.toml crates | xargs -0 cp --parents -t "$mirror"
   for manifest in "$mirror"/crates/*/Cargo.toml; do
     sed -i 's/^\[dev-dependencies\]$/[target.'"'"'cfg(all())'"'"'.dependencies]/' "$manifest"
   done
@@ -58,9 +62,14 @@ deny_whole_graph() {
   cargo deny --manifest-path "$mirror/Cargo.toml" --config deny.toml --locked check
 }
 
+fuzz=crates/proto/fuzz/Cargo.toml
 step "workspace lints reach every crate" workspace_lints_opt_in
 step "format" cargo fmt --all --check
+step "format (fuzz targets)" cargo fmt --manifest-path "$fuzz" --check
 step "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
 step "tests" cargo test --workspace --locked
 step "dependencies (cargo-deny, whole graph)" deny_whole_graph
+step "fuzz targets build" cargo check --manifest-path "$fuzz" --locked
+step "dependencies (cargo-deny, fuzz targets)" \
+  cargo deny --manifest-path "$fuzz" --config deny.toml --locked check
 printf '\n== all checks passed\n'

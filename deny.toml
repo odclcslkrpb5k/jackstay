@@ -20,3 +20,9 @@ wildcards = "deny"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+# libFuzzer's own C++ sources, bundled by libfuzzer-sys, are under NCSA (permissive, GPL-compatible).
+# Fuzz builds only; nothing shipped links it. See docs/dependencies.md.
+[[licenses.exceptions]]
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
