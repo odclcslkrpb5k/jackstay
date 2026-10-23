@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# Proves each gate control still bites: plants one bug per control in a copy of the tree and
+# asserts that ./check fails, and fails at that control's step (TS-5 for checkers, CP-3).
+# Run inside the dev container: ./dev tools/prove-checks [plant-name...]
+set -euo pipefail
+IFS=$'\n\t'
+
+cd "$(dirname "$0")/.."
+root=$PWD
+work=.cache/plants
+
+plant_unsafe_block() {
+  printf '\npub fn planted() {\n    unsafe {}\n}\n' >> crates/proto/src/lib.rs
+}
+plant_indexing_in_parser() {
+  sed -i 's|        let id = EntryId(r.u64()?);|        let _ = payload[0];\n        let id = EntryId(r.u64()?);|' \
+    crates/proto/src/announce.rs
+}
+plant_unwrap_in_parser() {
+  sed -i 's|        let id = EntryId(r.u64()?);|        let id = EntryId(r.u64().ok().unwrap());|' \
+    crates/proto/src/announce.rs
+}
+# An addition that can overflow. `usize::from(byte) + 1` cannot, and clippy 0.1.99 correctly lets
+# it through, so a plant must use two unbounded operands.
+plant_unchecked_arithmetic_in_parser() {
+  sed -i 's|        let count = usize::from(r.u8()?);|        let count = usize::from(r.u8()?) + payload.len();|' \
+    crates/proto/src/announce.rs
+}
+# Documented, necessary unsafe: without the opt-in, clippy -D warnings passes this (exit 0), so
+# only the opt-in check stands between it and the tree.
+plant_crate_without_workspace_lints() {
+  mkdir -p crates/planted/src
+  printf '[package]\nname = "planted"\nversion = "0.0.0"\nedition = "2024"\npublish = false\n' \
+    > crates/planted/Cargo.toml
+  printf '%s\n' '/// # Safety' '/// None needed.' 'pub unsafe fn raw() {}' 'pub fn planted() {' \
+    '    // SAFETY: raw has no preconditions.' '    unsafe { raw() }' '}' > crates/planted/src/lib.rs
+  cargo generate-lockfile --quiet
+}
+plant_lockfile_drift() {
+  sed -i 's/^proptest = { version = "=1.12.0"/proptest = { version = "=1.11.0"/' Cargo.toml
+}
+plant_unformatted() {
+  printf '\npub fn   planted( ) {}\n' >> crates/proto/src/lib.rs
+}
+plant_failing_test() {
+  printf '\n#[test]\nfn planted() {\n    assert_eq!(1, 2);\n}\n' >> crates/proto/tests/frame.rs
+}
+# time 0.1.45 carries RUSTSEC-2020-0071; cargo-deny's advisory check sees it as a dependency and
+# as a dev-dependency alike.
+plant_advisory_in_dev_dependency() {
+  sed -i 's/^\[dev-dependencies\]$/[dev-dependencies]\ntime = "=0.1.45"/' crates/proto/Cargo.toml
+  cargo update --quiet --package time --precise 0.1.45 2>/dev/null || cargo generate-lockfile --quiet
+}
+# option-ext is MPL-2.0, which deny.toml does not allow. A plain `cargo deny check licenses`
+# passes it as a dev-dependency (exit 0); the gate's whole-graph check must refuse it.
+plant_disallowed_license_in_dev_dependency() {
+  sed -i 's/^\[dev-dependencies\]$/[dev-dependencies]\noption-ext = "=0.2.0"/' crates/proto/Cargo.toml
+  cargo generate-lockfile --quiet
+}
+plant_advisory_in_dependency() {
+  printf '\n[dependencies]\ntime = "=0.1.45"\n' >> crates/proto/Cargo.toml
+  cargo generate-lockfile --quiet
+}
+
+# name | the gate step it must fail at | an extended regex its log must match, so a plant that
+# fails for some other reason (no network, an unrelated advisory) is not counted as proof
+plants=(
+  "unsafe_block|clippy|usage of an .unsafe. block"
+  "indexing_in_parser|clippy|indexing may panic"
+  "unwrap_in_parser|clippy|used .unwrap\(\). on an .Option. value"
+  "unchecked_arithmetic_in_parser|clippy|arithmetic operation that can potentially result in unexpected side-effects"
+  "crate_without_workspace_lints|workspace lints reach every crate|crates/planted/Cargo.toml: missing"
+  "lockfile_drift|clippy|cannot update the lock file .* because --locked was passed"
+  "unformatted|format|^Diff in .*/crates/proto/src/lib.rs"
+  "failing_test|tests|test planted \.\.\. FAILED"
+  "advisory_in_dependency|dependencies (cargo-deny, whole graph)|RUSTSEC-2020-0071"
+  "advisory_in_dev_dependency|dependencies (cargo-deny, whole graph)|RUSTSEC-2020-0071"
+  "disallowed_license_in_dev_dependency|dependencies (cargo-deny, whole graph)|license = \"MPL-2.0\""
+)
+
+selected=("$@")
+is_selected() {
+  local s
+  (( ${#selected[@]} == 0 )) && return 0
+  for s in "${selected[@]}"; do [[ "$s" == "$1" ]] && return 0; done
+  return 1
+}
+for s in "${selected[@]}"; do
+  known=0
+  for entry in "${plants[@]}"; do [[ "${entry%%|*}" == "$s" ]] && known=1; done
+  if (( ! known )); then printf 'unknown plant: %s\n' "$s"; exit 2; fi
+done
+
+failures=0
+ran=0
+for entry in "${plants[@]}"; do
+  name=${entry%%|*}
+  rest=${entry#*|}
+  want=${rest%%|*}
+  reason=${rest#*|}
+  is_selected "$name" || continue
+  ran=$((ran + 1))
+  copy="$work/$name"
+  rm -rf "$copy"
+  mkdir -p "$copy"
+  git ls-files -z | xargs -0 cp --parents -t "$copy"
+  (cd "$copy" && "plant_$name")
+  set +e
+  (cd "$copy" && ./check) > "$copy.log" 2>&1
+  status=$?
+  set -e
+  got=$(grep '^== ' "$copy.log" | tail -1 | sed 's/^== //' || true)
+  if (( status != 0 )) && [[ "$got" == "$want" ]] && grep -Eq "$reason" "$copy.log"; then
+    printf 'ok    %-34s exit %d at "%s"\n' "$name" "$status" "$got"
+  else
+    printf 'FAIL  %-34s exit %d at "%s", wanted a failure at "%s" matching /%s/ (log: %s)\n' \
+      "$name" "$status" "$got" "$want" "$reason" "$copy.log"
+    failures=1
+  fi
+done
+cd "$root"
+if (( ran == 0 )); then printf 'no plants ran\n'; exit 2; fi
+exit "$failures"

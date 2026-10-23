@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# The one gate (TC-5): every check, judged by its own exit status, stopping at the first failure
+# (SH-11). CI runs exactly this. Outside the dev container it re-runs itself inside one.
+set -euo pipefail
+IFS=$'\n\t'
+
+cd "$(dirname "$0")"
+if [[ "${JACKSTAY_DEV_CONTAINER:-}" != 1 ]]; then
+  exec ./dev ./check "$@"
+fi
+
+step() {
+  printf '\n== %s\n' "$1"
+  shift
+  "$@"
+}
+
+# [workspace.lints] reaches only members that opt in, so a member without the opt-in would silently
+# lose `forbid(unsafe_code)` and every other workspace lint.
+workspace_lints_opt_in() {
+  local manifest missing=0
+  for manifest in crates/*/Cargo.toml; do
+    if ! awk '/^\[lints\]$/ { in_lints = 1; next } /^\[/ { in_lints = 0 }
+              in_lints && /^workspace = true$/ { found = 1 } END { exit !found }' "$manifest"; then
+      printf '%s: missing "[lints] workspace = true"\n' "$manifest"
+      missing=1
+    fi
+  done
+  return "$missing"
+}
+
+# cargo-deny 0.20.2 leaves dev-dependencies from outside the workspace out of the graph its
+# license check reads (`ignore_kind(DepKind::Dev, Scope::NonWorkspace)` in its common.rs), and
+# reports "licenses ok" for a dev-dependency under a license deny.toml does not allow. Its advisory
+# check does see them. So it runs on a mirror of the manifests in which dev-dependencies are
+# ordinary dependencies, and the gate fails unless that graph is the whole build graph (TS-6).
+deny_whole_graph() {
+  local mirror=.cache/deny-graph manifest
+  rm -rf "$mirror"
+  mkdir -p "$mirror"
+  cp -r Cargo.toml Cargo.lock deny.toml crates "$mirror"/
+  for manifest in "$mirror"/crates/*/Cargo.toml; do
+    sed -i 's/^\[dev-dependencies\]$/[target.'"'"'cfg(all())'"'"'.dependencies]/' "$manifest"
+  done
+  # Every package cargo would build for our target, against every package cargo-deny examined.
+  local expected seen
+  expected=$(cargo tree --workspace --locked --target x86_64-unknown-linux-gnu \
+      --edges normal,build,dev --prefix none --format '{p}' \
+    | sed -E 's/^([^ ]+) v([^ ]+).*/\1@\2/' | sort -u)
+  seen=$(cargo deny --manifest-path "$mirror/Cargo.toml" --locked list --format human \
+    | sed -E 's/^[^:]*: //' | tr ',' '\n' | sed -E 's/^ +//' | grep -v '^$' | sort -u)
+  if [[ "$seen" != "$expected" ]]; then
+    printf 'cargo-deny graph differs from the build graph:\n'
+    diff <(printf '%s\n' "$expected") <(printf '%s\n' "$seen") || true
+    return 1
+  fi
+  printf 'cargo-deny graph covers all %s packages of the build graph\n' "$(wc -l <<<"$expected")"
+  cargo deny --manifest-path "$mirror/Cargo.toml" --config deny.toml --locked check
+}
+
+step "workspace lints reach every crate" workspace_lints_opt_in
+step "format" cargo fmt --all --check
+step "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
+step "tests" cargo test --workspace --locked
+step "dependencies (cargo-deny, whole graph)" deny_whole_graph
+printf '\n== all checks passed\n'

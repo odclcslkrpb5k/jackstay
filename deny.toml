@@ -1,0 +1,22 @@
+# cargo-deny 0.20.2: what may enter the dependency graph (TC-3, TC-7).
+[graph]
+targets = ["x86_64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+
+[licenses]
+confidence-threshold = 0.93
+allow = ["Apache-2.0", "MIT"]
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

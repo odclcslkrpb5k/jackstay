@@ -1,0 +1,15 @@
+[package]
+name = "jackstay-proto"
+description = "Jackstay's wire messages: framing, encoding and decoding"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

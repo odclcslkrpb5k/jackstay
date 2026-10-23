@@ -27,7 +27,17 @@ RUN curl -fsSL -o /tmp/rustup-init \
  && rm -rf /tmp/rustup-init /tmp/toolchain \
  && chmod -R a+rX /opt/rustup /opt/cargo
 
+# Check tools, built from source at exact versions with their own lockfiles. One pinned nightly,
+# used only by cargo-fuzz (libFuzzer needs -Z flags).
+ARG FUZZ_NIGHTLY=nightly-2026-10-15
+RUN cargo +1.99.1 install --locked --root /opt/cargo \
+      cargo-deny@0.20.2 cargo-mutants@27.1.0 cargo-fuzz@0.13.2 \
+ && rustup toolchain install "${FUZZ_NIGHTLY}" --profile minimal \
+ && rm -rf /opt/cargo/registry /opt/cargo/git \
+ && chmod -R a+rX /opt/rustup /opt/cargo
+
 # Per-run caches live in the bind-mounted tree (gitignored), so the container runs as the host user.
-ENV CARGO_HOME=/work/.cache/cargo CARGO_TARGET_DIR=/work/.cache/target \
-    PATH=/opt/cargo/bin:$PATH RUSTUP_TOOLCHAIN=1.99.1
+ENV JACKSTAY_DEV_CONTAINER=1 CARGO_HOME=/work/.cache/cargo CARGO_TARGET_DIR=/work/.cache/target \
+    RUSTUP_TOOLCHAIN=1.99.1 \
+    FUZZ_NIGHTLY=${FUZZ_NIGHTLY}
 WORKDIR /work
