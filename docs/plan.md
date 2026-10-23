@@ -32,7 +32,10 @@ To be expanded and red-teamed. First cut:
 - Large contents through the INCR protocol, in both directions.
 - Taking selection ownership back when the owning application exits (clipman's main job),
   without breaking applications that set the clipboard and stay running.
-- History: browse, search, re-select, pin, delete; exclude sources (e.g. password managers).
+- History: browse, search, re-select, pin, delete.
+- **No filtering of contents** (owner's decision, 2026-10-23). Everything copied is kept, whatever
+  its source. Instead the user can **clear**: the current clipboard, one entry, or the whole
+  history, at once, from the popup and the tray (clipman has this; it is a core requirement).
 - Remote clipboard: the content follows the user to the machine they move to, and is offered
   there under the same targets.
 
@@ -267,7 +270,7 @@ One Cargo workspace. Each crate has one job, and only `x11-input` may contain `u
 | `net` | QUIC sessions, pairing, reconnect | forbidden |
 | `jackstayd` | Wires the above into threads and channels; config; supervision | forbidden |
 | `jackstay-ui` | gtk3-rs popup, settings, ksni tray | forbidden in our code |
-| `jackstay` | CLI: `popup`, `switch <screen>`, `lock`, `status`, `pair`; a thin socket client | forbidden |
+| `jackstay` | CLI: `popup`, `clear`, `switch <screen>`, `lock`, `status`, `pair`; a thin socket client | forbidden |
 
 Logic lives in `clip` and `proto`, which need no display server and are tested by property tests
 and fuzzing. The X11 crates are thin and are tested against real X servers (§5.7).
@@ -275,8 +278,8 @@ and fuzzing. The X11 crates are thin and are tested against real X servers (§5.
 ### 5.2 Clipboard model
 
 An **entry** is one snapshot of one selection: the targets the owner offered, the bytes of the
-targets we kept, the source (the owner window's `WM_CLASS`, or a peer), a sensitivity flag, and the
-X timestamp of the change. A copy is an entry, not a string.
+targets we kept, the source (the owner window's `WM_CLASS`, or a peer), and the X timestamp of the
+change. A copy is an entry, not a string.
 
 **Capture (CLIPBOARD).** On an XFixes `SelectionNotify`, fetch TARGETS, then fetch the
 **canonical** target of each class the owner offers: `UTF8_STRING`; `text/html`; `image/png`
@@ -308,23 +311,31 @@ takes CLIPBOARD ownership and replies. This closes the keep-alive gap for applic
 **Serving.** TARGETS, MULTIPLE, TIMESTAMP, and INCR for any reply larger than the maximum request
 size, with one state machine per requestor, so a slow or dead requestor stalls only itself.
 
-**Sensitivity.** An entry is sensitive when its owner offers `x-kde-passwordManagerHint=secret`
-(KeePassXC and KDE applications set it), when its owner's `WM_CLASS` is on the exclusion list, or
-when the user marks it. Many password tools (`pass`, gopass, Bitwarden) set no hint, and
-xclip-based tools have no useful `WM_CLASS`, so exclusion is a best effort, not a guarantee. The
-UI makes marking and deleting one keystroke each. A sensitive entry is kept alive in memory for a
-short configurable time (default 60 s) for the paste it was copied for, then dropped. It is never
-written to disk, never sent to peers (the flag travels on the wire), and never shown in the
-history list.
+**No filtering.** Jackstay never decides that content should not be kept: no password-hint
+handling, no source exclusion lists. The owner knows what is in their clipboard and decides what to
+remove (§3).
+
+**Clearing.** Each of these is one action in the popup and the tray, and also `jackstay clear`:
+- **Clear clipboard:** empties CLIPBOARD (and PRIMARY). If another application owns it, for
+  example a password manager that is still running, `jackstayd` takes ownership with a fresh
+  timestamp and offers no targets, so a paste yields nothing. The current entry is removed from
+  history.
+- **Delete entry:** removes one entry. If it is the current clipboard, the clipboard is cleared
+  as above.
+- **Clear history:** removes every unpinned entry, and also clears the clipboard. Pinned entries
+  need their own delete, so a pin is never lost to a habitual clear.
+Removal deletes the entry's files from disk, not just its index line. It also propagates to peers
+that received the entry (§5.4), so a password cleared on one machine is not still pasteable on
+another.
 
 **History.** A bounded list with pin, delete, search and re-select (which makes `jackstayd` the
-owner of that entry, as a user action with a fresh timestamp). Persistence is by default text
-entries and pinned entries only, with an optional expiry, under `$XDG_DATA_HOME/jackstay/`
-(directory 0700, files 0600). Blobs are content-addressed files beside a small index that is
-rewritten atomically, so a copy of a 16 MB image does not rewrite the store. The format is our own
-and versioned. Pure-Rust storage keeps the clipboard path free of C (no SQLite). A store that fails
-to parse is moved aside and history starts empty: a corrupt file never stops the clipboard. On
-first run, text history is imported from clipman (`~/.cache/xfce4/clipman/textsrc`).
+owner of that entry, as a user action with a fresh timestamp). Every entry is persisted, under
+`$XDG_DATA_HOME/jackstay/` (directory 0700, files 0600). Blobs are content-addressed files beside a
+small index that is rewritten atomically, so a copy of a 16 MB image does not rewrite the store.
+The format is our own and versioned. Pure-Rust storage keeps the clipboard path free of C (no
+SQLite). A store that fails to parse is moved aside and history starts empty: a corrupt file never
+stops the clipboard. On first run, text history is imported from clipman
+(`~/.cache/xfce4/clipman/textsrc`).
 
 **Restart.** On start, `jackstayd` claims CLIPBOARD only if `GetSelectionOwner` returns None, and
 serves the newest persisted entry.
@@ -373,7 +384,6 @@ Clipboard is symmetric: any machine may copy and any may paste.
 
 - When an entry is captured on machine A, A announces it to every peer: an id, its targets and
   sizes. Targets under 64 KiB travel with the announcement. Larger ones are fetched on demand.
-  Sensitive entries are not announced.
 - A peer takes CLIPBOARD ownership when Jackstay's own input sharing moves the pointer onto it.
   It offers exactly the targets A holds. Its timestamp comes from a zero-length property append.
   This depends on input sharing, so input sharing ships first (§6).
@@ -385,7 +395,8 @@ Clipboard is symmetric: any machine may copy and any may paste.
   to end it is a zero-length chunk, which the requestor reads as "complete", so a dropped link
   would silently truncate the paste.
 - Received entries join B's history with their source recorded. They are offered for paste and
-  never re-announced.
+  never re-announced. Clearing on any machine (§5.2) is announced too, and every peer removes the
+  entry and drops its ownership of it.
 - Synergy's own clipboard sharing must be off on every machine Jackstay shares with. Otherwise
   both programs claim ownership on every switch, and each captures the other's claim as a new
   entry. Because input sharing ships first, Synergy is gone by then.
@@ -496,7 +507,7 @@ usable on its own, and each target's main control exists before the owner depend
 | | Milestone | Done when |
 |---|---|---|
 | M0 | Skeleton and spikes | Workspace, Docker image, `./check`, CI, lint and deny configs, one planted bug per control watched failing; the standard session's measurement list (§5.8) answered; spikes: XTest motion triggers barriers on Xvfb, and whether XTest keys stay down after the injecting client dies |
-| M1 | Headless clipboard manager | Capture, keep-alive, CLIPBOARD_MANAGER, history store, clipman import, `jackstay popup` placeholder; core tier of the conformance matrix in `./check` |
+| M1 | Headless clipboard manager | Capture, keep-alive, CLIPBOARD_MANAGER, history store, clearing (`jackstay clear`), clipman import, `jackstay popup` placeholder; core tier of the conformance matrix in `./check` |
 | M2 | Clipboard UI and application tier | Popup, tray, settings; application tier of the matrix. **Dogfood:** the owner disables clipman for two weeks; done when no lost or wrong entry is reported, and every report has become a matrix case |
 | M3 | Link | Pairing, QUIC session, reconnect, heartbeat, two-machine harness |
 | M4 | Input sharing | §5.3 working; latency acceptance on the owner's LAN. **Dogfood:** the owner runs Jackstay instead of Synergy for input (Synergy stays installed as the fallback), with Synergy's clipboard sharing missed for the duration |
@@ -547,7 +558,7 @@ panel plugin variant (which is not).
 | F5 | Firefox and Chromium are snaps; drivers are unsized | Partly wrong (Firefox is apt here). Non-snap builds; drivers sized in M2 |
 | F6 | "Reclaim on restart" contradicts keep-alive | Accepted. Claim only if there is no owner |
 | F7 | Pairing contradicts "refuse unpaired"; a code from the keys can be ground | Accepted. Timed pairing mode; code from the TLS exporter; RFC 7250 considered |
-| F8 | The password hint is overclaimed | Accepted. Best effort; one-key marking; sensitive entries never persisted or shared |
+| F8 | The password hint is overclaimed | Superseded by owner: no filtering at all; explicit clearing instead (§5.2) |
 | J1 | The watchdog releases legitimately held keys; auto-repeat undesigned | Accepted. Held-key heartbeat; suspect at 300 ms and dead after seconds; the secondary repeats |
 | J2 | Modifiers and buttons held across a crossing | Accepted. No crossing mid-drag; modifier sync on every switch |
 | J3 | Datagram motion reorders against clicks | Accepted. Motion on stream 0 |
@@ -555,7 +566,14 @@ panel plugin variant (which is not).
 | J5 | Capturing PRIMARY on its event gets stale text | Accepted. Wait for release; no PRIMARY keep-alive |
 | J6 | Keep-alive timestamp | Accepted. The XFixes event timestamp, never `CurrentTime` |
 | J7 | CLIPBOARD_MANAGER unspecified | Accepted. Spelled out in §5.2 |
-| J8 | Plaintext history; peers get excluded entries; whole-store rewrites | Accepted. Text and pinned only by default; content-addressed blobs; sensitive entries stay local |
+| J8 | Plaintext history; peers get excluded entries; whole-store rewrites | Content-addressed blobs accepted. Filtering superseded by owner: everything persisted and shared; clearing deletes files and propagates |
 | J9 | Fetching every target burdens lazy renderers | Accepted. One canonical target per class |
 | J10 | The systemd unit has no start point; restart loop at logout | Accepted. Start from autostart after importing the environment; `RestartPreventExitStatus` |
 | J11 | Milestones: M1 too big, the matrix comes after dependence, no rollback, import, dogfood, RandR or `switch` | Accepted. M1 split; core matrix in M1; rollback, import, dogfood criteria, RandR, CLI added |
+
+### Owner decision after pass 2, 2026-10-23
+
+"Don't filter clipboard contents at all. I know what's in my clipboard, and if I want to clear my
+clipboard of a password then I should have the option." All sensitivity detection, exclusion and
+non-persistence was removed. Clearing (clipboard, entry, history), propagated to peers, is a core
+requirement in §3 and §5.2.
