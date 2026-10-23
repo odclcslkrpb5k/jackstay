@@ -1,0 +1,33 @@
+# Development and check environment (TC-9): a workstation needs only Docker.
+FROM ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944
+
+ARG APT_SNAPSHOT=20261020T000000Z
+ARG RUSTUP_VERSION=1.29.2
+ARG RUSTUP_SHA256=5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+
+# The snapshot service is HTTPS-only and the base image has no CA certificates, so those come
+# from the live archive first. --error-on=any: apt-get update otherwise exits 0 on a failed index.
+RUN apt-get update --error-on=any \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get update --error-on=any --snapshot "${APT_SNAPSHOT}" \
+ && apt-get install -y --no-install-recommends --snapshot "${APT_SNAPSHOT}" \
+      build-essential pkg-config curl git \
+      libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+      xvfb xauth x11-utils x11-xserver-utils xdotool \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+COPY rust-toolchain.toml /tmp/toolchain/rust-toolchain.toml
+RUN curl -fsSL -o /tmp/rustup-init \
+      "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+ && echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c - \
+ && chmod +x /tmp/rustup-init \
+ && /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none \
+ && cd /tmp/toolchain && rustup toolchain install && rustup show active-toolchain \
+ && rm -rf /tmp/rustup-init /tmp/toolchain \
+ && chmod -R a+rX /opt/rustup /opt/cargo
+
+# Per-run caches live in the bind-mounted tree (gitignored), so the container runs as the host user.
+ENV CARGO_HOME=/work/.cache/cargo CARGO_TARGET_DIR=/work/.cache/target \
+    PATH=/opt/cargo/bin:$PATH RUSTUP_TOOLCHAIN=1.99.1
+WORKDIR /work

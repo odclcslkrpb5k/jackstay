@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Runs a command in the pinned development container, as the host user, with the tree at /work.
+set -euo pipefail
+IFS=$'\n\t'
+
+cd "$(dirname "$0")"
+image="jackstay-dev:local"
+docker build --quiet --tag "$image" . >/dev/null
+mkdir -p .cache
+exec docker run --rm --init \
+  --user "$(id -u):$(id -g)" \
+  --volume "$PWD:/work" \
+  "$image" "$@"

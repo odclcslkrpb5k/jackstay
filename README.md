@@ -19,3 +19,12 @@ Jackstay is intended to replace both [Synergy](https://symless.com/synergy) and
 ## Status
 
 Early development.
+
+## Development
+
+The only requirement is Docker. `./dev <command>` runs a command in the pinned development
+container (Ubuntu 26.04, Rust 1.99.1), for example `./dev cargo build`.
+
+## License
+
+[GNU General Public License v3.0](LICENSE).

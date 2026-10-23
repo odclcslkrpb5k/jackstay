@@ -233,9 +233,8 @@ messages, selection data, images):
 
 These shape the design (§5) more than the stack, but the stack has to reach them:
 
-- **Stuck keys.** Find out by experiment whether keys pressed through XTest stay down after the
-  injecting client dies or the link drops. Either way: release everything held on disconnect and
-  on screen switch, plus a watchdog.
+- **Stuck keys.** Measured in M0: the X server releases XTest-held keys when the injecting client
+  disconnects (§5.3). A dropped network link is what remains, which the held-key heartbeat covers.
 - **Grab failure.** Active grabs fail with `AlreadyGrabbed` while a menu is open or the screensaver
   holds a grab. The pointer needs a defined behaviour when it cannot leave.
 - **Remote ownership.** While the user works on another machine, the local daemon must own the
@@ -372,7 +371,10 @@ removed or moved), and edges between a machine's own monitors are never barriers
   releases everything. That is before Xfce's default 500 ms repeat delay, so a lost release cannot
   turn into an endless repeat. A link is "dead" only after several seconds without traffic, which
   tolerates Wi-Fi power-save pauses. A held key with no messages is normal, so silence alone never
-  releases anything. Only a missing heartbeat does.
+  releases anything. Only a missing heartbeat does. **Measured (M0 spike, Xvfb 21.1.22):** the
+  server releases XTest-held keys when the injecting client's connection closes, whether it exits,
+  aborts or is killed. So a daemon crash cannot leave keys stuck on the secondary. A dropped network
+  link, with the daemon still connected, can, and that is what the heartbeat is for.
 - **Returning.** The secondary reports the pointer reaching an edge, and the primary ungrabs and
   warps its pointer to the matching point.
 - **Hotkeys** (switch, lock to screen) are seen by the primary while it is grabbing, and are
@@ -462,8 +464,11 @@ wrote (the standard's "independent layers").
 - **Two-machine tests:** two Xvfb servers and two daemons in containers on one host, on a loopback
   network with `tc netem` for loss and delay. Inject input on one and assert what the other
   receives, including links dropped mid-keypress, heartbeat loss, and held modifiers across a
-  crossing. Whether XTest motion on Xvfb triggers pointer barriers is checked in M0, since this
-  harness depends on it.
+  crossing. **Measured (M0 spike, Xvfb 21.1.22, XFixes 6.0, XInput 2.4):** *relative* XTest motion
+  is stopped by a pointer barrier and delivers `XI_BarrierHit` events. *Absolute* XTest motion
+  passes straight through, like a warp. The harness therefore drives the pointer with relative
+  motion, as a real mouse does. Absolute devices (tablets, touchscreens) on the primary would
+  cross no barriers, which is acceptable for a first version.
 - **Latency.** In the harness, both sides timestamp with `CLOCK_MONOTONIC`, which containers on one
   host share. X event timestamps are millisecond-grained and per-server, so they are useless for
   this. CI gates on a loose loopback budget, set from M0 measurements, that catches regressions
@@ -506,7 +511,7 @@ usable on its own, and each target's main control exists before the owner depend
 
 | | Milestone | Done when |
 |---|---|---|
-| M0 | Skeleton and spikes | Workspace, Docker image, `./check`, CI, lint and deny configs, one planted bug per control watched failing; the standard session's measurement list (§5.8) answered; spikes: XTest motion triggers barriers on Xvfb, and whether XTest keys stay down after the injecting client dies |
+| M0 | Skeleton and spikes | Workspace, Docker image, `./check`, CI, lint and deny configs, one planted bug per control watched failing; the standard session's measurement list (§5.8) answered; spikes: XTest motion triggers barriers on Xvfb, and whether XTest keys stay down after the injecting client dies. Spikes **done 2026-10-23** (`spikes/x11-probes`; results in §5.3 and §5.7) |
 | M1 | Headless clipboard manager | Capture, keep-alive, CLIPBOARD_MANAGER, history store, clearing (`jackstay clear`), clipman import, `jackstay popup` placeholder; core tier of the conformance matrix in `./check` |
 | M2 | Clipboard UI and application tier | Popup, tray, settings; application tier of the matrix. **Dogfood:** the owner disables clipman for two weeks; done when no lost or wrong entry is reported, and every report has become a matrix case |
 | M3 | Link | Pairing, QUIC session, reconnect, heartbeat, two-machine harness |

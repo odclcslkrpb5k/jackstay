@@ -1,0 +1,8 @@
+[package]
+name = "x11-probes"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+x11rb = { version = "=0.14.0", features = ["xfixes", "xinput", "xtest"] }
