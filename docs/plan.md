@@ -36,6 +36,27 @@ To be expanded and red-teamed. First cut:
 - Remote clipboard: the content follows the user to the machine they move to, and is offered
   there under the same targets.
 
+### Known failures to beat
+
+The owner's reported failures with Synergy and clipman (2026-10-23), with the mechanism each most
+likely comes from. Each is to be reproduced as a conformance case (§5.7) before it is called fixed.
+
+1. **Images fail to copy from some applications.** Most likely target negotiation. Applications
+   offer different image targets (`image/png`, `image/bmp`, `image/jpeg`, `image/x-*`, or only
+   their own), and a tool that knows one target misses the others. Jackstay keeps whatever image
+   target the owner offers, and **offers images under every common image target**, transcoding
+   from what it holds (pure-Rust decoders, in the daemon), so any requestor finds a target it
+   accepts.
+2. **Images fail to copy from every application.** Most likely size. A screenshot exceeds the
+   maximum request size, so it needs INCR, or it exceeds a tool's own clipboard size cap. Jackstay
+   supports INCR both ways, and has limits sized for real screenshots (a 4K PNG is several MB, and
+   raw RGBA is about 33 MB).
+3. **Nothing copies from any application.** Most likely a wedged state. One stalled transfer, or a
+   lost ownership race, leaves a single-threaded clipboard path stuck until restart. Jackstay
+   gives each transfer its own state machine and timeout (§5.2). A self-check periodically
+   confirms that the CLIPBOARD owner answers TARGETS, and recovers if it does not, rather than
+   waiting for a restart.
+
 ### Input
 - Capture keyboard and mouse on the machine with the physical devices; inject on the others (XTest).
 - Screen-edge switching with a configurable layout; hotkeys to switch and to lock.
@@ -76,7 +97,10 @@ Three facts about the problem decide most of the choice.
    network input is the worst defect class a program like this can have. This is not
    hypothetical: Deskflow (the Synergy fork, C++) had
    [CVE-2026-41476](https://bugzilla.redhat.com/show_bug.cgi?id=2461689), an out-of-bounds read
-   from a malformed clipboard update, in its clipboard chunk assembly.
+   from a malformed clipboard update. The read is in `IClipboard::unmarshall()`; the size check in
+`ClipboardChunk::assemble()` validated only the outer transfer size, so malformed inner lengths
+got through. The lesson: every inner length is checked against the bytes remaining, not the
+outer total.
 3. **Real-time input must not share a thread with a UI.** Pointer motion has to be forwarded in
    well under a frame. A GUI main loop (GTK's) stalls on redraws, D-Bus calls and handlers; the
    C + GTK appendix itself needs a "stall watch" to catch callbacks that block it. The input and
@@ -175,17 +199,20 @@ corruption and information disclosure), outside `unsafe`, which our crates forbi
 keymap adapter. Chapter 04's `Result`/`panic` model, and chapter 03's exhaustive switches and used
 results, are compiler-enforced rather than lint-enforced.
 
-That is **not** the end of the parsing problem. CVE-2026-41476 in safe Rust would be a panic, and
-a panic kills the daemon: it drops the clipboard and the input link, which is a remotely
-triggerable denial of service against targets 1 and 3. So Engineer controls still apply to every
-decoder (wire messages, selection data, images):
+That is **not** the end of the parsing problem. CVE-2026-41476 in safe Rust would be a panic. With
+`panic = "abort"` that kills the daemon, dropping the clipboard and the input link: a remotely
+triggerable denial of service against targets 1 and 3. With `panic = "unwind"` (the tentative
+choice, §5.8), a panic caught at a task boundary costs one connection or transfer. But only where
+something catches it, and only if no shared state it touched is left poisoned. Either way, the
+parsers must not panic in the first place. Engineer controls apply to every decoder (wire
+messages, selection data, images):
 
 - clippy's `indexing_slicing`, `arithmetic_side_effects` and `unwrap_used` denied in parser
   modules, so a parser cannot panic on input;
 - cargo-fuzz on every decoder, with its seed corpus run as ordinary tests (TS-16);
 - size limits enforced before allocation;
-- Protect: a systemd user unit restarts the daemon, and on restart it reclaims selection ownership
-  and re-sends key releases.
+- Protect: a systemd user unit restarts the daemon. On restart it claims the clipboard only if it
+  has no owner (§5.2), and peers release held keys when the heartbeat stops (§5.3).
 
 **Costs we accept, and their controls:**
 
@@ -212,9 +239,9 @@ These shape the design (§5) more than the stack, but the stack has to reach the
   selection with a correct timestamp, taken from a zero-length property append, since there is no
   user event to take one from. Targets are offered at once and fetched lazily over the network, so
   large items need a latency policy.
-- **Coexistence.** xfsettingsd 4.20 has no clipboard manager, but xfce4-clipman, Synergy and
-  Deskflow must be disabled while Jackstay runs, or selection ownership and grabs flap. Detect them
-  and refuse to start.
+- **Coexistence.** xfsettingsd 4.20 has no clipboard manager, but xfce4-clipman must not run
+  beside Jackstay, or selection ownership flaps. Synergy and Deskflow conflict only with input
+  sharing. See §5.6.
 
 ### 4.4 Decisions
 
@@ -225,11 +252,261 @@ These shape the design (§5) more than the stack, but the stack has to reach the
 
 ## 5. Architecture
 
-To be written after §4.
+**Revised after red-team pass 2 (§7). Not yet red-teamed again after revision.**
+
+### 5.1 Workspace
+
+One Cargo workspace. Each crate has one job, and only `x11-input` may contain `unsafe`.
+
+| Crate | Job | `unsafe` |
+|---|---|---|
+| `proto` | Wire and socket message types, their encoders and decoders, version negotiation | forbidden |
+| `clip` | The clipboard model and history store; no I/O | forbidden |
+| `x11-clip` | Selection protocol over `RustConnection` | forbidden |
+| `x11-input` | Barriers, grabs, XI2, XTest, libxkbcommon; the only FFI adapter (ER-3) | allowed, audited |
+| `net` | QUIC sessions, pairing, reconnect | forbidden |
+| `jackstayd` | Wires the above into threads and channels; config; supervision | forbidden |
+| `jackstay-ui` | gtk3-rs popup, settings, ksni tray | forbidden in our code |
+| `jackstay` | CLI: `popup`, `switch <screen>`, `lock`, `status`, `pair`; a thin socket client | forbidden |
+
+Logic lives in `clip` and `proto`, which need no display server and are tested by property tests
+and fuzzing. The X11 crates are thin and are tested against real X servers (§5.7).
+
+### 5.2 Clipboard model
+
+An **entry** is one snapshot of one selection: the targets the owner offered, the bytes of the
+targets we kept, the source (the owner window's `WM_CLASS`, or a peer), a sensitivity flag, and the
+X timestamp of the change. A copy is an entry, not a string.
+
+**Capture (CLIPBOARD).** On an XFixes `SelectionNotify`, fetch TARGETS, then fetch the
+**canonical** target of each class the owner offers: `UTF8_STRING`; `text/html`; `image/png`
+(else the first image type); `text/uri-list`; `x-special/gnome-copied-files`. Use
+`ConvertSelection` with the event's timestamp, never `CurrentTime`. Fetching every target would
+force lazy renderers (LibreOffice, GIMP) to produce every format on every copy. Other targets stay
+available while the original owner lives, because the owner serves them. After keep-alive we offer
+only what we hold, so we never offer a target we cannot serve. INCR is supported, through one state
+machine per transfer, with a timeout. A target over the size limits is recorded as not kept.
+
+**Capture (PRIMARY).** Off by default in history. When on, capture only after Button1 and Shift
+are released, as clipman does (`cb_check_primary_clipboard` in its `collector.c`). Ownership is
+set when the drag starts and the text grows without a new event. PRIMARY is never kept alive by
+default.
+
+**Keep-alive (CLIPBOARD).** When XFixes reports `SelectionClientClose` or `SelectionWindowDestroy`,
+the owner is already gone. `jackstayd` claims ownership with that event's timestamp, which can
+never overwrite a newer owner, and serves the entry it captured at copy time. There is a short
+window in which a paste finds no owner. It is unavoidable without CLIPBOARD_MANAGER (below) and is
+as wide as our event latency. While an owner lives, we never take ownership, except in the
+handoff below and at re-select.
+
+**CLIPBOARD_MANAGER handoff** (CLIPBOARD only). `jackstayd` owns the `CLIPBOARD_MANAGER`
+selection and announces it with the ICCCM `MANAGER` client message. When an exiting application
+(GTK does this) asks it to convert `SAVE_TARGETS`, it reads the target list from the request's
+property, fetches those targets through `MULTIPLE` while the application is still alive, then
+takes CLIPBOARD ownership and replies. This closes the keep-alive gap for applications that use it.
+
+**Serving.** TARGETS, MULTIPLE, TIMESTAMP, and INCR for any reply larger than the maximum request
+size, with one state machine per requestor, so a slow or dead requestor stalls only itself.
+
+**Sensitivity.** An entry is sensitive when its owner offers `x-kde-passwordManagerHint=secret`
+(KeePassXC and KDE applications set it), when its owner's `WM_CLASS` is on the exclusion list, or
+when the user marks it. Many password tools (`pass`, gopass, Bitwarden) set no hint, and
+xclip-based tools have no useful `WM_CLASS`, so exclusion is a best effort, not a guarantee. The
+UI makes marking and deleting one keystroke each. A sensitive entry is kept alive in memory for a
+short configurable time (default 60 s) for the paste it was copied for, then dropped. It is never
+written to disk, never sent to peers (the flag travels on the wire), and never shown in the
+history list.
+
+**History.** A bounded list with pin, delete, search and re-select (which makes `jackstayd` the
+owner of that entry, as a user action with a fresh timestamp). Persistence is by default text
+entries and pinned entries only, with an optional expiry, under `$XDG_DATA_HOME/jackstay/`
+(directory 0700, files 0600). Blobs are content-addressed files beside a small index that is
+rewritten atomically, so a copy of a 16 MB image does not rewrite the store. The format is our own
+and versioned. Pure-Rust storage keeps the clipboard path free of C (no SQLite). A store that fails
+to parse is moved aside and history starts empty: a corrupt file never stops the clipboard. On
+first run, text history is imported from clipman (`~/.cache/xfce4/clipman/textsrc`).
+
+**Restart.** On start, `jackstayd` claims CLIPBOARD only if `GetSelectionOwner` returns None, and
+serves the newest persisted entry.
+
+### 5.3 Input model
+
+One machine has the physical keyboard and mouse: the **primary**. The others are **secondaries**.
+A layout maps screen edges to neighbours. It is recomputed on RandR changes (monitors added,
+removed or moved), and edges between a machine's own monitors are never barriers.
+
+- **Leaving.** XFixes pointer barriers sit on the edges that have a neighbour, with XI 2.3 barrier
+  events for the crossing point and velocity. On a crossing, the primary grabs keyboard and pointer
+  (`XIGrabDevice` on the master devices), hides the cursor, and forwards XI2 raw events to the
+  active secondary.
+- **No crossing mid-drag.** If a button is held, the pointer has an implicit grab, so ours would
+  fail, and a cross-machine drag cannot work anyway. The barrier holds until the button is
+  released.
+- **Grab failure.** If the grab fails (`AlreadyGrabbed`: a menu is open, or the screen is locked),
+  the pointer stays on the primary, and the crossing is retried on the next push against the
+  barrier. It never half-switches.
+- **Modifiers.** On every switch, in both directions, the side gaining focus is told the full
+  modifier and lock state, and the side losing it releases everything it holds. A Shift held
+  across a crossing is therefore pressed on the far side and released on the near side.
+- **Keys.** Both ends are Xubuntu with evdev, so keys travel as keycodes plus the active XKB group
+  and are injected exactly. Groups and `MappingNotify` changes are tracked through libxkbcommon.
+  If a keycode's keysym differs on the secondary (detected per key, not by hashing whole keymaps,
+  which differ across xkeyboard-config versions), the keysym is sent and resolved there, borrowing
+  a spare keycode if needed. Borrowed keycodes are restored on exit and checked and restored at
+  startup, so a crash cannot leave the keymap modified.
+- **Auto-repeat.** The secondary repeats held keys itself, with its own repeat settings. The
+  primary suppresses its repeats while grabbing, so the user never gets double repeats.
+- **Held-key heartbeat.** While any key or button is held, stream 0 carries a heartbeat about
+  every 100 ms listing what is held. If heartbeats stop for about 300 ms ("suspect"), the secondary
+  releases everything. That is before Xfce's default 500 ms repeat delay, so a lost release cannot
+  turn into an endless repeat. A link is "dead" only after several seconds without traffic, which
+  tolerates Wi-Fi power-save pauses. A held key with no messages is normal, so silence alone never
+  releases anything. Only a missing heartbeat does.
+- **Returning.** The secondary reports the pointer reaching an edge, and the primary ungrabs and
+  warps its pointer to the matching point.
+- **Hotkeys** (switch, lock to screen) are seen by the primary while it is grabbing, and are
+  `jackstay switch` and `jackstay lock` bound through xfconf when it is not.
+
+### 5.4 Clipboard sharing
+
+Clipboard is symmetric: any machine may copy and any may paste.
+
+- When an entry is captured on machine A, A announces it to every peer: an id, its targets and
+  sizes. Targets under 64 KiB travel with the announcement. Larger ones are fetched on demand.
+  Sensitive entries are not announced.
+- A peer takes CLIPBOARD ownership when Jackstay's own input sharing moves the pointer onto it.
+  It offers exactly the targets A holds. Its timestamp comes from a zero-length property append.
+  This depends on input sharing, so input sharing ships first (§6).
+- A paste on B of a target B does not hold is answered only once B has fetched the **whole**
+  target from A. B holds back the `SelectionNotify` until then, within a deadline below common
+  requestor timeouts (about 3 s; Qt waits about 5 s), and then serves it locally, with INCR if it
+  is large. If the fetch fails or misses the deadline, B refuses (property None) before any byte is
+  sent. Streaming INCR straight from the network is ruled out: once INCR has started, the only way
+  to end it is a zero-length chunk, which the requestor reads as "complete", so a dropped link
+  would silently truncate the paste.
+- Received entries join B's history with their source recorded. They are offered for paste and
+  never re-announced.
+- Synergy's own clipboard sharing must be off on every machine Jackstay shares with. Otherwise
+  both programs claim ownership on every switch, and each captures the other's claim as a new
+  entry. Because input sharing ships first, Synergy is gone by then.
+
+### 5.5 Network and trust
+
+- QUIC (quinn, rustls) on one UDP port. Each machine has a long-lived Ed25519 key, generated on
+  first run and stored 0600. Authentication uses raw public keys (RFC 7250) if rustls supports
+  them for both sides, and otherwise self-signed certificates pinned by key. Either way, the custom
+  verifier still checks the handshake signature.
+- **Pairing** is an explicit mode, entered with `jackstay pair` on both machines and lasting about
+  2 minutes. Only in that mode is a handshake with an unknown key accepted. Both machines show a
+  short code derived from the TLS session's exporter (RFC 5705), not from the keys, so an attacker
+  in the middle cannot grind a matching code. The user compares the codes and confirms on both
+  sides. Outside pairing mode, an unknown key is refused in the handshake, before any message is
+  parsed.
+- Peers are addressed by configured hostnames. Discovery (mDNS) is not in the first version.
+- One session per peer. Stream 0 carries control, input and pointer motion in order, so a click
+  never overtakes the motion that put the pointer there (LAN loss is near zero, so head-of-line
+  cost on stream 0 is negligible). Each clipboard transfer gets its own stream. Reconnect is
+  automatic, with backoff.
+- Every message is decoded by `proto` from bytes into a declared type (BD-1), with each inner
+  length checked against the bytes remaining, before allocation (the lesson of CVE-2026-41476).
+
+### 5.6 Configuration and operation
+
+- `~/.config/jackstay/config.toml`, parsed once at start into a typed config. An invalid config
+  refuses to start, with the field named. The settings window writes the same file.
+- `jackstayd` is a systemd user unit, started from XDG autostart by a script that runs
+  `systemctl --user import-environment DISPLAY XAUTHORITY` and then starts the unit, because Xfce
+  never reaches `graphical-session.target`. `Restart=on-failure`, with the "X connection lost"
+  exit code in `RestartPreventExitStatus`, so logging out does not cause a restart loop against a
+  dead display. The UI restarts itself when the daemon restarts.
+- Logs go to the journal and name kinds and codes, never clipboard contents or file paths (DP-3).
+- **Coexistence.** The clipboard manager coexists with Synergy's input sharing. It refuses to start
+  if another clipboard manager is detected:
+  - by process name: `xfce4-clipman` (the standalone build, which the owner runs), CopyQ,
+    Parcellite, Diodon, GPaste;
+  - via the xfconf panel plugin list, for clipman's panel plugin, which runs inside the panel's
+    `wrapper-2.0` process;
+  - by behaviour: another client re-taking ownership right after each of our keep-alive claims.
+  Input sharing refuses to start while Synergy or Deskflow is running.
+- **Rollback.** Install never removes clipman or Synergy. It disables their autostart and the
+  clipman panel plugin, and `jackstay uninstall-integration` restores them.
+
+### 5.7 Testing strategy
+
+Machine checks catch what they can. The rest is tested against real systems, not fakes the agent
+wrote (the standard's "independent layers").
+
+- **Unit and property tests** for `clip` and `proto`. **cargo-fuzz** on every decoder, including
+  the history index. **cargo-mutants** on regression tests and checkers (TS-5).
+- **ICCCM conformance matrix:** copy from and paste into real applications on Xvfb, for text,
+  HTML, images, URI lists and files, with small, INCR-sized and limit-sized payloads, including the
+  source exiting before the paste and the CLIPBOARD_MANAGER handoff. It is built in two tiers:
+  - **Core tier (M1):** xclip, xsel, a GTK 3 and a GTK 4 test client, a Qt 6 test client, xterm.
+    Each is cheap to drive.
+  - **Application tier (M2):** Firefox (Mozilla's apt package or tarball, not the snap), Chrome for
+    Testing (Ubuntu's Chromium is snap-only and snaps do not run in Docker), LibreOffice (driven
+    through UNO), xfce4-terminal, and one named Electron app. Each application needs a driver
+    (xdotool, Marionette, CDP, UNO), and that is sized as real work in M2.
+  The owner's reported Synergy and clipman failures become cases in this matrix.
+- **Two-machine tests:** two Xvfb servers and two daemons in containers on one host, on a loopback
+  network with `tc netem` for loss and delay. Inject input on one and assert what the other
+  receives, including links dropped mid-keypress, heartbeat loss, and held modifiers across a
+  crossing. Whether XTest motion on Xvfb triggers pointer barriers is checked in M0, since this
+  harness depends on it.
+- **Latency.** In the harness, both sides timestamp with `CLOCK_MONOTONIC`, which containers on one
+  host share. X event timestamps are millisecond-grained and per-server, so they are useless for
+  this. CI gates on a loose loopback budget, set from M0 measurements, that catches regressions
+  without flaking. On the owner's LAN, latency is measured as halved round trips through an echo,
+  and the budget there (initially p99 under 2 ms added) is an acceptance check for input sharing,
+  not a CI gate.
+- **Soak:** a 24-hour run with random copy, paste and input, with zero leaks, zero stuck keys and
+  zero lost entries.
+
+### 5.8 Toolchain
+
+- Docker image pinned by digest, with apt from a dated snapshot (TC-9). Rust pinned in
+  `rust-toolchain.toml`, plus one pinned nightly, used only for cargo-fuzz.
+- `./check` is the one gate command (TC-5): `cargo fmt --check`, `clippy` with `-D warnings`
+  (pedantic, plus the parser no-panic lints), `cargo deny`, tests, fuzz seed corpora, and the
+  conformance matrix. CI runs exactly `./check`.
+- `Cargo.lock` committed, builds `--locked`. Each dependency is justified in
+  `docs/dependencies.md` (TC-7).
+- `[workspace.lints]` carries `unsafe_code = "forbid"` to every crate except `x11-input`.
+  Release profile: `overflow-checks = true`. `panic = "unwind"` in `jackstayd`, so a panic in one
+  connection's or transfer's handler can be caught at that task's boundary and costs that
+  connection, not the daemon. To be measured in M0, not assumed, including: what a panic while
+  holding a `std::sync::Mutex` does to the next locker (poisoning); whether tokio's `JoinHandle`
+  really contains a task panic; and what happens to a panic on the blocking X poll threads, which
+  no runtime catches (a supervisor thread that turns it into a clean daemon restart is the
+  fallback).
+- **For the Rust appendix**, the standard's session asked for these to be measured in M0, each
+  with its exact setting, tool version, planted bug, command and exit status: which clippy
+  restriction lints are livable in parsers (`indexing_slicing`, `arithmetic_side_effects` against
+  checked or wrapping types, `unwrap_used`, `expect_used`, `panic`, `string_slice`); whether
+  `[workspace.lints]` reaches every crate; `overflow-checks` and the choice of panic strategy;
+  whether cargo-fuzz finds a planted out-of-bounds parse, and how fast; what cargo-mutants reports
+  for a test cut off by its timeout; and whether `--locked` and cargo-deny catch planted lockfile
+  drift and a planted advisory.
 
 ## 6. Milestones
 
-To be written after §5.
+Ordered so that the owner gets the highest-priority target into daily use first, each milestone is
+usable on its own, and each target's main control exists before the owner depends on it.
+
+| | Milestone | Done when |
+|---|---|---|
+| M0 | Skeleton and spikes | Workspace, Docker image, `./check`, CI, lint and deny configs, one planted bug per control watched failing; the standard session's measurement list (§5.8) answered; spikes: XTest motion triggers barriers on Xvfb, and whether XTest keys stay down after the injecting client dies |
+| M1 | Headless clipboard manager | Capture, keep-alive, CLIPBOARD_MANAGER, history store, clipman import, `jackstay popup` placeholder; core tier of the conformance matrix in `./check` |
+| M2 | Clipboard UI and application tier | Popup, tray, settings; application tier of the matrix. **Dogfood:** the owner disables clipman for two weeks; done when no lost or wrong entry is reported, and every report has become a matrix case |
+| M3 | Link | Pairing, QUIC session, reconnect, heartbeat, two-machine harness |
+| M4 | Input sharing | §5.3 working; latency acceptance on the owner's LAN. **Dogfood:** the owner runs Jackstay instead of Synergy for input (Synergy stays installed as the fallback), with Synergy's clipboard sharing missed for the duration |
+| M5 | Clipboard sharing | §5.4 working; the owner uninstalls Synergy |
+| M6 | Hardening and packaging | Soak test passing, fuzzing in CI, a `.deb` |
+
+Input sharing comes before clipboard sharing because §5.4 takes ownership on Jackstay's own pointer
+arrival, which needs Jackstay's input sharing. While Synergy still moves the pointer there is no
+arrival event, and both programs would fight over ownership. The cost is that M4's dogfood has no
+cross-machine clipboard. If that proves unbearable, M4 and M5 dogfood together.
 
 ## 7. Red team
 
@@ -253,3 +530,32 @@ A separately briefed adversarial reviewer, which checked claims against sources.
 | J3 | The split is justified by crash isolation, not stalls; the socket is a new attack surface | Accepted. 0700 dir, SO_PEERCRED, fuzzed and versioned protocol |
 | J4 | Barriers, grab failure, XTest release, CLIPBOARD_MANAGER, remote timestamps unnamed | Accepted. Listed under "Hard problems" |
 | J5 | Transport is a stack decision | Accepted. QUIC via quinn |
+
+### Pass 2 — §5 architecture and §6 milestones, 2026-10-23
+
+A separately briefed adversarial reviewer. Two of its claims were checked on the owner's machine
+and corrected. Firefox is an apt package there (156.0), not a snap; Chromium is snap-only. The
+owner runs the standalone `xfce4-clipman` process (so it is detectable by name), as well as the
+panel plugin variant (which is not).
+
+| # | Finding | Resolution |
+|---|---|---|
+| F1 | INCR streamed from a remote peer cannot fail cleanly; a drop silently truncates | Accepted. Fetch the whole target, then serve; refuse before any byte, within about 3 s |
+| F2 | In M4, nothing triggers pointer arrival while Synergy moves the pointer; both claim ownership | Accepted. Input sharing (M4) before clipboard sharing (M5); Synergy's sharing must be off |
+| F3 | clipman runs in the panel's wrapper, so process detection fails | Partly wrong: the owner runs standalone `xfce4-clipman`. Detection by process, xfconf and behaviour |
+| F4 | A 2 ms p99 cannot be measured with X timestamps or across clocks; CI timing flakes | Accepted. `CLOCK_MONOTONIC` in the harness; loose CI gate; LAN check for acceptance |
+| F5 | Firefox and Chromium are snaps; drivers are unsized | Partly wrong (Firefox is apt here). Non-snap builds; drivers sized in M2 |
+| F6 | "Reclaim on restart" contradicts keep-alive | Accepted. Claim only if there is no owner |
+| F7 | Pairing contradicts "refuse unpaired"; a code from the keys can be ground | Accepted. Timed pairing mode; code from the TLS exporter; RFC 7250 considered |
+| F8 | The password hint is overclaimed | Accepted. Best effort; one-key marking; sensitive entries never persisted or shared |
+| J1 | The watchdog releases legitimately held keys; auto-repeat undesigned | Accepted. Held-key heartbeat; suspect at 300 ms and dead after seconds; the secondary repeats |
+| J2 | Modifiers and buttons held across a crossing | Accepted. No crossing mid-drag; modifier sync on every switch |
+| J3 | Datagram motion reorders against clicks | Accepted. Motion on stream 0 |
+| J4 | Keymap hashing gives false mismatches; borrowed keycodes are left by crashes | Accepted. Keycodes plus group; per-key fallback; restore at start and exit |
+| J5 | Capturing PRIMARY on its event gets stale text | Accepted. Wait for release; no PRIMARY keep-alive |
+| J6 | Keep-alive timestamp | Accepted. The XFixes event timestamp, never `CurrentTime` |
+| J7 | CLIPBOARD_MANAGER unspecified | Accepted. Spelled out in §5.2 |
+| J8 | Plaintext history; peers get excluded entries; whole-store rewrites | Accepted. Text and pinned only by default; content-addressed blobs; sensitive entries stay local |
+| J9 | Fetching every target burdens lazy renderers | Accepted. One canonical target per class |
+| J10 | The systemd unit has no start point; restart loop at logout | Accepted. Start from autostart after importing the environment; `RestartPreventExitStatus` |
+| J11 | Milestones: M1 too big, the matrix comes after dependence, no rollback, import, dogfood, RandR or `switch` | Accepted. M1 split; core matrix in M1; rollback, import, dogfood criteria, RandR, CLI added |
