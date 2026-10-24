@@ -105,7 +105,10 @@ whatever entry it was showing.
    this order, so text lands first:
    - text: `UTF8_STRING`, else `text/plain;charset=utf-8`, else `STRING`;
    - every other offered `text/*` target: HTML, RTF, `text/uri-list`, `text/x-moz-url` and the
-     like are small and are what rich paste needs;
+     like are small and are what rich paste needs. Not `text/plain` or
+     `text/plain;charset=utf-8` once a text is chosen: they are the same text again (GTK 3 and
+     Qt offer both beside `UTF8_STRING`), and Serving answers them from the text kept. Fetching
+     them kept a text two or three times over (found by the conformance matrix);
    - `x-special/gnome-copied-files`, `chromium/x-web-custom-data`;
    - vector images: `image/svg+xml`, `image/x-inkscape-svg`;
    - one raster image: `image/png`, else the first `image/*`. Jackstay serves other image types
@@ -179,7 +182,11 @@ about to exit. GTK 3 waits 10 s for the answer (gtkclipboard.c:2176) and Qt 5 s
    from a live application.
 2. **Which targets.** A missing property (GTK 3 sends `None` when its list is empty,
    gdkdisplay-x11.c:2486-2507; Qt deletes it first) or an empty list means everything offered.
-   Either way, the never-convert list is removed.
+   Either way, the never-convert list is removed, and so, once a text is kept or on its way, are
+   the text names Serving answers from it (`UTF8_STRING`, `text/plain;charset=utf-8`, `STRING`,
+   `text/plain`, `COMPOUND_TEXT`, `TEXT`): the owner would render the same text again, and GTK 3
+   takes over 20 s to render 20 MiB of non-ASCII text as `text/plain` while the application
+   waits to exit (found by the conformance matrix).
 3. **Fetch, within a 4 s budget,** reusing everything the capture of this owner already holds and
    extending that capture rather than starting a second one. On budget expiry, stop with what is
    held.

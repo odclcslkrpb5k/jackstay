@@ -41,6 +41,14 @@ RUN apt-get update --error-on=any --snapshot "${APT_SNAPSHOT}" \
  && apt-get install -y --no-install-recommends --snapshot "${APT_SNAPSHOT}" shellcheck \
  && rm -rf /var/lib/apt/lists/*
 
+# The conformance matrix's clients (docs/conformance.md): each toolkit's own clipboard code, and
+# xterm. Appended for the same reason.
+RUN apt-get update --error-on=any --snapshot "${APT_SNAPSHOT}" \
+ && apt-get install -y --no-install-recommends --snapshot "${APT_SNAPSHOT}" \
+      libgtk-3-dev libgtk-4-dev qt6-base-dev qt6-qpa-plugins libxcb-cursor0 \
+      xterm xfonts-base fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
+
 # Per-run caches live in the bind-mounted tree (gitignored), so the container runs as the host user.
 ENV JACKSTAY_DEV_CONTAINER=1 CARGO_HOME=/work/.cache/cargo \
     RUSTUP_TOOLCHAIN=1.99.1 \

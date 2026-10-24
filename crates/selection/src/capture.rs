@@ -117,6 +117,15 @@ const FALLBACKS: [&str; 3] = ["UTF8_STRING", "STRING", "image/png"];
 
 /// Text targets, best first; the first offered is fetched as the text.
 const TEXT_PREFERENCE: [&str; 3] = ["UTF8_STRING", "text/plain;charset=utf-8", "STRING"];
+/// Text targets the engine serves itself from whichever text it keeps (docs/selection.md,
+/// "Serving"): fetching them as well would keep the same text two or three times over.
+const TEXT_ALIASES: [&str; 2] = ["text/plain", "text/plain;charset=utf-8"];
+/// Every text target the engine serves from a text it keeps. A `SAVE_TARGETS` asking for these
+/// beside a text already kept or on its way is not obeyed for them: the owner would render the
+/// same text again (GTK 3 takes over 20 s for 20 MiB of non-ASCII `text/plain`, while the exiting
+/// application waits).
+const SERVED_FROM_TEXT: [&str; 6] =
+    ["UTF8_STRING", "text/plain;charset=utf-8", "STRING", "text/plain", "COMPOUND_TEXT", "TEXT"];
 /// Fetched whenever offered.
 const ALWAYS: [&str; 4] = [
     "x-special/gnome-copied-files",
@@ -218,6 +227,9 @@ impl Capture {
         let mut wanted = listed.to_vec();
         if all {
             wanted.extend_from_slice(&self.offered);
+        }
+        if self.has_text() {
+            wanted.retain(|t| !SERVED_FROM_TEXT.contains(&t.1.as_str()));
         }
         self.enqueue(cx.known, &wanted);
         if self.step == Step::Done {
@@ -363,6 +375,14 @@ impl Capture {
         self.next(cx)
     }
 
+    /// Whether a text is kept, being fetched, or queued.
+    fn has_text(&self) -> bool {
+        let is_text = |n: &TargetName| TEXT_PREFERENCE.contains(&n.as_str());
+        self.results.iter().any(|r| is_text(&r.name) && matches!(r.data, TargetData::Kept(_)))
+            || self.queue.iter().any(|q| is_text(&q.1))
+            || self.current_target().is_some_and(|c| is_text(&c.1))
+    }
+
     fn current_target(&self) -> Option<&(Atom, TargetName)> {
         match &self.step {
             Step::Converting { target, .. } | Step::Incr { target, .. } => Some(target),
@@ -423,7 +443,8 @@ impl Capture {
         queue.extend(text.clone());
         for t in offered.iter().filter(usable) {
             let name = t.1.as_str();
-            let other_text = name.starts_with("text/") && Some(t) != text.as_ref();
+            let alias = text.is_some() && TEXT_ALIASES.contains(&name);
+            let other_text = name.starts_with("text/") && Some(t) != text.as_ref() && !alias;
             if other_text || ALWAYS.contains(&name) {
                 queue.push(t.clone());
             }
@@ -442,6 +463,9 @@ impl Capture {
         let EarlySave { all, listed: mut saved } = std::mem::take(&mut self.early_save);
         if all {
             saved.extend_from_slice(&self.offered);
+        }
+        if self.has_text() {
+            saved.retain(|t| !SERVED_FROM_TEXT.contains(&t.1.as_str()));
         }
         self.enqueue(cx.known, &saved);
     }

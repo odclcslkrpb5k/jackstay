@@ -353,6 +353,118 @@ fn save_targets_from_the_owner_fetches_what_it_lists_but_never_delete_then_takes
 }
 
 #[test]
+fn save_targets_does_not_fetch_again_the_text_names_served_from_the_kept_text() {
+    let mut x = FakeX::new();
+    let mut e = firefox_copies(&mut x, "kept", 300);
+    x.take_calls();
+    let list = x.atom_list(&[
+        "UTF8_STRING",
+        "STRING",
+        "TEXT",
+        "COMPOUND_TEXT",
+        "text/plain",
+        "text/plain;charset=utf-8",
+        "application/x-office",
+    ]);
+    let save = x.a("SAVE_LIST");
+    x.put(FIREFOX, save, "ATOM", Format::Bits32, &list);
+    send!(e, &mut x, save_request(&mut x, FIREFOX, Some("SAVE_LIST"), 500), Millis(10));
+    let (target, p) = one(x.converts());
+    assert_eq!(target, "application/x-office");
+    let r = send!(
+        e,
+        &mut x,
+        answer(&mut x, "application/x-office", p, "application/x-office", Format::Bits8, b"doc"),
+        Millis(11),
+    );
+    assert!(r.contains(&Report::SaveAnswered { taken: true }), "nothing else asked for");
+    let (content, _) = some(captured(&r));
+    assert!(content.kept("STRING").is_none());
+}
+
+/// Firefox offers `offered`; returns the engine with the first conversion after `TARGETS` still
+/// outstanding, and that conversion's target and property.
+fn offering(x: &mut FakeX, offered: &[&str]) -> (jackstay_selection::Engine, String, Atom) {
+    let (mut e, _) = engine(x);
+    x.take_calls();
+    send!(e, x, set(x, Some(FIREFOX), 300), Millis(0));
+    let (_, tp) = one(x.converts());
+    let list = x.atom_list(offered);
+    send!(e, x, answer(x, "TARGETS", tp, "ATOM", Format::Bits32, &list), Millis(1));
+    let (target, p) = one(x.converts());
+    (e, target, p)
+}
+
+/// Asks the engine to save `listed`, and answers each conversion it then makes, in order.
+fn save_and_fetch(
+    x: &mut FakeX,
+    e: &mut jackstay_selection::Engine,
+    listed: &[&str],
+) -> Vec<String> {
+    let list = x.atom_list(listed);
+    let save = x.a("SAVE_LIST");
+    x.put(FIREFOX, save, "ATOM", Format::Bits32, &list);
+    send!(e, x, save_request(x, FIREFOX, Some("SAVE_LIST"), 500), Millis(10));
+    let mut fetched = Vec::new();
+    let mut at = 11;
+    while let [(t, p)] = x.converts().as_slice() {
+        let (t, p) = (t.clone(), *p);
+        send!(e, x, answer(x, &t, p, &t, Format::Bits8, b"t"), Millis(at));
+        fetched.push(t);
+        at += 1;
+    }
+    fetched
+}
+
+#[test]
+fn without_a_text_kept_save_targets_fetches_the_text_names_it_lists() {
+    // An image: no text held, so the owner's own text names are the only text there is.
+    let mut x = FakeX::new();
+    let (mut e, first, p) = offering(&mut x, &["image/png", "STRING", "TEXT"]);
+    assert_eq!(first, "STRING", "STRING is the text when it is all there is");
+    send!(e, &mut x, refuse(&mut x, "STRING"), Millis(2));
+    let (png, p2) = one(x.converts());
+    assert_eq!(png, "image/png");
+    let _ = p;
+    send!(
+        e,
+        &mut x,
+        answer(&mut x, "image/png", p2, "image/png", Format::Bits8, b"png"),
+        Millis(3)
+    );
+    // The text was refused, so none is kept: TEXT, asked for again at SAVE_TARGETS, is fetched.
+    assert_eq!(save_and_fetch(&mut x, &mut e, &["image/png", "TEXT"]), ["TEXT"]);
+}
+
+#[test]
+fn a_save_targets_while_the_text_is_being_fetched_does_not_fetch_its_other_names() {
+    let mut x = FakeX::new();
+    let (mut e, first, p) = offering(&mut x, &["UTF8_STRING", "STRING", "application/x-doc"]);
+    assert_eq!(first, "UTF8_STRING");
+    // SAVE_TARGETS arrives with UTF8_STRING still outstanding.
+    let list = x.atom_list(&["UTF8_STRING", "STRING", "application/x-doc"]);
+    let save = x.a("SAVE_LIST");
+    x.put(FIREFOX, save, "ATOM", Format::Bits32, &list);
+    send!(e, &mut x, save_request(&mut x, FIREFOX, Some("SAVE_LIST"), 500), Millis(2));
+    assert_eq!(x.converts(), vec![]);
+    send!(
+        e,
+        &mut x,
+        answer(&mut x, "UTF8_STRING", p, "UTF8_STRING", Format::Bits8, b"t"),
+        Millis(3)
+    );
+    let (next, p2) = one(x.converts());
+    assert_eq!(next, "application/x-doc", "not STRING");
+    send!(
+        e,
+        &mut x,
+        answer(&mut x, "application/x-doc", p2, "application/x-doc", Format::Bits8, b"d"),
+        Millis(4)
+    );
+    assert_eq!(x.converts(), vec![]);
+}
+
+#[test]
 fn save_targets_with_no_property_saves_everything_and_replies_on_save_targets() {
     let mut x = FakeX::new();
     let (mut e, _) = engine(&mut x);

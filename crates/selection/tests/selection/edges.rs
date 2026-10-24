@@ -366,6 +366,50 @@ fn without_png_the_first_raster_image_is_fetched_not_a_vector_one() {
     assert_eq!(one(x.converts()).0, "image/bmp");
 }
 
+/// Answers each conversion the engine asks for in turn, returning the targets in the order asked.
+fn fetch_all(x: &mut FakeX, e: &mut jackstay_selection::Engine, offered: &[&str]) -> Vec<String> {
+    send!(e, x, set(x, Some(FIREFOX), 10), Millis(0));
+    let (_, tp) = one(x.converts());
+    let list = x.atom_list(offered);
+    send!(e, x, answer(x, "TARGETS", tp, "ATOM", Format::Bits32, &list), Millis(0));
+    let mut fetched = Vec::new();
+    let mut at = 1;
+    while let [(target, p)] = x.converts().as_slice() {
+        let (target, p) = (target.clone(), *p);
+        send!(e, x, answer(x, &target, p, &target, Format::Bits8, b"t"), Millis(at));
+        fetched.push(target);
+        at += 1;
+    }
+    fetched
+}
+
+#[test]
+fn text_is_fetched_once_not_again_under_the_names_served_from_it() {
+    // What GTK 3 and Qt offer for a text: the engine serves the plain aliases from UTF8_STRING.
+    let mut x = FakeX::new();
+    let (mut e, _) = engine(&mut x);
+    x.take_calls();
+    let offered = [
+        "text/plain;charset=utf-8",
+        "text/plain",
+        "UTF8_STRING",
+        "text/plain;charset=utf-16",
+        "text/html",
+    ];
+    assert_eq!(
+        fetch_all(&mut x, &mut e, &offered),
+        ["UTF8_STRING", "text/plain;charset=utf-16", "text/html"]
+    );
+    // Without UTF8_STRING the UTF-8 alias is the text, fetched once.
+    let mut x = FakeX::new();
+    let (mut e, _) = engine(&mut x);
+    x.take_calls();
+    assert_eq!(
+        fetch_all(&mut x, &mut e, &["text/plain", "text/plain;charset=utf-8"]),
+        ["text/plain;charset=utf-8"]
+    );
+}
+
 #[test]
 fn an_incr_announcing_exactly_the_room_left_is_received() {
     let mut x = FakeX::new();
