@@ -157,6 +157,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jackstayd"
+version = "0.0.0"
+dependencies = [
+ "jackstay-clip",
+ "jackstay-selection",
+ "jackstay-store",
+ "proptest",
+ "rustix",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"

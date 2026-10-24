@@ -86,21 +86,31 @@ not a document; `~/.local/state` is less often backed up than `~/.local/share`.
   canonical spelling; parsed with no-panic code and fuzzed (BD-1, TS-16). The format, with an
   example, is defined in `crates/store/src/index.rs`. Reading raises `next-id` above every id read,
   and says whether the file ended where a written index ends.
-- **Writing** (store thread). The clipboard thread sends the store a *snapshot*: the whole current
-  history (cheap: entries share their content through `Arc`) and the `cleared` flag, marked
-  *urgent* for clears and deletions. The store coalesces: if several snapshots are waiting it
-  writes only the latest. From the snapshot it computes the blobs needed, writes the missing ones
-  (each `fsync`ed), and then:
-  - for an urgent snapshot: unlinks the blobs no longer referenced, then writes the index;
-  - otherwise: writes the index, then unlinks.
-  The index is written to `index.tmp`, `fsync`ed, renamed, and the directory `fsync`ed. Ordinary
-  snapshots are written at most once a second; urgent ones at once, and acknowledged.
+- **Writing** (store thread, `crates/jackstayd/src/store.rs`). The clipboard thread sends the
+  store a *snapshot*: the whole current history (cheap: entries share their content through `Arc`)
+  and the `cleared` flag, marked *urgent* for clears and deletions. The store coalesces: if several
+  snapshots are waiting it writes only the latest.
+  - An urgent snapshot first unlinks the blobs no longer referenced and `fsync`s `blobs/`, so the
+    bytes are gone, durably, even if a write then fails (a full disk); then writes the missing
+    blobs, then the index.
+  - An ordinary one writes the missing blobs, then the index, then unlinks (and `fsync`s), so the
+    old index never names a missing blob.
+  - Each blob is written to `.tmp-<hash>` (`O_EXCL | O_NOFOLLOW`, `0600`), `fsync`ed and renamed;
+    `blobs/` is `fsync`ed before the index names it. The index is written to `index.tmp`,
+    `fsync`ed, renamed, and the directory `fsync`ed.
+  - Ordinary snapshots are written at most once a second; urgent ones at once, and acknowledged
+    once on disk. A failed save is reported, kept, and retried every second (as urgent) until it
+    succeeds or a newer snapshot replaces it; the latest is written at stop.
 - **Reading at start.** Records are parsed one by one: a bad record is dropped and logged (by
   number, never content) and the rest kept. If the header itself is unreadable, the index *and*
   `blobs/` are moved aside together (`*.broken-<time>`) for recovery, nothing is deleted, and
   history starts empty: a corrupt store never stops the clipboard (plan §5.2). Entries whose blob is
-  missing are dropped. Blob hashes are verified on the store thread after start, never before
-  serving; a mismatch drops that entry. Unreferenced blobs are deleted only after a clean read.
+  missing are dropped; if the newest one is, the history counts as cleared (a clear may have
+  deleted its blob without reaching the index, and nothing older may take its place on the
+  clipboard). Blob hashes are verified on the store thread after start, a few between requests,
+  never before serving; a mismatch drops that entry. After a clean read (nothing dropped, the file
+  whole), blobs no entry names (written just before a crash) and interrupted writes are deleted;
+  after any other read they are kept for recovery until the history is cleared.
 - **Restart restore.** If the index's `cleared` flag is set, nothing is served. Otherwise the newest
   entry is served **only if CLIPBOARD has no owner** (`Clipboard::restore`: the check and the
   claim happen under a server grab, so an application claiming meanwhile wins; docs/selection.md,
