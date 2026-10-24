@@ -3,7 +3,7 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use jackstay_proto::control::{Error, Kinds, Request, Response, Summary, printable};
@@ -19,12 +19,20 @@ commands:
   pin ID | unpin ID          keep an entry through clears and limits, or not
   clear                      clear the clipboard, deleting what was on it unless pinned
   clear-history              delete every unpinned entry and clear the clipboard
-  import-clipman [--remove]  import xfce4-clipman's history; --remove deletes its files after";
+  import-clipman [--remove]  import xfce4-clipman's history; --remove deletes its files after
+  popup                      the history popup, for a hotkey (not built yet: says so, exit 4)";
 
-/// Exit statuses: 0 done, 1 refused by the daemon, 2 bad usage, 3 the daemon unreachable.
+/// Exit statuses: 0 done, 1 refused by the daemon, 2 bad usage, 3 the daemon unreachable, 4 not
+/// in this version.
 const REFUSED: u8 = 1;
 const USAGE_ERROR: u8 = 2;
 const UNREACHABLE: u8 = 3;
+const NOT_YET: u8 = 4;
+
+/// What `jackstay popup` says until the popup exists (plan §6, M2). The command is there now so
+/// that a hotkey bound to it keeps working when the popup arrives.
+const POPUP_NOT_YET: &str = "the history popup is not built yet; for now: jackstay list, then \
+                             jackstay select ID";
 
 /// How many entries one page of `list --all` asks for.
 const PAGE: u32 = 500;
@@ -35,8 +43,26 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err((code, message)) => {
             eprintln!("jackstay: {message}");
+            // Run from a hotkey, nothing shows stderr.
+            let skip = if args.first().is_some_and(|a| a == "--runtime-dir") { 2 } else { 0 };
+            if args.get(skip).is_some_and(|a| a == "popup") {
+                notify(&message);
+            }
             ExitCode::from(code)
         }
+    }
+}
+
+/// A desktop notification, if there is a display and `notify-send` (Xubuntu's xfce4-notifyd
+/// answers it); otherwise nothing.
+fn notify(message: &str) {
+    if std::env::var_os("DISPLAY").is_some() {
+        let _ = Command::new("notify-send")
+            .args(["--app-name=Jackstay", "Jackstay", message])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -78,8 +104,14 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
         args.first().and_then(|a| a.to_str()).ok_or_else(|| usage("no command"))?.to_owned();
     let rest = args.get(1..).unwrap_or_default();
     let mut all = false;
+    let mut popup = false;
     let request = match (command.as_str(), rest) {
         ("status", []) => Request::Status,
+        // Asks for the status only to say whether the daemon runs, which the popup will need.
+        ("popup", []) => {
+            popup = true;
+            Request::Status
+        }
         ("list", []) => Request::List { offset: 0, limit: 20 },
         ("list", [flag]) if flag == "--all" => {
             all = true;
@@ -113,6 +145,12 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
         return list_all(&mut client);
     }
     let response = client.ask(&request).map_err(|e| failed(&e))?;
+    if popup {
+        return match response {
+            Response::Status(_) => Err((NOT_YET, POPUP_NOT_YET.to_owned())),
+            other => show(&request, other),
+        };
+    }
     show(&request, response)
 }
 

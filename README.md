@@ -20,7 +20,7 @@ Jackstay is intended to replace both [Synergy](https://symless.com/synergy) and
 
 ## Status
 
-Early development. Working now: the clipboard manager (`jackstayd` and the `jackstay` command):
+Early development. Milestone M1 is done. Working now: the clipboard manager (`jackstayd` and the `jackstay` command):
 history of CLIPBOARD copies kept after their application quits, restored after a restart,
 clearing, pinning and xfce4-clipman's history imported. Not yet: the popup and tray (M2), and
 sharing between machines (M3 to M5). See [the plan](docs/plan.md) and
@@ -57,6 +57,7 @@ jackstay delete ID
 jackstay clear           # clear the clipboard and delete what was on it, unless pinned
 jackstay clear-history   # delete every unpinned entry and clear the clipboard
 jackstay status
+jackstay popup           # for a hotkey; the popup itself comes next (M2), until then it says so
 ```
 
 Nothing copied is filtered or hidden: a copied password is kept like anything else, and
