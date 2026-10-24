@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Installs Jackstay for this user (README, "Install"): builds in the dev container, then copies the
-# binaries to ~/.local/bin, the systemd user unit and an XDG autostart entry to ~/.config. Nothing
+# binaries to ~/.local/bin, the systemd user units and an XDG autostart entry to ~/.config, and the
+# tray's icon to ~/.local/share/icons. Nothing
 # outside the home directory is touched, and the history in ~/.local/state/jackstay is kept by
 # --uninstall.
 set -euo pipefail
@@ -45,6 +46,10 @@ done
 config=${XDG_CONFIG_HOME:-$HOME/.config}
 [[ "$config" == /* ]] || config=$HOME/.config
 bin=$HOME/.local/bin
+data=${XDG_DATA_HOME:-$HOME/.local/share}
+[[ "$data" == /* ]] || data=$HOME/.local/share
+icon_dir=$data/icons/hicolor/scalable/apps
+icons=(jackstay.svg jackstay-symbolic.svg)
 unit_dir=$config/systemd/user
 autostart_dir=$config/autostart
 programs=(jackstayd jackstay jackstay-ui)
@@ -83,7 +88,7 @@ if ((uninstall)); then
     [[ -n "$binding" ]] && xfconf-query -c xfce4-keyboard-shortcuts -p "$binding" -r
   done < <(popup_bindings)
   rm -f "$autostart_dir/jackstay.desktop" "${units[@]/#/$unit_dir/}" \
-    "$bin/jackstay-session" "${programs[@]/#/$bin/}"
+    "$bin/jackstay-session" "${programs[@]/#/$bin/}" "${icons[@]/#/$icon_dir/}"
   user_systemctl daemon-reload
   printf 'removed; the history is still in %s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/jackstay"
   printf 'to have xfce4-clipman back, run it: xfce4-clipman &\n'
@@ -111,6 +116,10 @@ done
 write_file "$bin/jackstay-session" 0755 <data/jackstay-session
 for unit in "${units[@]}"; do
   write_file "$unit_dir/$unit" 0644 <"data/systemd/$unit"
+done
+# The tray's icon, named by its IconName and found through its IconThemePath (docs/ui.md).
+for icon in "${icons[@]}"; do
+  write_file "$icon_dir/$icon" 0644 <"data/icons/$icon"
 done
 sed "s|^Exec=jackstay-session\$|Exec=$bin/jackstay-session|" data/autostart/jackstay.desktop \
   | write_file "$autostart_dir/jackstay.desktop" 0644

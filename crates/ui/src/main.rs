@@ -9,6 +9,7 @@ use std::rc::Rc;
 use gtk::glib;
 use jackstay_ui::listen::{self, ListenError};
 use jackstay_ui::popup::Popup;
+use jackstay_ui::tray::{self, Action};
 use jackstay_ui::worker;
 
 /// Exit statuses, as the daemon's: 2 bad setup, 3 another UI running, 5 no display.
@@ -82,7 +83,16 @@ fn main() {
         }
     };
     let popup = Popup::new(jobs);
+    let tray_popup = Rc::clone(&popup);
     POPUP.with(|p| *p.borrow_mut() = Some(popup));
+    // Without a session bus there is no tray; the popup still works from its hotkey.
+    if let Err(e) = tray::start(move |action| match action {
+        Action::ShowHistory => tray_popup.request(),
+        Action::ClearClipboard => tray_popup.clear(),
+        Action::ClearHistory => tray_popup.confirm_clear_history(),
+    }) {
+        log(&format!("no tray icon: {e}"));
+    }
     if let Err(e) = listener.serve(|| on_popup(Popup::request)) {
         log(&format!("ui socket: {e}"));
         std::process::exit(BAD_SETUP);

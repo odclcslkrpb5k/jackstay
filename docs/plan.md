@@ -176,8 +176,10 @@ one crate that both processes use (RP-5, TS-7), so the two sides cannot drift.
 - **History popup:** an override-redirect GTK window owned by the UI, opened at the pointer by
   `jackstay popup`. Its hotkey is registered in Xfce's `xfce4-keyboard-shortcuts` xfconf channel
   (as `xfce4-popup-clipman` is), not with `XGrabKey`, which would collide with xfsettingsd's grabs.
-- **Tray:** a StatusNotifierItem through [ksni](https://crates.io/crates/ksni) (pure Rust, zbus).
-  gtk3-rs has no SNI support. Xfce 4.20's systray hosts SNI items with dbusmenu menus, but the
+- **Tray:** a StatusNotifierItem. Planned through [ksni](https://crates.io/crates/ksni) (pure
+  Rust, zbus); built instead on gio's D-Bus, which gtk-rs links already, since ksni would have
+  added 107 crates for two small interfaces (docs/ui.md, "The tray", 2026-10-24). gtk3-rs has no
+  SNI support. Xfce 4.20's systray hosts SNI items with dbusmenu menus, but the
   panel owns that menu and cannot open it at the pointer, so it is a secondary entry point only.
 - **Images:** the daemon decodes clipboard images with pure-Rust decoders and hands the UI raw
   RGBA thumbnails with size limits. gdk-pixbuf (C) never decodes untrusted bytes.

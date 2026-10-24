@@ -46,7 +46,7 @@ FAKE
 chmod +x "$fakes/xfconf-query"
 
 install() {
-  HOME=$home XDG_CONFIG_HOME="" PATH="$fakes:$PATH" tools/install --from "$built" "$@"
+  HOME=$home XDG_CONFIG_HOME="" XDG_DATA_HOME="" PATH="$fakes:$PATH" tools/install --from "$built" "$@"
 }
 
 install
@@ -56,6 +56,10 @@ done
 cmp -s "$built/jackstayd" "$home/.local/bin/jackstayd" || fail "jackstayd is not the built one"
 for unit in jackstayd.service jackstay-ui.service; do
   cmp -s "data/systemd/$unit" "$home/.config/systemd/user/$unit" || fail "$unit differs"
+done
+for icon in jackstay.svg jackstay-symbolic.svg; do
+  cmp -s "data/icons/$icon" "$home/.local/share/icons/hicolor/scalable/apps/$icon" \
+    || fail "$icon not installed"
 done
 grep -qx "Exec=$home/.local/bin/jackstay-session" "$home/.config/autostart/jackstay.desktop" \
   || fail "autostart entry does not run the installed jackstay-session"
@@ -96,7 +100,8 @@ install --uninstall >/dev/null
 grep -qxF '/commands/custom/<Alt>F2 xfce4-appfinder' "$xfconf" || fail "the user's binding removed"
 for f in .local/bin/jackstayd .local/bin/jackstay .local/bin/jackstay-ui \
   .local/bin/jackstay-session .config/systemd/user/jackstayd.service \
-  .config/systemd/user/jackstay-ui.service .config/autostart/jackstay.desktop; do
+  .config/systemd/user/jackstay-ui.service .config/autostart/jackstay.desktop \
+  .local/share/icons/hicolor/scalable/apps/jackstay.svg; do
   [[ ! -e "$home/$f" ]] || fail "$f not removed"
 done
 [[ -e "$home/.local/state/jackstay/index" ]] || fail "the history was removed"

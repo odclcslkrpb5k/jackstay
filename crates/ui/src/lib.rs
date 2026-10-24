@@ -4,4 +4,5 @@
 pub mod listen;
 pub mod model;
 pub mod popup;
+pub mod tray;
 pub mod worker;

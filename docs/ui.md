@@ -2,7 +2,7 @@
 
 `jackstay-ui` (`crates/ui`), in Rust with gtk3-rs (plan §4.3). It holds no history: everything it
 shows comes from `jackstayd` over the control socket, and everything it changes goes back the same
-way. The popup comes first; the tray and the settings window follow.
+way. The popup and the tray icon are done; the settings window follows.
 
 ## The popup
 
@@ -28,6 +28,30 @@ way. The popup comes first; the tray and the settings window follow.
 - Nothing is filtered or hidden (plan §3): a copied password shows like anything else, and
   clearing is how to get rid of it.
 - If the daemon cannot be reached, the popup opens anyway, empty, saying why.
+
+## The tray
+
+A StatusNotifierItem, which Xfce 4.20's systray hosts beside the legacy XEmbed icons (clipman's
+among them). A click on the icon opens the history popup at the pointer, as clipman's icon opens
+its history. The menu, which the panel draws and opens, has **Show history**, **Clear
+clipboard**, and **Clear history…**, which asks first in a dialog whose default is Cancel (the
+popup's second press cannot work from a menu).
+
+- Exported through GLib's own D-Bus (gio), which gtk-rs links already: the
+  `org.kde.StatusNotifierItem` interface at `/StatusNotifierItem` and `com.canonical.dbusmenu` at
+  `/MenuBar`, under the name `org.kde.StatusNotifierItem-<pid>-1`. The plan named the `ksni`
+  crate; it would have added 107 crates (zbus and an async runtime) for two small interfaces.
+  gtk-rs 0.19 does not bind `GtkStatusIcon`, so clipman's XEmbed icon is not an option without
+  `unsafe`.
+- The item registers with `org.kde.StatusNotifierWatcher` only once its name is owned (a host
+  quick to look would otherwise find nothing), and again whenever a watcher appears: a panel
+  restarted, or started after the UI.
+- The icon is `jackstay` (data/icons), installed by `tools/install` into
+  `~/.local/share/icons/hicolor/scalable/apps` and named to the panel through `IconThemePath`.
+- Without a session bus there is no tray, and the journal says so; the popup still works from
+  its hotkey.
+- A reply of the wrong D-Bus type is dropped by GLib, and the host shows no menu: the menu's
+  replies are built as tuples of their members, and `tests/tray_menu.rs` checks every type.
 
 ## Threads
 
@@ -58,6 +82,12 @@ keyboard shortcuts (`/commands/custom/KEYS` in the `xfce4-keyboard-shortcuts` ch
 `--uninstall` removes only that binding.
 
 ## Tests
+
+`crates/ui/tests/tray.rs` runs the UI on a private session bus with a stand-in watcher, and plays
+the panel with `gdbus`: the item's registration and properties, the menu's layout, a click on the
+icon, each menu item (the dialog's Cancel default included), a host's `EventGroup`, a panel
+restarting, and no session bus at all. The tests give every UI `DBUS_SESSION_BUS_ADDRESS`
+(`disabled:` when they want no bus): unset, GLib would try to start one.
 
 `crates/ui/tests/popup.rs` runs the real `jackstay-ui` on Xvfb, driven with xdotool (keys go
 through its grab, as a person's do), against a stand-in daemon that records every request: Enter,

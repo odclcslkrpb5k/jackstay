@@ -23,6 +23,9 @@ const GRAB_EVERY: Duration = Duration::from_millis(25);
 /// The title, which also names the window to tests and `xdotool`.
 pub const TITLE: &str = "Jackstay history";
 
+/// The tray's confirmation dialog's title, which also names it to tests.
+pub const CLEAR_HISTORY_TITLE: &str = "Clear history";
+
 const HINT: &str = "Enter: paste   Ctrl+P: pin   Ctrl+D: delete   Esc: close";
 
 #[derive(Debug, Default)]
@@ -271,9 +274,36 @@ impl Popup {
         }
     }
 
-    fn clear(&self) {
+    /// Clears the clipboard, and closes the popup if it is open.
+    pub fn clear(&self) {
         self.send(Job::Clear);
         self.close();
+    }
+
+    /// Asks, in a dialog, whether to clear the history (from the tray, where a second press
+    /// cannot ask); clears it if so. Cancel is the default.
+    pub fn confirm_clear_history(self: &Rc<Self>) {
+        let dialog = gtk::MessageDialog::new(
+            None::<&gtk::Window>,
+            gtk::DialogFlags::MODAL,
+            gtk::MessageType::Question,
+            gtk::ButtonsType::None,
+            "Clear the clipboard and every unpinned entry?",
+        );
+        dialog.set_title(CLEAR_HISTORY_TITLE);
+        dialog.set_secondary_text(Some("Pinned entries are kept."));
+        dialog.add_button("_Cancel", gtk::ResponseType::Cancel);
+        dialog.add_button("C_lear history", gtk::ResponseType::Accept);
+        dialog.set_default_response(gtk::ResponseType::Cancel);
+        let p = Rc::clone(self);
+        dialog.connect_response(move |d, response| {
+            if response == gtk::ResponseType::Accept {
+                p.send(Job::ClearHistory);
+            }
+            d.close();
+        });
+        dialog.show_all();
+        dialog.present();
     }
 
     fn clear_history_pressed(&self) {

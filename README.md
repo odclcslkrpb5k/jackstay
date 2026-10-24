@@ -20,11 +20,11 @@ Jackstay is intended to replace both [Synergy](https://symless.com/synergy) and
 
 ## Status
 
-Early development. Working now: the clipboard manager (`jackstayd`), its history popup
-(`jackstay-ui`) and the `jackstay` command: CLIPBOARD copies kept after their application quits
-and restored after a restart, a searchable history at the pointer, clearing, pinning, and
-xfce4-clipman's history imported. Not yet: the tray and settings (M2), and sharing between
-machines (M3 to M5). See [the plan](docs/plan.md), [the daemon](docs/daemon.md) and
+Early development. Working now: the clipboard manager (`jackstayd`), its history popup and tray
+icon (`jackstay-ui`) and the `jackstay` command: CLIPBOARD copies kept after their application
+quits and restored after a restart, a searchable history at the pointer or from the tray,
+clearing, pinning, and xfce4-clipman's history imported. Not yet: settings (M2), and sharing
+between machines (M3 to M5). See [the plan](docs/plan.md), [the daemon](docs/daemon.md) and
 [the desktop side](docs/ui.md).
 
 ## Install
