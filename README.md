@@ -1,3 +1,5 @@
+<p align="center"><img src="data/icons/jackstay.svg" width="128" alt="Jackstay icon: a clipboard hanging from a line between two posts"></p>
+
 # Jackstay
 
 Keyboard, mouse, and clipboard sharing across machines, plus clipboard management — for Xubuntu / Xfce4 on X11.
