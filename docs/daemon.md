@@ -82,8 +82,10 @@ not a document; `~/.local/state` is less often backed up than `~/.local/share`.
 - `blobs/<sha256 hex>`: one file per distinct kept target's bytes.
 - `index`: a version line, the next entry id, a `cleared` flag, then one record per entry, newest
   first: id, copied-at, pinned, source, and per target its name and either `kept <type> <format>
-  <sha256>` or `not-kept <reason>`. Every field percent-escaped; parsed with no-panic code and
-  fuzzed (BD-1, TS-16).
+  <sha256>` or `not-kept <reason>`, then an `end` line. Every field percent-escaped in one
+  canonical spelling; parsed with no-panic code and fuzzed (BD-1, TS-16). The format, with an
+  example, is defined in `crates/store/src/index.rs`. Reading raises `next-id` above every id read,
+  and says whether the file ended where a written index ends.
 - **Writing** (store thread). The clipboard thread sends the store a *snapshot*: the whole current
   history (cheap: entries share their content through `Arc`) and the `cleared` flag, marked
   *urgent* for clears and deletions. The store coalesces: if several snapshots are waiting it
@@ -136,6 +138,9 @@ plugin.c:183, 196):
   (plugin.c:186), and every save rewrites the directory (plugin.c:226-238), so images exist only
   if something was copied since clipman last started. Nothing is saved at all if clipman's
   save-on-quit is off (plugin.c:241-243).
+
+The file is read as GLib reads it (`crates/store/src/clipman.rs`): one clipman would refuse to
+load imports nothing, and empty items are skipped as clipman skips them.
 
 Import, on first start (no `imported-clipman` marker) and on `jackstay import-clipman`: images then
 texts, oldest first, each added at the **back** of history (older than anything Jackstay has),

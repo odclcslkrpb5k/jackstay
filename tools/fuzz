@@ -1,19 +1,29 @@
 #!/usr/bin/env bash
-# Fuzzes every target for the given number of seconds each (default 60), on the pinned nightly.
-# New inputs that reach new code are added to the corpus; commit them after `cargo fuzz cmin`.
+# Fuzzes every target of every fuzz crate (crates/*/fuzz) for the given number of seconds each
+# (default 60), on the pinned nightly. New inputs that reach new code are added to the corpus;
+# commit them after `cargo fuzz cmin`.
 # Run inside the dev container: ./dev tools/fuzz [seconds]
 set -euo pipefail
 IFS=$'\n\t'
 
-cd "$(dirname "$0")/../crates/proto/fuzz"
+cd "$(dirname "$0")/.."
 seconds=${1:-60}
 # libFuzzer reads -max_total_time=0 as "no limit".
 [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || { printf 'seconds must be a positive integer\n'; exit 2; }
-cargo +"$FUZZ_NIGHTLY" fetch --locked
-targets=$(cargo +"$FUZZ_NIGHTLY" fuzz list)
-[[ -n "$targets" ]] || { printf 'no fuzz targets found\n'; exit 2; }
-for target in $targets; do
-  printf '== fuzz %s for %ss\n' "$target" "$seconds"
-  cargo +"$FUZZ_NIGHTLY" fuzz run "$target" "corpus/$target" -- \
-    -max_total_time="$seconds" -max_len=70000
+shopt -s nullglob
+crates=(crates/*/fuzz)
+shopt -u nullglob
+(( ${#crates[@]} > 0 )) || { printf 'no fuzz crates found\n'; exit 2; }
+for crate in "${crates[@]}"; do
+  (
+    cd "$crate"
+    cargo +"$FUZZ_NIGHTLY" fetch --locked
+    targets=$(cargo +"$FUZZ_NIGHTLY" fuzz list)
+    [[ -n "$targets" ]] || { printf 'no fuzz targets in %s\n' "$crate"; exit 2; }
+    for target in $targets; do
+      printf '== fuzz %s/%s for %ss\n' "$crate" "$target" "$seconds"
+      cargo +"$FUZZ_NIGHTLY" fuzz run "$target" "corpus/$target" -- \
+        -max_total_time="$seconds" -max_len=70000
+    done
+  )
 done

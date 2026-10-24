@@ -1,0 +1,17 @@
+jackstay-index 1
+next-id 3
+cleared 0
+entry 9afbf4c8996fb92427ae41e4649b93ackstay-index 1
+next-id 3
+cleared 0
+entry 2 5 0
+source local -
+target %25%E9%20%0A%E9%20%0A%FF kept %22x%22 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 1 4 0
+source rget TEXT not-kept owner-failed
+entry 1 4 0
+s
+al %
+target %25%E9%20%RGETS not-kept not-canonical
+end

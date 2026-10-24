@@ -1,0 +1,9 @@
+# c
+[images]
+texts=no
+[texts]
+other=x
+  texts = first
+texts= last;;
+[after]
+te

@@ -1,0 +1,34 @@
+jackstay-index 1
+next-id 3
+cleared 0
+entry 2 5 0
+source local %
+target %25%E9%20%0A%FF kept %22x%22 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 1 4 0
+source local-
+target Sc6red 0
+entry 2 5 0
+source local %
+target %25%E9%20%0A%FF kept %22x%22 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 1 4 0
+source local
+target Sc60c39bd652ent7852b5
+targetkept
+cleared 0
+entry 2 5 0
+source local %
+target %25%E9%20%0A%FF kept %22x%22 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 1 4 0
+source local
+target Sc60c39bd652ent7852b5
+target TEXT not-f248c60c39bd652f3c1347298bb977b8b4d5903b85055620603
+tiled
+entry 1 4 0
+source local
+target Sc60c39bd652f3c13TRING kept STRING 16 fb8e20fc2e4c3f248c60c39bd652f3c1347298bb977b8b4d5903b85055620603
+target TAf3c13TRING kept STRING 16 fb8e20fc2e4c3f248c60c39bd652f3c1347298bb977b8b4d5903b85055620603
+target TARGETS not-kept not-canonical
+end

@@ -1,0 +1,17 @@
+jackstay-index 1
+next-id 43
+cleared 1
+entry 42 c1ac8d934ca495991b7852b8ext-id 3
+cleared 0
+entry 1 5 0
+source local f434346648~~~~~~~~~~~~~~55
+target TEXT not-kept owner-failed
+entry 1 4 0
+source locc32991b7852b8ext-id 3
+cleared 0
+entry 1 5 0
+source local f434346648~~~~~~~~~~~~~~55
+target TEXT not-kept owner-failed
+entry 1 4 0
+sout too-large
+end

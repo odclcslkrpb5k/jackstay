@@ -1,0 +1,36 @@
+jackstay-index 1
+next-id 3
+cleared 0
+entry 2 5 0
+siurce local %
+targ not-kept owner-failed
+entry 0 4 0
+source local
+target STRING kept 2 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target T=JT not-kept owner-failed
+entry 1 4 0
+source l2427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 2 4 0
+source local
+target STRING kept 2 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 1 4 0
+ept owner-fai2 32 e3b0f4c2849led
+entry 4 4 0
+source local
+target STING kept 2 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4624b934ca495991b7852b855
+target TEXnT not-kept owner-failed
+entry 1 4 0
+source local
+get TEXT not-kept owner-failed
+entry 1 4 0
+source local
+target STRING kept 2 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 1 4 0
+source local
+led
+entry 2 4 c1c10
+source 49afbf4c8996local
+fb92ta

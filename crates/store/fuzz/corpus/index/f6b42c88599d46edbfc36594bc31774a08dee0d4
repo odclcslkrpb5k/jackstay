@@ -1,0 +1,17 @@
+jackstay-index 1
+next-id 2
+cleared 0
+entry 2 5 0
+source ljac
+ocql
+target a kept a 8 
+targetrce local %jac
+ocql
+target a kept a 8 
+target%jac
+ocql
+target a kept a 8 
+talocal %jac
+ocql
+target a kept a 8 
+target TEXT not-y-indekstr-

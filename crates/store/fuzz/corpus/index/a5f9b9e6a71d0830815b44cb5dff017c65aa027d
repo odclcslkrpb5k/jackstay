@@ -1,0 +1,53 @@
+jackstay-index 1
+next-id 3
+cleared 0
+entry 4 5 0
+source local %
+target %25%E9%20%0A%FF kept %22x%22 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 1 4 0
+source local
+target STRING kept 2 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 1 4 0
+source local
+targetleared 0
+entry 0 5 0
+source local %
+target %05%EE9%20%0A%FF kept ,22x%22 32 e3b0f4c2849c1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b8-id 3
+cleared 0
+entry 2 5 0
+source local %
+target %25%E9%20%0A%FF kept %22x%22 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 1 4 0
+source local
+target STRING kept 2 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 0 4 0
+source local
+targetleared 0
+entry 5 5 0
+sourc,e local %
+target %05%EE9%20%0A%FF kept ,22x%22 32 e3b0f4c2849c1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target +EXT not-kept owner-failed
+entry y000ot-kept not-c%0A%FF keºptk%22x%22 32 e3b0c44298fafbf4c8996fb92427ae41e4649b934ca495991b7852b8-id 3
+cleared 0
+entry 2 5 0
+source local %
+target %25%E9%20%0A%FF keptÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ %22x%22 32 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 1 4 0
+source local
+target STRING kept 2 32 e3b0c44298fc1c149afbf4c8996¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿¿fb92427ae41e4649b934ca495991b7852b855
+target TEXT not-kept owner-failed
+entry 1 4 0
+source local
+targetleared 0
+entry 0 5 0
+source local %
+target %05%EE9%20%0A%FF kept ,22x%22 32 e3b0f4c2849c1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+target +EXT not-kept owner-failed
+entry y000ot-kept not-c%0A%FF keºptk%22x%22 32 e3b0c44298f2e650b934ca%9try 1 3.0c327aa4
+e locc327aa4
+target ima/eggnp not%95991b78298fî2led

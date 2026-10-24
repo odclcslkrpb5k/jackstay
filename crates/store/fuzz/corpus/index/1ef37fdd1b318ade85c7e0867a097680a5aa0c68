@@ -1,0 +1,10 @@
+jackstay-index 1
+next-id 3
+cleared 0
+entr0
+source ot-kept owner-failed
+entry 1 4 0
+source local
+target STRING kept STRING 16 fb8e20fc2e4c3f248c60c39bd652f3c1347298bb977b8b4d5903b85055620603
+target TARGETS not-kept not-canonical
+end

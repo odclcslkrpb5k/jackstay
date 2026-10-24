@@ -78,6 +78,13 @@ plant_hidden_character() {
   printf '\n// planted\xe2\x80\x8b here\n' >> crates/proto/src/lib.rs
 }
 
+# The gate finds every fuzz crate, not only the first: break the second one.
+plant_broken_store_fuzz_target() {
+  printf '\nfn planted() -> u8 {\n    "x"\n}\n' >> crates/store/fuzz/fuzz_targets/index.rs
+}
+plant_empty_store_fuzz_corpus() {
+  rm -f crates/store/fuzz/corpus/clipman/*
+}
 plant_empty_fuzz_corpus() {
   rm -f crates/proto/fuzz/corpus/decode/*
 }
@@ -97,6 +104,8 @@ plants=(
   "unformatted|format|^Diff in .*/crates/proto/src/lib.rs"
   "failing_test|tests|test planted \.\.\. FAILED"
   "empty_fuzz_corpus|tests|only 0 corpus inputs"
+  "empty_store_fuzz_corpus|tests|only 0 clipman corpus inputs"
+  "broken_store_fuzz_target|fuzz targets build (crates/store/fuzz)|mismatched types"
   "advisory_in_dependency|dependencies (cargo-deny, whole graph)|RUSTSEC-2020-0071"
   "advisory_in_dev_dependency|dependencies (cargo-deny, whole graph)|RUSTSEC-2020-0071"
   "disallowed_license_in_dev_dependency|dependencies (cargo-deny, whole graph)|license = \"MPL-2.0\""

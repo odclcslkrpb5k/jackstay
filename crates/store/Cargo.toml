@@ -1,0 +1,19 @@
+[package]
+name = "jackstay-store"
+description = "Jackstay's files: the history index, blob names, and clipman's saved history"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+jackstay-clip = { path = "../clip", version = "=0.0.0" }
+sha2 = { version = "=0.11.1", default-features = false }
+
+[dev-dependencies]
+proptest.workspace = true

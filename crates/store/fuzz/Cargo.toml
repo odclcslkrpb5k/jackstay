@@ -1,0 +1,30 @@
+# Fuzz targets for jackstay-store (TS-16). Built only by cargo-fuzz, on the pinned nightly; kept out
+# of the workspace so the stable gate never needs nightly.
+[package]
+name = "jackstay-store-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+jackstay-store = { path = "..", version = "=0.0.0" }
+
+[[bin]]
+name = "index"
+path = "fuzz_targets/index.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "clipman"
+path = "fuzz_targets/clipman.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
