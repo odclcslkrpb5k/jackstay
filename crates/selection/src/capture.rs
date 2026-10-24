@@ -1,6 +1,7 @@
 //! Capture: fetching what an owner offers (docs/selection.md, "Capture").
 
 use std::collections::{HashSet, VecDeque};
+use std::fmt;
 use std::sync::Arc;
 
 use jackstay_clip::{Content, Format, Kept, NotKept, Target, TargetData, TargetName};
@@ -23,7 +24,7 @@ pub struct Limits {
     pub per_entry: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Step {
     /// Waiting for the owner's `TARGETS`.
     Targets { property: Atom, deadline: Millis },
@@ -40,6 +41,35 @@ enum Step {
     },
     /// Nothing outstanding.
     Done,
+}
+
+/// Shows the INCR data's length, never the data.
+impl fmt::Debug for Step {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Step::Targets { property, deadline } => f
+                .debug_struct("Targets")
+                .field("property", property)
+                .field("deadline", deadline)
+                .finish(),
+            Step::Converting { target, property, deadline } => f
+                .debug_struct("Converting")
+                .field("target", target)
+                .field("property", property)
+                .field("deadline", deadline)
+                .finish(),
+            Step::Incr { target, property, type_, format, data, deadline } => f
+                .debug_struct("Incr")
+                .field("target", target)
+                .field("property", property)
+                .field("type_", type_)
+                .field("format", format)
+                .field("len", &data.len())
+                .field("deadline", deadline)
+                .finish(),
+            Step::Done => f.write_str("Done"),
+        }
+    }
 }
 
 /// What a step of the capture produced.

@@ -250,6 +250,97 @@ fn accessors() {
     assert_eq!(RestoreError::DuplicateId(EntryId::new(2)).to_string(), "entry id 2 appears twice");
 }
 
+#[test]
+fn debug_shows_lengths_never_bytes() {
+    let c = ok(Content::new(vec![kept("UTF8_STRING", b"hunter2-secret")]));
+    let printed = format!("{c:?}");
+    assert!(!printed.contains("hunter2"), "{printed}");
+    assert!(!printed.contains("104, 117"), "the bytes as numbers: {printed}");
+    assert!(printed.contains("len: 14"), "{printed}");
+    let mut h = History::new(limits(10, 1_000));
+    add(&mut h, "hunter2-secret", 1);
+    assert!(!format!("{h:?}").contains("hunter2"));
+}
+
+#[test]
+fn a_partial_copy_is_a_new_entry_until_complete() {
+    let mut h = History::new(limits(10, 1_000));
+    let old = add(&mut h, "same", 1);
+    add(&mut h, "other", 2);
+    let firefox = Source::Local { owner_class: Some("Firefox".into()) };
+    let r = h.record_partial(text("same"), firefox.clone(), 3);
+    assert_none_evicted(&r.evicted);
+    assert_ne!(r.id, old, "a partial copy never merges");
+    assert_eq!(texts(&h), ["same", "other", "same"]);
+    let more = some(h.update(r.id, text("same, more"), false));
+    assert_eq!(more.id, r.id);
+    assert_none_evicted(&more.evicted);
+    assert_eq!(texts(&h), ["same, more", "other", "same"]);
+    let done = some(h.update(r.id, text("final"), true));
+    assert_eq!(done.id, r.id, "nothing else holds it, so it stays itself");
+    assert_eq!(texts(&h), ["final", "other", "same"]);
+    let e = some(h.get(r.id));
+    assert_eq!((e.copied_at_ms(), e.source()), (3, &firefox));
+    assert!(h.update(EntryId::new(999), text("x"), true).is_none());
+}
+
+#[test]
+fn completing_a_copy_of_an_older_entry_merges_into_it_in_place() {
+    let mut h = History::new(limits(10, 1_000));
+    let old = add(&mut h, "same", 1);
+    h.set_pinned(old, true);
+    add(&mut h, "other", 2);
+    let firefox = Source::Local { owner_class: Some("Firefox".into()) };
+    let partial = h.record_partial(text("sa"), firefox.clone(), 3).id;
+    let r = some(h.update(partial, text("same"), true));
+    assert_eq!(r.id, old, "the older entry keeps its id");
+    assert_none_evicted(&r.evicted);
+    assert_eq!(texts(&h), ["same", "other"]);
+    assert!(h.get(partial).is_none());
+    let e = some(h.get(old));
+    assert_eq!((e.copied_at_ms(), e.source(), e.pinned()), (3, &firefox, true));
+
+    // The partial entry's pin survives too, and a twin in front of it is handled.
+    let mut h = History::new(limits(10, 1_000));
+    let partial = h.record_partial(text("s"), local(), 1).id;
+    h.set_pinned(partial, true);
+    let newer = add(&mut h, "same", 2);
+    add(&mut h, "newest", 3);
+    let r = some(h.update(partial, text("same"), true));
+    assert_eq!(r.id, newer);
+    assert_eq!(texts(&h), ["newest", "same"]);
+    let e = some(h.get(newer));
+    assert_eq!((e.copied_at_ms(), e.pinned()), (1, true));
+}
+
+#[test]
+fn updating_applies_the_limits() {
+    let mut h = History::new(limits(10, 3));
+    let old = add(&mut h, "ab", 1);
+    let partial = h.record_partial(text("c"), local(), 2).id;
+    h.promote(old);
+    let r = some(h.update(partial, text("cdef"), false));
+    assert_eq!(ids(&r.evicted), [partial], "no longer newest, it outgrew the budget");
+}
+
+#[test]
+fn append_oldest_goes_to_the_back_and_skips_what_is_held() {
+    let mut h = History::new(limits(2, 1_000));
+    add(&mut h, "new", 2);
+    let r = some(h.append_oldest(text("imported"), local(), 1));
+    assert_none_evicted(&r.evicted);
+    assert_eq!(texts(&h), ["new", "imported"]);
+    assert_eq!(some(h.get(r.id)).copied_at_ms(), 1);
+    assert!(h.append_oldest(text("new"), local(), 0).is_none());
+    assert!(h.append_oldest(text("imported"), local(), 0).is_none());
+    let full = some(h.append_oldest(text("older"), local(), 0));
+    assert_eq!(ids(&full.evicted), [full.id], "a full history has no room at the back");
+    assert_eq!(texts(&h), ["new", "imported"]);
+    let mut empty = History::new(limits(2, 0));
+    let only = some(empty.append_oldest(text("big"), local(), 0));
+    assert_none_evicted(&only.evicted);
+}
+
 /// A deliberately plain model of the rules in `History`'s documentation, checked against it.
 #[derive(Debug)]
 struct Model {
@@ -281,9 +372,45 @@ impl Model {
             self.entries.insert(0, e);
             return id;
         }
+        self.record_partial(s)
+    }
+
+    fn record_partial(&mut self, s: String) -> EntryId {
+        let id = self.take_id();
+        self.entries.insert(0, (id, s, false));
+        id
+    }
+
+    fn update(&mut self, at: usize, s: String, complete: bool) -> EntryId {
+        let id = self.entries[at].0;
+        let twin = (0..self.entries.len()).find(|&j| j != at && self.entries[j].1 == s);
+        match twin {
+            Some(j) if complete => {
+                let (twin_id, _, twin_pinned) = self.entries.remove(j);
+                let at = if j < at { at - 1 } else { at };
+                let pinned = twin_pinned || self.entries[at].2;
+                self.entries[at] = (twin_id, s, pinned);
+                twin_id
+            }
+            _ => {
+                self.entries[at].1 = s;
+                id
+            }
+        }
+    }
+
+    fn append_oldest(&mut self, s: String) -> Option<EntryId> {
+        if self.entries.iter().any(|e| e.1 == s) {
+            return None;
+        }
+        let id = self.take_id();
+        self.entries.push((id, s, false));
+        Some(id)
+    }
+
+    fn take_id(&mut self) -> EntryId {
         let id = EntryId::new(self.next_id);
         self.next_id += 1;
-        self.entries.insert(0, (id, s, false));
         id
     }
 }
@@ -291,6 +418,9 @@ impl Model {
 #[derive(Debug, Clone)]
 enum Op {
     Record(u8),
+    RecordPartial(u8),
+    Update(usize, u8, bool),
+    AppendOldest(u8),
     Pin(usize, bool),
     Promote(usize),
     Delete(usize),
@@ -300,6 +430,9 @@ enum Op {
 fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         4 => (0u8..12).prop_map(Op::Record),
+        2 => (0u8..12).prop_map(Op::RecordPartial),
+        3 => (any::<usize>(), 0u8..12, any::<bool>()).prop_map(|(i, n, c)| Op::Update(i, n, c)),
+        1 => (0u8..12).prop_map(Op::AppendOldest),
         1 => (any::<usize>(), any::<bool>()).prop_map(|(i, p)| Op::Pin(i, p)),
         1 => any::<usize>().prop_map(Op::Promote),
         1 => any::<usize>().prop_map(Op::Delete),
@@ -324,6 +457,30 @@ proptest! {
                     let r = h.record(text(&s), local(), u64::try_from(t).unwrap_or(0));
                     prop_assert_eq!(r.id, m.record(s));
                     (ids(&r.evicted), m.enforce(max_entries, max_bytes))
+                }
+                Op::RecordPartial(n) => {
+                    let s = "x".repeat(usize::from(n));
+                    let r = h.record_partial(text(&s), local(), u64::try_from(t).unwrap_or(0));
+                    prop_assert_eq!(r.id, m.record_partial(s));
+                    (ids(&r.evicted), m.enforce(max_entries, max_bytes))
+                }
+                Op::Update(i, n, complete) => match pick(i, m.entries.len()) {
+                    Some(i) => {
+                        let s = "x".repeat(usize::from(n));
+                        let r = some(h.update(m.entries[i].0, text(&s), complete));
+                        prop_assert_eq!(r.id, m.update(i, s, complete));
+                        (ids(&r.evicted), m.enforce(max_entries, max_bytes))
+                    }
+                    None => (vec![], vec![]),
+                },
+                Op::AppendOldest(n) => {
+                    let s = "x".repeat(usize::from(n));
+                    let r = h.append_oldest(text(&s), local(), 0);
+                    prop_assert_eq!(r.as_ref().map(|r| r.id), m.append_oldest(s));
+                    match r {
+                        Some(r) => (ids(&r.evicted), m.enforce(max_entries, max_bytes)),
+                        None => (vec![], vec![]),
+                    }
                 }
                 Op::Pin(i, p) => match pick(i, m.entries.len()) {
                     Some(i) => {

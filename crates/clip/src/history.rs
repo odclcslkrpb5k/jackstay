@@ -119,7 +119,10 @@ impl fmt::Display for RestoreError {
 impl std::error::Error for RestoreError {}
 
 /// The clipboard history, newest first. Each distinct content (by [`Content::same_kept`]) appears
-/// at most once: copying something already in the history moves that entry to the front.
+/// at most once: copying something already in the history moves that entry to the front. The one
+/// exception is an entry still being captured ([`History::record_partial`]), which may equal
+/// another until [`History::update`] completes it; the caller completes every capture, even one cut
+/// short, before recording the next copy.
 #[derive(Debug)]
 pub struct History {
     entries: VecDeque<Entry>,
@@ -199,11 +202,83 @@ impl History {
             self.entries.push_front(entry);
             return Recorded { id, evicted: self.enforce_limits() };
         }
+        let id = self.take_id();
+        self.entries.push_front(Entry { id, content, source, copied_at_ms, pinned: false });
+        Recorded { id, evicted: self.enforce_limits() }
+    }
+
+    /// Records the first part of a copy still being captured: always a new entry at the front, since
+    /// what it will hold is not yet known. Later parts go to [`History::update`].
+    ///
+    /// # Panics
+    /// After 2^64 - 1 new entries, rather than reuse an id.
+    pub fn record_partial(
+        &mut self,
+        content: Arc<Content>,
+        source: Source,
+        copied_at_ms: u64,
+    ) -> Recorded {
+        let id = self.take_id();
+        self.entries.push_front(Entry { id, content, source, copied_at_ms, pinned: false });
+        Recorded { id, evicted: self.enforce_limits() }
+    }
+
+    /// Replaces an entry's content with more of the same copy, keeping its id, pin, place, source
+    /// and time. Once `complete`, if another entry holds the same thing, the two become one: the
+    /// other entry takes this one's place, source and time, keeps its own id, and stays pinned if
+    /// either was; the returned id is then the other's. Returns `None` if `id` does not exist.
+    pub fn update(
+        &mut self,
+        id: EntryId,
+        content: Arc<Content>,
+        complete: bool,
+    ) -> Option<Recorded> {
+        let at = self.entries.iter().position(|e| e.id == id)?;
+        let twin = if complete {
+            self.entries.iter().position(|e| e.id != id && e.content.same_kept(&content))
+        } else {
+            None
+        };
+        let Some(twin) = twin else {
+            let entry = self.entries.get_mut(at)?;
+            entry.content = content;
+            return Some(Recorded { id, evicted: self.enforce_limits() });
+        };
+        let mut merged = self.entries.remove(twin)?;
+        let this = self.entries.iter_mut().find(|e| e.id == id)?;
+        merged.source = this.source.clone();
+        merged.copied_at_ms = this.copied_at_ms;
+        merged.pinned |= this.pinned;
+        let merged_id = merged.id;
+        *this = merged;
+        Some(Recorded { id: merged_id, evicted: self.enforce_limits() })
+    }
+
+    /// Adds a copy as the oldest entry, as when importing another manager's history. Returns `None`,
+    /// changing nothing, if the history already holds the same thing. The limits apply as usual,
+    /// so a full history evicts the new entry itself.
+    ///
+    /// # Panics
+    /// After 2^64 - 1 new entries, rather than reuse an id.
+    pub fn append_oldest(
+        &mut self,
+        content: Arc<Content>,
+        source: Source,
+        copied_at_ms: u64,
+    ) -> Option<Recorded> {
+        if self.find(&content).is_some() {
+            return None;
+        }
+        let id = self.take_id();
+        self.entries.push_back(Entry { id, content, source, copied_at_ms, pinned: false });
+        Some(Recorded { id, evicted: self.enforce_limits() })
+    }
+
+    fn take_id(&mut self) -> EntryId {
         let id = EntryId(self.next_id);
         // 2^64 copies cannot happen; if it did, reusing an id would be worse than stopping.
         self.next_id = self.next_id.checked_add(1).expect("entry ids exhausted");
-        self.entries.push_front(Entry { id, content, source, copied_at_ms, pinned: false });
-        Recorded { id, evicted: self.enforce_limits() }
+        id
     }
 
     /// Moves an entry to the front, as when the user selects it to paste again.

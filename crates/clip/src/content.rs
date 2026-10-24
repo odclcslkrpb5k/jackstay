@@ -83,8 +83,9 @@ impl Format {
 }
 
 /// The bytes of one target, exactly as its owner sent them, with the type and format to serve them
-/// back under.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// back under. Its `Debug` shows their length, never the bytes, so no log line or panic message can
+/// carry clipboard contents.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Kept {
     type_name: TargetName,
     format: Format,
@@ -119,6 +120,16 @@ impl Kept {
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+}
+
+impl fmt::Debug for Kept {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Kept")
+            .field("type_name", &self.type_name)
+            .field("format", &self.format)
+            .field("len", &self.bytes.len())
+            .finish_non_exhaustive()
     }
 }
 

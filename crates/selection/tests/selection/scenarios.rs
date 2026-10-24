@@ -642,3 +642,192 @@ fn a_probe_due_during_a_capture_is_rescheduled_not_left_due() {
         last = d;
     }
 }
+
+fn primary_request(x: &mut FakeX, target: &str, property: &str) -> Event {
+    Event::SelectionRequest {
+        requestor: XTERM,
+        selection: x.a("PRIMARY"),
+        target: x.a(target),
+        property: Some(x.a(property)),
+        time: Timestamp(0),
+    }
+}
+
+#[test]
+fn clear_claims_primary_too_offering_nothing() {
+    let mut x = FakeX::new();
+    let mut e = owning(&mut x, "on the clipboard");
+    x.claim("PRIMARY", XTERM, 1_500);
+    x.time = 3_000;
+    assert_eq!(e.clear(&mut x, Millis(1)), vec![Report::Claimed]);
+    let primary = x.a("PRIMARY");
+    // The fake's server time steps on each query.
+    assert_eq!(x.owners.get(&primary).copied(), Some((Some(OURS), Timestamp(3_001))));
+    x.take_calls();
+    send!(e, &mut x, primary_request(&mut x, "UTF8_STRING", "P"), Millis(2));
+    assert_eq!(notified(&mut x), Some(Notice::Refused), "a cleared PRIMARY pastes nothing");
+    send!(e, &mut x, primary_request(&mut x, "TARGETS", "P"), Millis(3));
+    assert_eq!(some(written(&mut x, XTERM, "P")).1.len(), 8, "only TARGETS and TIMESTAMP");
+    // A SelectionClear from before the clear's claim is stale; a later one ends it.
+    let stale = Event::SelectionClear { selection: primary, time: Timestamp(3_000) };
+    assert_eq!(send!(e, &mut x, stale, Millis(4)), vec![]);
+    x.props.clear();
+    send!(e, &mut x, primary_request(&mut x, "TARGETS", "P"), Millis(5));
+    assert!(written(&mut x, XTERM, "P").is_some(), "still held after a stale clear");
+    let lost = Event::SelectionClear { selection: primary, time: Timestamp(3_001) };
+    assert_eq!(send!(e, &mut x, lost, Millis(6)), vec![], "PRIMARY is not reported");
+    x.props.clear();
+    x.take_calls();
+    send!(e, &mut x, primary_request(&mut x, "TARGETS", "P"), Millis(7));
+    assert_eq!(notified(&mut x), Some(Notice::Refused));
+    assert!(written(&mut x, XTERM, "P").is_none());
+    assert!(e.owns_clipboard(), "losing PRIMARY leaves CLIPBOARD alone");
+}
+
+#[test]
+fn primary_is_never_served_the_clipboard() {
+    let mut x = FakeX::new();
+    let mut e = owning(&mut x, "on the clipboard");
+    send!(e, &mut x, primary_request(&mut x, "TARGETS", "P"), Millis(1));
+    assert_eq!(notified(&mut x), Some(Notice::Refused));
+    assert!(written(&mut x, XTERM, "P").is_none());
+}
+
+#[test]
+fn a_clear_whose_primary_claim_fails_holds_nothing() {
+    let mut x = FakeX::new();
+    let (mut e, _) = engine(&mut x);
+    x.time = 3_000;
+    // A client that claimed PRIMARY after the clear took its time keeps it.
+    x.claim("PRIMARY", XTERM, 3_005);
+    assert_eq!(e.clear(&mut x, Millis(1)), vec![Report::Claimed]);
+    x.take_calls();
+    send!(e, &mut x, primary_request(&mut x, "TARGETS", "P"), Millis(2));
+    assert_eq!(notified(&mut x), Some(Notice::Refused));
+}
+
+#[test]
+fn every_capture_is_announced_before_its_content() {
+    let mut x = FakeX::new();
+    x.claim("CLIPBOARD", FIREFOX, 5);
+    let (mut e, reports) = engine(&mut x);
+    assert_eq!(reports, vec![Report::CaptureStarted { capture: 1 }], "the owner at start");
+    let r = send!(e, &mut x, set(&mut x, Some(QT_APP), 10), Millis(1));
+    assert_eq!(r, vec![Report::CaptureStarted { capture: 2 }]);
+    // Our own claim, and a release, start nothing.
+    x.time = 20;
+    assert_eq!(
+        e.serve(&mut x, crate::support::text_content("h"), Millis(2)),
+        vec![Report::Claimed]
+    );
+    let r = send!(e, &mut x, set(&mut x, Some(OURS), 20), Millis(3));
+    assert_eq!(r, vec![]);
+    let r = send!(e, &mut x, set(&mut x, None, 30), Millis(4));
+    assert_eq!(r, vec![]);
+}
+
+#[test]
+fn restore_serves_only_an_unowned_clipboard() {
+    let mut x = FakeX::new();
+    let (mut e, _) = engine(&mut x);
+    x.time = 1_000;
+    x.take_calls();
+    assert_eq!(
+        e.restore(&mut x, crate::support::text_content("saved"), Millis(1)),
+        vec![Report::Claimed]
+    );
+    assert!(e.owns_clipboard());
+    let clipboard = x.a("CLIPBOARD");
+    assert_eq!(x.owners.get(&clipboard).copied(), Some((Some(OURS), Timestamp(1_001))));
+    send!(e, &mut x, request(&mut x, XTERM, "UTF8_STRING", "P", 0), Millis(2));
+    assert_eq!(written(&mut x, XTERM, "P").map(|w| w.1), Some(b"saved".to_vec()));
+
+    let calls = x.take_calls();
+    let grab = calls.iter().position(|c| *c == Call::Grab(true));
+    let claim = calls.iter().position(|c| matches!(c, Call::SetOwner { .. }));
+    let ungrab = calls.iter().position(|c| *c == Call::Grab(false));
+    assert!(grab.is_some() && grab < claim && claim < ungrab, "claimed under a grab: {calls:?}");
+
+    // An application that owns the clipboard keeps it, even one the engine has not heard of yet.
+    for already_seen in [true, false] {
+        let mut x = FakeX::new();
+        let (mut e, _) = engine(&mut x);
+        x.time = 1_000;
+        if already_seen {
+            send!(e, &mut x, set(&mut x, Some(FIREFOX), 900), Millis(0));
+        } else {
+            x.claim("CLIPBOARD", FIREFOX, 900);
+        }
+        x.take_calls();
+        let r = e.restore(&mut x, crate::support::text_content("saved"), Millis(1));
+        assert_eq!(r, vec![Report::ClaimFailed]);
+        assert!(!x.take_calls().iter().any(|c| matches!(c, Call::SetOwner { .. })));
+        let clipboard = x.a("CLIPBOARD");
+        assert_eq!(x.owners.get(&clipboard).map(|o| o.0), Some(Some(FIREFOX)));
+    }
+
+    // A client claiming while the restore checks and claims is held off by the grab, and its claim,
+    // later than ours, stands.
+    let mut x = FakeX::new();
+    let (mut e, _) = engine(&mut x);
+    x.time = 1_000;
+    x.racing_claim = Some(FIREFOX);
+    x.take_calls();
+    let r = e.restore(&mut x, crate::support::text_content("saved"), Millis(1));
+    assert_eq!(r, vec![Report::ClaimFailed]);
+    let clipboard = x.a("CLIPBOARD");
+    assert_eq!(x.owners.get(&clipboard).map(|o| o.0), Some(Some(FIREFOX)));
+    assert!(!e.owns_clipboard());
+    let calls = x.take_calls();
+    assert_eq!(calls.first(), Some(&Call::Grab(true)));
+    assert_eq!(calls.iter().filter(|c| matches!(c, Call::Grab(false))).count(), 1);
+
+    // Nor does a restore replace our own claim.
+    let mut x = FakeX::new();
+    let mut e = owning(&mut x, "newer");
+    let r = e.restore(&mut x, crate::support::text_content("saved"), Millis(1));
+    assert_eq!(r, vec![Report::ClaimFailed]);
+    send!(e, &mut x, request(&mut x, XTERM, "UTF8_STRING", "P", 0), Millis(2));
+    assert_eq!(written(&mut x, XTERM, "P").map(|w| w.1), Some(b"newer".to_vec()));
+}
+
+#[test]
+fn debug_output_never_holds_clipboard_bytes() {
+    // Mid-capture by INCR: the received chunk sits in the capture.
+    let mut x = FakeX::new();
+    let (mut e, _) = engine(&mut x);
+    x.take_calls();
+    send!(e, &mut x, set(&mut x, Some(FIREFOX), 9), Millis(0));
+    let (_, tp) = one(x.converts());
+    let list = x.atom_list(&["UTF8_STRING"]);
+    send!(e, &mut x, answer(&mut x, "TARGETS", tp, "ATOM", Format::Bits32, &list), Millis(1));
+    let (_, p) = one(x.converts());
+    let incr = answer(&mut x, "UTF8_STRING", p, "INCR", Format::Bits32, &10u32.to_ne_bytes());
+    send!(e, &mut x, incr, Millis(2));
+    x.put(OURS, p, "UTF8_STRING", Format::Bits8, b"hunter2-a");
+    send!(e, &mut x, new_value(p), Millis(3));
+    let printed = format!("{e:?}");
+    assert!(printed.contains("Incr {"), "the test reaches an INCR capture: {printed}");
+    assert!(printed.contains("len: 9, deadline"), "{printed}");
+    assert!(!printed.contains("hunter2") && !printed.contains("104, 117"), "{printed}");
+
+    // Serving, with an outgoing INCR transfer under way.
+    let mut x = FakeX::new();
+    let mut e = owning(&mut x, &"hunter2-b ".repeat(60_000));
+    send!(e, &mut x, request(&mut x, XTERM, "UTF8_STRING", "P", 0), Millis(1));
+    let printed = format!("{e:?}");
+    assert!(printed.contains("Transfer"), "the test reaches a transfer: {printed}");
+    // Lengths stand in for the bytes, so the output still says what is held.
+    assert!(printed.contains("Served { since:"), "{}", printed.len());
+    assert!(printed.contains("text_len: Some(600000)"), "{}", printed.len());
+    assert!(printed.contains("value: Value { type_: Atom("), "{}", printed.len());
+    assert!(printed.contains("len: 600000 }"), "{}", printed.len());
+    assert!(!printed.contains("hunter2") && !printed.contains("104, 117"), "{}", printed.len());
+
+    let read = jackstay_selection::Property {
+        type_: Atom(1),
+        format: Format::Bits8,
+        data: b"hunter2-c".to_vec(),
+    };
+    assert_eq!(format!("{read:?}"), "Property { type_: Atom(1), format: Bits8, len: 9 }");
+}

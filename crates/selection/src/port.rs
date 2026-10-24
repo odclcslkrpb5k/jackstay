@@ -1,13 +1,25 @@
+use std::fmt;
+
 use jackstay_clip::{Format, TargetName};
 
 use crate::{Atom, Timestamp, Window};
 
-/// A property's value, as read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A property's value, as read. Its `Debug` shows the data's length, never the data.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Property {
     pub type_: Atom,
     pub format: Format,
     pub data: Vec<u8>,
+}
+
+impl fmt::Debug for Property {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Property")
+            .field("type_", &self.type_)
+            .field("format", &self.format)
+            .field("len", &self.data.len())
+            .finish()
+    }
 }
 
 /// The result of reading a property.
@@ -80,4 +92,7 @@ pub trait Port {
     fn announce_manager(&mut self, selection: Atom, time: Timestamp);
     /// Empties `CUT_BUFFER0` to `CUT_BUFFER7` on the root window.
     fn clear_cut_buffers(&mut self);
+    /// Grabs the server (`true`), so no other client's request is processed until it is ungrabbed
+    /// (`false`). Held only across a check and a claim that must not be split.
+    fn grab_server(&mut self, grab: bool);
 }

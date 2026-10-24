@@ -20,6 +20,10 @@ plant_unwrap_in_parser() {
   sed -i 's|        let id = EntryId(r.u64()?);|        let id = EntryId(r.u64().ok().unwrap());|' \
     crates/proto/src/announce.rs
 }
+# In a test, which the daemon's crates also lint: a dbg! anywhere would print clipboard data.
+plant_dbg_in_test() {
+  printf '\n#[test]\nfn planted() {\n    dbg!(1);\n}\n' >> crates/clip/tests/history.rs
+}
 # An addition that can overflow. `usize::from(byte) + 1` cannot, and clippy 0.1.99 correctly lets
 # it through, so a plant must use two unbounded operands.
 plant_unchecked_arithmetic_in_parser() {
@@ -85,6 +89,7 @@ plants=(
   "indexing_in_parser|clippy|indexing may panic"
   "unwrap_in_parser|clippy|used .unwrap\(\). on an .Option. value"
   "unchecked_arithmetic_in_parser|clippy|arithmetic operation that can potentially result in unexpected side-effects"
+  "dbg_in_test|clippy|the .dbg!. macro is intended as a debugging tool"
   "crate_without_workspace_lints|workspace lints reach every crate|crates/planted/Cargo.toml: missing"
   "lockfile_drift|clippy|cannot update the lock file .* because --locked was passed"
   "hidden_character|hidden characters|crates/proto/src/lib.rs:[0-9]+: hidden character"

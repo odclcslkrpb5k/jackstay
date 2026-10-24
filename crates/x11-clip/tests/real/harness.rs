@@ -75,8 +75,10 @@ impl Drop for Xvfb {
 
 enum Ask {
     Serve(Arc<Content>),
+    Restore(Arc<Content>),
     Clear,
     Owns(Sender<bool>),
+    Debug(Sender<String>),
     Timeout(Sender<Option<Duration>>),
     Stop,
 }
@@ -135,6 +137,10 @@ impl Session {
         self.ask(Ask::Serve(content));
     }
 
+    pub fn restore(&self, content: Arc<Content>) {
+        self.ask(Ask::Restore(content));
+    }
+
     pub fn clear(&self) {
         self.ask(Ask::Clear);
     }
@@ -144,6 +150,13 @@ impl Session {
         let (tx, rx) = mpsc::channel();
         self.ask(Ask::Owns(tx));
         rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|e| panic!("owns: {e}"))
+    }
+
+    /// The session's `Clipboard`, as `{:?}` prints it.
+    pub fn debug(&self) -> String {
+        let (tx, rx) = mpsc::channel();
+        self.ask(Ask::Debug(tx));
+        rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|e| panic!("debug: {e}"))
     }
 
     /// How long until the session needs attention without events.
@@ -252,9 +265,14 @@ fn run(
         loop {
             let done = match commands.try_recv() {
                 Ok(Ask::Serve(c)) => clipboard.serve(c),
+                Ok(Ask::Restore(c)) => clipboard.restore(c),
                 Ok(Ask::Clear) => clipboard.clear(),
                 Ok(Ask::Owns(reply)) => {
                     let _ = reply.send(clipboard.owns_clipboard());
+                    Ok(Vec::new())
+                }
+                Ok(Ask::Debug(reply)) => {
+                    let _ = reply.send(format!("{clipboard:?}"));
                     Ok(Vec::new())
                 }
                 Ok(Ask::Timeout(reply)) => {
@@ -277,9 +295,14 @@ fn run(
 
 /// Puts `data` on the clipboard with xclip, which keeps running as its owner until killed.
 pub fn xclip_copy(x: &Xvfb, target: &str, data: &[u8]) -> Child {
+    xclip_copy_to(x, "clipboard", target, data)
+}
+
+/// Puts `data` on `selection` (`clipboard` or `primary`) with xclip.
+pub fn xclip_copy_to(x: &Xvfb, selection: &str, target: &str, data: &[u8]) -> Child {
     let mut child = x
         .command("xclip")
-        .args(["-quiet", "-selection", "clipboard", "-target", target, "-i"])
+        .args(["-quiet", "-selection", selection, "-target", target, "-i"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -293,9 +316,14 @@ pub fn xclip_copy(x: &Xvfb, target: &str, data: &[u8]) -> Child {
 
 /// Reads the clipboard with xclip, as an application pasting would.
 pub fn xclip_paste(x: &Xvfb, target: &str) -> Option<Vec<u8>> {
+    xclip_paste_from(x, "clipboard", target)
+}
+
+/// Reads `selection` (`clipboard` or `primary`) with xclip.
+pub fn xclip_paste_from(x: &Xvfb, selection: &str, target: &str) -> Option<Vec<u8>> {
     let out = x
         .command("timeout")
-        .args(["10", "xclip", "-selection", "clipboard", "-target", target, "-o"])
+        .args(["10", "xclip", "-selection", selection, "-target", target, "-o"])
         .stderr(Stdio::null())
         .output()
         .unwrap_or_else(|e| panic!("xclip -o: {e}"));
@@ -310,6 +338,15 @@ pub fn xsel_paste(x: &Xvfb) -> Option<Vec<u8>> {
         .output()
         .unwrap_or_else(|e| panic!("xsel: {e}"));
     out.status.success().then_some(out.stdout)
+}
+
+/// Waits up to 5 s until nothing owns CLIPBOARD, as after its owner's connection closes.
+pub fn wait_unowned(x: &Xvfb) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while xclip_paste(x, "TARGETS").is_some() {
+        assert!(Instant::now() < deadline, "CLIPBOARD still owned");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 pub fn kill(mut child: Child) {

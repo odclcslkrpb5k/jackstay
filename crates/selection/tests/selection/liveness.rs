@@ -7,7 +7,7 @@ use jackstay_clip::Format;
 use jackstay_selection::{Atom, Event, Millis, OwnerChange, PropertyState, Timestamp, Window};
 use proptest::prelude::*;
 
-const NAMES: [&str; 12] = [
+const NAMES: [&str; 13] = [
     "CLIPBOARD",
     "CLIPBOARD_MANAGER",
     "TARGETS",
@@ -20,6 +20,7 @@ const NAMES: [&str; 12] = [
     "SAVE_TARGETS",
     "INCR",
     "ATOM",
+    "PRIMARY",
 ];
 
 #[derive(Debug, Clone)]
@@ -61,6 +62,7 @@ enum Step {
     },
     Clear,
     Serve,
+    Restore,
     Advance {
         ms: u32,
     },
@@ -95,6 +97,7 @@ fn step() -> impl Strategy<Value = Step> {
         (2u8..6).prop_map(|window| Step::Destroy { window }),
         Just(Step::Clear),
         Just(Step::Serve),
+        Just(Step::Restore),
         (0u32..70_000).prop_map(|ms| Step::Advance { ms }),
     ]
 }
@@ -163,6 +166,7 @@ proptest! {
                 Step::Destroy { window } => Some(Event::DestroyNotify { window: Window(u32::from(window)) }),
                 Step::Clear => { e.clear(&mut x, now); None }
                 Step::Serve => { e.serve(&mut x, text_content(&"y".repeat(300_000)), now); None }
+                Step::Restore => { e.restore(&mut x, text_content("saved"), now); None }
                 Step::Advance { ms } => {
                     now = now.after(u64::from(ms));
                     x.time = x.time.saturating_add(ms);

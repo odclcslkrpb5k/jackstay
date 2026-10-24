@@ -179,7 +179,19 @@ impl Clipboard {
         Ok(reports)
     }
 
-    /// Clears the clipboard.
+    /// Serves `content`, saved from an earlier run, only if no client owns the clipboard; reports
+    /// `Claimed` if it did.
+    ///
+    /// # Errors
+    /// [`Error::Connection`] if the X connection is gone.
+    pub fn restore(&mut self, content: Arc<Content>) -> Result<Vec<Report>, Error> {
+        let now = self.now();
+        let reports = self.engine.restore(&mut self.port, content, now);
+        self.finish_turn()?;
+        Ok(reports)
+    }
+
+    /// Clears the clipboard, and PRIMARY.
     ///
     /// # Errors
     /// [`Error::Connection`] if the X connection is gone.

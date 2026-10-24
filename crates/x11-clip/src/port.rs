@@ -23,7 +23,9 @@ const WM_CLASS_WORDS: u32 = 64;
 
 /// The X connection as the engine sees it. A broken connection is remembered, and every later call
 /// answers emptily; the session checks `broken` after each turn and stops.
-#[derive(Debug)]
+///
+/// Its `Debug` leaves out the connection, whose buffers hold requests and replies carrying
+/// clipboard contents.
 pub(crate) struct X11Port {
     pub conn: RustConnection,
     pub root: xproto::Window,
@@ -36,6 +38,18 @@ pub(crate) struct X11Port {
     pub queued: VecDeque<XEvent>,
     pub broken: Option<ConnectionError>,
     max_property: usize,
+}
+
+impl std::fmt::Debug for X11Port {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("X11Port")
+            .field("root", &self.root)
+            .field("window", &self.window)
+            .field("queued", &self.queued.len())
+            .field("broken", &self.broken)
+            .field("max_property", &self.max_property)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Waits for a query's reply, consuming its cookie so the connection is free again.
@@ -389,5 +403,10 @@ impl Port for X11Port {
                 .map(drop);
             self.sent(r);
         }
+    }
+
+    fn grab_server(&mut self, grab: bool) {
+        let r = if grab { self.conn.grab_server() } else { self.conn.ungrab_server() }.map(drop);
+        self.sent(r);
     }
 }

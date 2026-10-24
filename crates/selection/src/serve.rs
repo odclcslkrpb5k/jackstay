@@ -1,6 +1,7 @@
 //! Serving a selection we own (docs/selection.md, "Serving").
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use jackstay_clip::{Content, Format, TargetData};
@@ -15,12 +16,22 @@ pub(crate) const TRANSFER_IDLE_MS: u64 = 10_000;
 /// request limit is lower (docs/selection.md, "Serving").
 pub(crate) const MAX_INCR_CHUNK: usize = 256 * 1024;
 
-/// One reply's value.
-#[derive(Debug, Clone)]
+/// One reply's value. Its `Debug` shows the data's length, never the data.
+#[derive(Clone)]
 struct Value {
     type_: Atom,
     format: Format,
     data: Arc<[u8]>,
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Value")
+            .field("type_", &self.type_)
+            .field("format", &self.format)
+            .field("len", &self.data.len())
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -31,8 +42,7 @@ struct Transfer {
     deadline: Millis,
 }
 
-/// What we serve while we own a selection.
-#[derive(Debug)]
+/// What we serve while we own a selection. Its `Debug` shows the text's length, never the text.
 pub(crate) struct Served {
     pub since: Timestamp,
     /// `None` when cleared: only `TARGETS` and `TIMESTAMP` are offered.
@@ -41,6 +51,17 @@ pub(crate) struct Served {
     held: Vec<(Atom, Atom, usize)>,
     /// The held text, decoded, if any text target is held.
     text: Option<String>,
+}
+
+impl fmt::Debug for Served {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Served")
+            .field("since", &self.since)
+            .field("content", &self.content)
+            .field("held", &self.held)
+            .field("text_len", &self.text.as_ref().map(String::len))
+            .finish()
+    }
 }
 
 impl Served {

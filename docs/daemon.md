@@ -37,21 +37,29 @@ acceptable. `WatchdogSignal=SIGKILL` and `LimitCORE=0`: a core dump would hold c
   - the entry served after `select`, a keep-alive, or a restore at start;
   - nothing after an owner change whose capture has not reported yet (`CaptureStarted`), after
     `CaptureFailed`, after `Lost`, or after a clear.
-  *(Needs `Report::CaptureStarted { capture }` from the engine.)*
-- **Progressive captures.** The first report of a capture adds a **new** entry; later reports of
-  the same capture replace that entry's content (keeping its id, pin and place). Deduplication
-  against the rest of history happens only on the `complete` report: if the complete content
-  equals an older entry's, the new entry is dropped and the older one moves to the front (with its
-  id and pin). A partial report never rewrites an older entry. *(Needs `History::update(id,
-  content)` that applies the limits and reports evictions.)*
-- `CaptureEnded` and `CaptureFailed`: the entry, if any, stands as last reported.
+- **Progressive captures.** The first report of a capture adds a **new** entry
+  (`History::record_partial`, or `History::record` if it is already complete); later reports of
+  the same capture replace that entry's content, keeping its id, pin and place
+  (`History::update`). Deduplication against the rest of history happens only on the `complete`
+  report: if the complete content equals an older entry's, the two merge into the older one's id,
+  in the new entry's place, pinned if either was. A partial report never rewrites an older entry.
+  The limits apply and evictions are reported on every update.
+  - The id `update` returns is the entry's from then on: after a merge it is the older entry's,
+    and both the capture's entry and the current entry become it.
+  - `evicted` may hold that id itself (a large partial pushed back by a promote, then over the
+    byte budget), and `update` returns `None` for an entry already gone; either way the capture
+    has no entry any more, its later reports are ignored, and the current entry is none.
+- `CaptureEnded` and `CaptureFailed`: the entry, if any, stands as last reported, and is completed
+  (`History::update(id, last content, true)`), so a capture cut short is deduplicated like any
+  other. Every capture is thereby completed before the next one starts (`CaptureEnded` precedes
+  `CaptureStarted`), so duplicates exist only while one capture is open.
 - Every eviction and deletion goes to the store (below).
 - **Re-select** (`jackstay select <id>`): `History::promote`, then `Clipboard::serve`.
 
 ## Clearing
 
 - **`jackstay clear`**: `Clipboard::clear()`, which claims CLIPBOARD **and PRIMARY** as cleared
-  (offering nothing) and empties the cut buffers *(engine: claim PRIMARY too)*; then the current
+  (offering nothing) and empties the cut buffers; then the current
   entry, if any and **not pinned**, is deleted from history and disk.
 - **`jackstay delete <id>`**: deletes the entry, pinned or not; if it is the current entry, the
   clipboard is cleared as above.
@@ -92,7 +100,9 @@ not a document; `~/.local/state` is less often backed up than `~/.local/share`.
   missing are dropped. Blob hashes are verified on the store thread after start, never before
   serving; a mismatch drops that entry. Unreferenced blobs are deleted only after a clean read.
 - **Restart restore.** If the index's `cleared` flag is set, nothing is served. Otherwise the newest
-  entry is served **only if CLIPBOARD has no owner** *(needs `Clipboard::restore(content)`)*.
+  entry is served **only if CLIPBOARD has no owner** (`Clipboard::restore`: the check and the
+  claim happen under a server grab, so an application claiming meanwhile wins; docs/selection.md,
+  "Commands from the daemon").
 
 ## Control socket
 
@@ -132,7 +142,8 @@ texts, oldest first, each added at the **back** of history (older than anything 
 skipping content already present, with the file's modification time as the copy time; then the
 marker is written. clipman's own files are left alone, but the command says plainly that they still
 hold that history, and `jackstay import-clipman --remove` deletes them (pre-migration secrets would
-otherwise survive every Jackstay clear). *(Needs `History::append_oldest`.)*
+otherwise survive every Jackstay clear). (`History::append_oldest`: a full history evicts the
+import itself.)
 
 ## Coexistence (plan §5.6)
 
@@ -192,9 +203,9 @@ key named in the journal. The whole history is held in memory, within these limi
 
 To the journal through stderr, one line per event: kinds, codes and counts, never clipboard
 contents, previews, sources' window titles, or file names from the history (DP-3). `Content`,
-`Kept` and `Report` print sizes, not bytes, through their `Debug` *(clip and selection: a
-redacting `Debug`)*, so no `{:?}` or panic message can leak contents; `dbg!` is denied workspace
-wide.
+`Kept` and `Report` print sizes, not bytes, through their `Debug`, as do the engine's own
+buffers (a read property, an INCR transfer either way, the served text), so no `{:?}` or panic
+message can leak contents; `dbg!` is denied workspace wide (clippy `dbg_macro`, proven by a plant).
 
 ## Dependencies this adds
 

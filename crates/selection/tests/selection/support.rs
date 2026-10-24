@@ -49,6 +49,7 @@ pub enum Call {
     },
     Announce,
     ClearCutBuffers,
+    Grab(bool),
 }
 
 #[derive(Debug, Default)]
@@ -65,6 +66,10 @@ pub struct FakeX {
     pub convert_times: HashMap<Atom, Timestamp>,
     /// The server's limit on one `ChangeProperty`.
     pub max_property: usize,
+    pub grabbed: bool,
+    /// A client about to claim CLIPBOARD at `CurrentTime`: its request is processed just before
+    /// our next `SetSelectionOwner`, or at the ungrab if the server is grabbed then.
+    pub racing_claim: Option<Window>,
 }
 
 impl FakeX {
@@ -259,6 +264,9 @@ impl Port for FakeX {
     /// ignored (dix/selection.c).
     fn set_selection_owner(&mut self, selection: Atom, owner: Option<Window>, time: Timestamp) {
         self.calls.push(Call::SetOwner { selection, owner, time });
+        if !self.grabbed {
+            self.race();
+        }
         let time = if time == Timestamp::CURRENT_TIME { Timestamp(self.time) } else { time };
         if time.0 > self.time {
             return;
@@ -281,6 +289,23 @@ impl Port for FakeX {
 
     fn clear_cut_buffers(&mut self) {
         self.calls.push(Call::ClearCutBuffers);
+    }
+
+    fn grab_server(&mut self, grab: bool) {
+        self.calls.push(Call::Grab(grab));
+        self.grabbed = grab;
+        if !grab {
+            self.race();
+        }
+    }
+}
+
+impl FakeX {
+    fn race(&mut self) {
+        if let Some(owner) = self.racing_claim.take() {
+            let clipboard = self.a("CLIPBOARD");
+            self.owners.insert(clipboard, (Some(owner), Timestamp(self.time)));
+        }
     }
 }
 

@@ -70,7 +70,8 @@ stops and its property is quarantined; and a pending `SAVE_TARGETS` is answered 
 clipboard moved on, nothing if its requestor is the owner that died).
 
 CLIPBOARD is captured, kept alive and served. PRIMARY is neither captured nor kept alive in M1
-(plan §5.2); the engine is written per selection, so turning it on later is configuration.
+(plan §5.2), only cleared (below); the engine is written per selection, so turning it on later is
+configuration.
 
 ## Targets the engine never converts
 
@@ -87,7 +88,9 @@ path (capture, `SAVE_TARGETS`, "everything you can"), the engine never converts:
 
 Triggered by an XFixes `SetSelectionOwner` notification whose new owner is not our window. Any
 such notification, including one whose owner is None, **ends the keep-alive candidate** (below)
-and abandons a capture in progress for that selection.
+and abandons a capture in progress for that selection. A new capture is reported at once
+(`CaptureStarted`), before any content, so the daemon knows the clipboard has moved on from
+whatever entry it was showing.
 
 1. **Attribute the source.** The owner window is usually a hidden helper window with no `WM_CLASS`
    (Qt's, GTK's, Chromium's). Try its `WM_CLASS`, then the `WM_CLASS` of its
@@ -238,10 +241,22 @@ A `SelectionRequest` for a selection we own:
 
 - **Serve(content)**: the user re-selected a history entry. Claim with a fresh server timestamp,
   then verify.
+- **Restore(content)**: the daemon starts with a saved history. Only if the engine believes
+  CLIPBOARD unowned: grab the server, take a server timestamp, check `GetSelectionOwner`, claim
+  with that timestamp if there is no owner, ungrab, and verify. Under the grab no client can claim
+  between the check and our claim. A client claiming after the ungrab at `CurrentTime`, or with a
+  time later than ours, wins. One remaining loss, which X offers no way to close: a client whose
+  claim carries an event time *earlier* than ours (a key press before the restore) but reaches the
+  server after it is refused by the server's time rule; an ICCCM client sees that its claim failed.
+  `ClaimFailed` if anything owns it.
 - **Clear**:
   - abandon any capture in flight, so a slow capture cannot re-add what was just cleared;
   - end the keep-alive candidate;
-  - claim CLIPBOARD as **Ours(cleared)** with a fresh server timestamp;
+  - claim CLIPBOARD as **Ours(cleared)** with a fresh server timestamp, and PRIMARY with the same
+    timestamp, also offering only `TARGETS` and `TIMESTAMP` (a selected password is as visible to
+    a middle-click as a copied one). PRIMARY's claim is not reported; losing it (`SelectionClear`
+    not older than the claim) just ends it. Unless a clear holds PRIMARY, a PRIMARY request is
+    refused; PRIMARY is never served CLIPBOARD's content;
   - empty the root window's `CUT_BUFFER0` … `CUT_BUFFER7`. xterm and urxvt fall back to the cut
     buffer when a selection paste is refused, and xterm writes `CUT_BUFFER0` on every selection.
 

@@ -8,6 +8,7 @@ use crate::{Atom, Port};
 #[derive(Debug)]
 pub(crate) struct Known {
     pub clipboard: Atom,
+    pub primary: Atom,
     pub clipboard_manager: Atom,
     pub targets: Atom,
     pub multiple: Atom,
@@ -63,6 +64,7 @@ impl Known {
         let mut i = |s: &str| intern(port, s);
         let mut known = Known {
             clipboard: i("CLIPBOARD"),
+            primary: i("PRIMARY"),
             clipboard_manager: i("CLIPBOARD_MANAGER"),
             targets: i("TARGETS"),
             multiple: i("MULTIPLE"),

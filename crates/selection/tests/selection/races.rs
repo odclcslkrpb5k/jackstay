@@ -105,7 +105,7 @@ fn a_new_claim_after_ours_is_honoured() {
     x.time = 3_000;
     let evs = x_claims(&mut x, FIREFOX, 2_500);
     let r = deliver(&mut x, &mut e, evs, 1);
-    assert_eq!(r, vec![Report::Lost]);
+    assert_eq!(r, vec![Report::Lost, Report::CaptureStarted { capture: 1 }]);
     assert!(!e.owns_clipboard());
     assert_eq!(one(x.converts()).0, "TARGETS");
 }
@@ -291,10 +291,10 @@ fn a_capture_cut_short_after_reporting_content_says_so() {
     );
     assert!(!some(captured(&r)).1, "incomplete: the image is still coming");
     let r = send!(e, &mut x, set(&mut x, Some(QT_APP), 20), Millis(3));
-    assert_eq!(r, vec![Report::CaptureEnded { capture: 1 }]);
+    assert_eq!(r, vec![Report::CaptureEnded { capture: 1 }, Report::CaptureStarted { capture: 2 }]);
     // A capture that never reported anything ends silently.
     let r = send!(e, &mut x, set(&mut x, Some(FIREFOX), 30), Millis(4));
-    assert_eq!(r, vec![]);
+    assert_eq!(r, vec![Report::CaptureStarted { capture: 3 }]);
     let _ = (refuse, OURS);
 }
 

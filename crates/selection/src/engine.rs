@@ -27,6 +27,8 @@ pub struct Config {
 /// What the engine tells the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Report {
+    /// Another client claimed the clipboard, and capturing what it offers has begun.
+    CaptureStarted { capture: u64 },
     /// Content captured so far. Later reports with the same `capture` replace earlier ones;
     /// `complete` once nothing more will be fetched.
     Captured { capture: u64, content: Arc<Content>, source: Option<String>, complete: bool },
@@ -37,9 +39,9 @@ pub enum Report {
     CaptureFailed { capture: u64 },
     /// The owner exited and the engine now serves its last copy.
     KeptAlive,
-    /// A `serve` or `clear` claim took effect.
+    /// A `serve`, `clear` or `restore` claim took effect.
     Claimed,
-    /// A `serve` or `clear` claim did not: another client owns the clipboard.
+    /// A `serve`, `clear` or `restore` claim did not: another client owns the clipboard.
     ClaimFailed,
     /// Another client took the clipboard from us.
     Lost,
@@ -84,7 +86,8 @@ struct Probe {
     misses: u8,
 }
 
-/// The clipboard's selection engine. CLIPBOARD only; PRIMARY is neither captured nor served in M1.
+/// The clipboard's selection engine. CLIPBOARD only; PRIMARY is neither captured nor served in M1,
+/// except that a clear claims it too, offering nothing.
 #[derive(Debug)]
 pub struct Engine {
     known: Known,
@@ -92,6 +95,8 @@ pub struct Engine {
     our_window: Window,
     config: Config,
     ownership: Ownership,
+    /// PRIMARY, while a clear holds it.
+    primary_cleared: Option<Served>,
     capture: Option<Capture>,
     capture_seq: u64,
     /// Whether the current capture has reported content but not yet completion.
@@ -121,6 +126,7 @@ impl Engine {
             our_window,
             config,
             ownership: Ownership::Unowned,
+            primary_cleared: None,
             capture: None,
             capture_seq: 0,
             capture_open: false,
@@ -147,7 +153,7 @@ impl Engine {
         }
         let clipboard = engine.known.clipboard;
         if let Some(owner) = port.selection_owner(clipboard).filter(|&o| o != our_window) {
-            engine.start_capture(port, owner, Timestamp::CURRENT_TIME, now);
+            engine.start_capture(port, owner, Timestamp::CURRENT_TIME, now, &mut reports);
         }
         (engine, reports)
     }
@@ -219,6 +225,10 @@ impl Engine {
                 } else if selection == self.known.clipboard_manager && self.manager_owned {
                     self.manager_owned = false;
                     reports.push(Report::ManagerLost);
+                } else if selection == self.known.primary
+                    && self.primary_cleared.as_ref().is_some_and(|s| !time.is_earlier_than(s.since))
+                {
+                    self.primary_cleared = None;
                 }
             }
             Event::PropertyNotify { window, atom, state, .. } => {
@@ -269,14 +279,57 @@ impl Engine {
         content: Arc<Content>,
         now: Millis,
     ) -> Vec<Report> {
-        self.claim(port, Some(content), now)
+        let time = port.server_time();
+        self.claim(port, Some(content), time, now)
     }
 
-    /// Clears the clipboard: abandons any capture, forgets the keep-alive candidate, claims the
-    /// clipboard offering nothing, and empties the cut buffers.
+    /// Clears the clipboard: abandons any capture, forgets the keep-alive candidate, claims
+    /// CLIPBOARD and PRIMARY offering nothing, and empties the cut buffers. The report is
+    /// CLIPBOARD's; PRIMARY is claimed whether or not that succeeded.
     pub fn clear(&mut self, port: &mut impl Port, now: Millis) -> Vec<Report> {
-        let reports = self.claim(port, None, now);
+        let time = port.server_time();
+        let reports = self.claim(port, None, time, now);
+        let primary = self.known.primary;
+        port.set_selection_owner(primary, Some(self.our_window), time);
+        self.primary_cleared = (port.selection_owner(primary) == Some(self.our_window))
+            .then(|| Served::new(port, None, time));
         port.clear_cut_buffers();
+        reports
+    }
+
+    /// Serves `content`, saved from an earlier run, but only if no client owns the clipboard: at
+    /// start, a live application's copy is newer than anything saved. Reports `Claimed` if it is
+    /// served, else `ClaimFailed`.
+    pub fn restore(
+        &mut self,
+        port: &mut impl Port,
+        content: Arc<Content>,
+        now: Millis,
+    ) -> Vec<Report> {
+        if !matches!(self.ownership, Ownership::Unowned) {
+            return vec![Report::ClaimFailed];
+        }
+        // Under a grab no client can claim between the check and our claim; one that claims after
+        // the grab has a later time than ours, and the server keeps its claim.
+        let clipboard = self.known.clipboard;
+        port.grab_server(true);
+        let time = port.server_time();
+        let unowned = port.selection_owner(clipboard).is_none();
+        if unowned {
+            port.set_selection_owner(clipboard, Some(self.our_window), time);
+        }
+        port.grab_server(false);
+        if !unowned || port.selection_owner(clipboard) != Some(self.our_window) {
+            return vec![Report::ClaimFailed];
+        }
+        // Every transition settles what is pending, though an unowned clipboard has little.
+        let mut reports = Vec::new();
+        self.end_capture(now, &mut reports);
+        self.abort_save(port, &mut reports);
+        self.cancel_probe(now);
+        self.candidate = None;
+        self.ownership = Ownership::Ours(Served::new(port, Some(content), time));
+        reports.push(Report::Claimed);
         reports
     }
 
@@ -293,6 +346,7 @@ impl Engine {
         &mut self,
         port: &mut impl Port,
         content: Option<Arc<Content>>,
+        time: Timestamp,
         now: Millis,
     ) -> Vec<Report> {
         let mut reports = Vec::new();
@@ -301,7 +355,6 @@ impl Engine {
         self.cancel_probe(now);
         self.candidate = None;
         let clipboard = self.known.clipboard;
-        let time = port.server_time();
         port.set_selection_owner(clipboard, Some(self.our_window), time);
         if port.selection_owner(clipboard) == Some(self.our_window) {
             self.ownership = Ownership::Ours(Served::new(port, content, time));
@@ -330,7 +383,9 @@ impl Engine {
                 self.cancel_probe(now);
                 self.candidate = None;
                 match owner {
-                    Some(owner) => self.start_capture(port, owner, selection_time, now),
+                    Some(owner) => {
+                        self.start_capture(port, owner, selection_time, now, reports);
+                    }
                     None => self.ownership = Ownership::Unowned,
                 }
             }
@@ -383,9 +438,11 @@ impl Engine {
         owner: Window,
         selection_time: Timestamp,
         now: Millis,
+        reports: &mut Vec<Report>,
     ) {
         self.ownership = Ownership::Theirs { selection_time };
         self.capture_seq = self.capture_seq.saturating_add(1);
+        reports.push(Report::CaptureStarted { capture: self.capture_seq });
         self.capture_open = false;
         let mut cx = Ctx {
             port,
@@ -482,7 +539,9 @@ impl Engine {
         }
         let served = match &self.ownership {
             Ownership::Ours(served) if req.selection == self.known.clipboard => Some(served),
-            Ownership::Ours(_) | Ownership::Theirs { .. } | Ownership::Unowned => None,
+            Ownership::Ours(_) | Ownership::Theirs { .. } | Ownership::Unowned => {
+                self.primary_cleared.as_ref().filter(|_| req.selection == self.known.primary)
+            }
         };
         self.transfers.answer(port, &self.known, served, req, now);
     }
