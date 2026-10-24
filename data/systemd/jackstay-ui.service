@@ -1,0 +1,19 @@
+# Jackstay's history popup, a systemd user service (docs/ui.md, "Starting and stopping").
+# Started per graphical session by jackstay-session, beside jackstayd.service.
+[Unit]
+Description=Jackstay history popup
+Documentation=https://github.com/odclcslkrpb5k/jackstay
+PartOf=graphical-session.target
+After=graphical-session.target jackstayd.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+ExecStart=%h/.local/bin/jackstay-ui
+Restart=on-failure
+RestartSec=2
+# 0 stopped, 2 bad setup, 3 another jackstay-ui: restarting would not help. 5 (no display yet) is
+# retried.
+RestartPreventExitStatus=0 2 3
+# A core dump would hold the previews it shows.
+LimitCORE=0

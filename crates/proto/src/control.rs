@@ -71,6 +71,26 @@ pub enum Error {
     Internal,
 }
 
+impl Error {
+    /// What the error means to a person, the same in every client.
+    #[must_use]
+    pub fn explain(self) -> &'static str {
+        match self {
+            Error::NoSuchEntry => "no such entry",
+            Error::TooManyPinned => "too many pinned entries (history.max_pinned)",
+            Error::StoreFailed => {
+                "done in memory, but the history on disk could not be updated (see the journal)"
+            }
+            Error::ClaimFailed => {
+                "another application holds the clipboard; it was not cleared or replaced"
+            }
+            Error::ImportFailed => "clipman's history could not be read or removed",
+            Error::UnsupportedVersion | Error::BadSequence => "jackstayd refused the request",
+            Error::Internal => "jackstayd failed (see the journal)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     pub entries: u32,

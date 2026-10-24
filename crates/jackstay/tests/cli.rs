@@ -39,28 +39,6 @@ fn jackstay(args: &[&str], display: bool, bin: Option<&Path>) -> Output {
     ok(c.output())
 }
 
-/// A daemon that greets one client and answers its one request with a status.
-fn daemon(runtime: &Path) -> std::thread::JoinHandle<()> {
-    let listener = ok(UnixListener::bind(runtime.join("control")));
-    std::thread::spawn(move || {
-        let (mut s, _) = ok(listener.accept());
-        let mut out = Vec::new();
-        ok(control::encode_response(&Response::Welcome { version: VERSION }, &mut out));
-        let status = Status {
-            entries: 0,
-            pinned: 0,
-            current: None,
-            owns_clipboard: false,
-            store_failing: false,
-        };
-        ok(control::encode_response(&Response::Status(status), &mut out));
-        let mut buf = [0u8; 64];
-        let _ = s.read(&mut buf);
-        ok(s.write_all(&out));
-        let _ = s.read(&mut buf);
-    })
-}
-
 #[test]
 fn bad_usage_is_2_and_no_daemon_is_3() {
     assert_eq!(jackstay(&[], false, None).status.code(), Some(2));
@@ -72,10 +50,10 @@ fn bad_usage_is_2_and_no_daemon_is_3() {
     assert!(String::from_utf8_lossy(&help.stdout).contains("popup"));
 }
 
-/// Until the popup exists, `popup` says so with status 4, and as a desktop notification too,
-/// since run from a hotkey nothing shows its stderr.
+/// `popup` asks the running jackstay-ui; without one it fails with status 3, and says so as a
+/// desktop notification too, since run from a hotkey nothing shows its stderr.
 #[test]
-fn popup_says_it_is_not_built_yet_where_a_hotkey_user_sees_it() {
+fn popup_asks_the_ui_and_says_so_where_a_hotkey_user_sees_it_if_none_runs() {
     let root = dir("popup");
     let bin = root.join("bin");
     ok(std::fs::create_dir_all(&bin));
@@ -86,21 +64,27 @@ fn popup_says_it_is_not_built_yet_where_a_hotkey_user_sees_it() {
         format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", said.display()),
     ));
     ok(std::fs::set_permissions(&notify, std::os::unix::fs::PermissionsExt::from_mode(0o755)));
-    let server = daemon(&root);
     let runtime = root.to_str().unwrap_or_default();
+    // A UI that answers.
+    let listener = ok(UnixListener::bind(root.join("ui")));
+    let ui = std::thread::spawn(move || {
+        let (mut s, _) = ok(listener.accept());
+        let mut asked = [0u8; 6];
+        ok(s.read_exact(&mut asked));
+        ok(s.write_all(b"ok\n"));
+        asked
+    });
     let out = jackstay(&["--runtime-dir", runtime, "popup"], true, Some(&bin));
-    let _ = server.join();
-    assert_eq!(out.status.code(), Some(4));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not built yet"));
-    let notified = ok(std::fs::read_to_string(&said));
-    assert!(notified.starts_with("--app-name=Jackstay\nJackstay\n"), "{notified}");
-    assert!(notified.contains("jackstay list"));
-    // No daemon: that is what the hotkey user is told.
-    let _ = std::fs::remove_file(&said);
-    let _ = std::fs::remove_file(root.join("control"));
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(&ok(ui.join().map_err(|_| "ui")), b"popup\n");
+    assert!(!said.exists(), "nothing to tell");
+    // None.
+    let _ = std::fs::remove_file(root.join("ui"));
     let out = jackstay(&["--runtime-dir", runtime, "popup"], true, Some(&bin));
     assert_eq!(out.status.code(), Some(3));
-    assert!(ok(std::fs::read_to_string(&said)).contains("cannot reach jackstayd"));
+    let notified = ok(std::fs::read_to_string(&said));
+    assert!(notified.starts_with("--app-name=Jackstay\nJackstay\n"), "{notified}");
+    assert!(notified.contains("jackstay-ui is not running"), "{notified}");
     // Another command's failure is not announced.
     let _ = std::fs::remove_file(&said);
     let _ = jackstay(&["--runtime-dir", runtime, "status"], true, Some(&bin));

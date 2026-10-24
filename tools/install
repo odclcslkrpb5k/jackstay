@@ -8,12 +8,14 @@ IFS=$'\n\t'
 
 usage() {
   cat <<'EOF'
-usage: tools/install [--replace-clipman] [--start]
+usage: tools/install [--replace-clipman] [--hotkey KEYS] [--start]
        tools/install --uninstall
   --replace-clipman  stop xfce4-clipman and turn off its autostart, as its own Quit does
                      (running xfce4-clipman again turns it back on)
-  --start            start jackstayd now, in this graphical session
-  --uninstall        stop jackstayd and remove what this installed; the history stays
+  --hotkey KEYS      bind KEYS (Xfce's notation, such as '<Primary><Alt>h') to the history popup
+  --start            start jackstayd and jackstay-ui now, in this graphical session
+  --uninstall        stop both and remove what this installed (and a --hotkey binding); the
+                     history stays
 EOF
 }
 
@@ -22,12 +24,14 @@ tree=$PWD
 
 from=""
 replace_clipman=0
+hotkey=""
 start=0
 uninstall=0
 while (($#)); do
   case "$1" in
     --replace-clipman) replace_clipman=1 ;;
     --start) start=1 ;;
+    --hotkey) hotkey=${2:?--hotkey needs keys, such as "<Primary><Alt>h"}; shift ;;
     --uninstall) uninstall=1 ;;
     # Install already-built binaries from DIR instead of building (for testing this script).
     --from) from=${2:?--from needs a directory}; shift ;;
@@ -43,7 +47,8 @@ config=${XDG_CONFIG_HOME:-$HOME/.config}
 bin=$HOME/.local/bin
 unit_dir=$config/systemd/user
 autostart_dir=$config/autostart
-programs=(jackstayd jackstay)
+programs=(jackstayd jackstay jackstay-ui)
+units=(jackstayd.service jackstay-ui.service)
 
 # systemctl --user, if there is a user manager to talk to.
 user_systemctl() {
@@ -65,9 +70,19 @@ write_file() {
   mv -f "$tmp" "$dest"
 }
 
+# Xfce's keyboard shortcuts bound to the popup, one a line.
+popup_bindings() {
+  command -v xfconf-query >/dev/null || return 0
+  xfconf-query -c xfce4-keyboard-shortcuts -p /commands/custom -l -v 2>/dev/null \
+    | awk -v want="$bin/jackstay popup" '{ p = $1; $1 = ""; sub(/^ +/, ""); if ($0 == want) print p }'
+}
+
 if ((uninstall)); then
-  user_systemctl stop jackstayd.service || true
-  rm -f "$autostart_dir/jackstay.desktop" "$unit_dir/jackstayd.service" \
+  user_systemctl stop "${units[@]}" || true
+  while IFS= read -r binding; do
+    [[ -n "$binding" ]] && xfconf-query -c xfce4-keyboard-shortcuts -p "$binding" -r
+  done < <(popup_bindings)
+  rm -f "$autostart_dir/jackstay.desktop" "${units[@]/#/$unit_dir/}" \
     "$bin/jackstay-session" "${programs[@]/#/$bin/}"
   user_systemctl daemon-reload
   printf 'removed; the history is still in %s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/jackstay"
@@ -83,7 +98,7 @@ fi
 
 if [[ -z "$from" ]]; then
   ./dev env CARGO_TARGET_DIR=/work/.cache/target \
-    cargo build --release --locked -p jackstayd -p jackstay
+    cargo build --release --locked -p jackstayd -p jackstay -p jackstay-ui
   from=$tree/.cache/target/release
 fi
 for p in "${programs[@]}"; do
@@ -94,7 +109,9 @@ for p in "${programs[@]}"; do
   write_file "$bin/$p" 0755 <"$from/$p"
 done
 write_file "$bin/jackstay-session" 0755 <data/jackstay-session
-write_file "$unit_dir/jackstayd.service" 0644 <data/systemd/jackstayd.service
+for unit in "${units[@]}"; do
+  write_file "$unit_dir/$unit" 0644 <"data/systemd/$unit"
+done
 sed "s|^Exec=jackstay-session\$|Exec=$bin/jackstay-session|" data/autostart/jackstay.desktop \
   | write_file "$autostart_dir/jackstay.desktop" 0644
 grep -qx "Exec=$bin/jackstay-session" "$autostart_dir/jackstay.desktop" || {
@@ -103,8 +120,15 @@ grep -qx "Exec=$bin/jackstay-session" "$autostart_dir/jackstay.desktop" || {
 }
 user_systemctl daemon-reload
 # A running daemon is restarted on the new binary; its history is saved on the way down.
-user_systemctl try-restart jackstayd.service
-printf 'installed jackstayd, jackstay and jackstay-session in %s\n' "$bin"
+user_systemctl try-restart "${units[@]}"
+printf 'installed jackstayd, jackstay, jackstay-ui and jackstay-session in %s\n' "$bin"
+
+if [[ -n "$hotkey" ]]; then
+  command -v xfconf-query >/dev/null || { printf 'xfconf-query not found: no hotkey bound\n' >&2; exit 1; }
+  xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/$hotkey" -n -t string \
+    -s "$bin/jackstay popup"
+  printf 'bound %s to the history popup\n' "$hotkey"
+fi
 
 if ((replace_clipman)); then
   # What clipman's own Quit does: Hidden=true in its autostart entry. Running clipman again sets

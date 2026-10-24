@@ -322,3 +322,21 @@ fn limits_are_inclusive_when_decoding() {
         Err(DecodeError::Limit(LimitError::TextTooLong { len: MAX_SOURCE_LEN + 1 }))
     );
 }
+
+#[test]
+fn every_error_has_its_own_explanation() {
+    use jackstay_proto::control::Error;
+    let all = [
+        Error::NoSuchEntry,
+        Error::TooManyPinned,
+        Error::StoreFailed,
+        Error::ClaimFailed,
+        Error::ImportFailed,
+        Error::UnsupportedVersion,
+        Error::Internal,
+    ];
+    let said: std::collections::HashSet<&str> = all.iter().map(|e| e.explain()).collect();
+    assert_eq!(said.len(), all.len());
+    assert!(said.iter().all(|s| !s.is_empty()));
+    assert_eq!(Error::BadSequence.explain(), Error::UnsupportedVersion.explain());
+}

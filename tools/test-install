@@ -19,17 +19,44 @@ fail() {
   printf 'install test: %s\n' "$*" >&2
   exit 1
 }
+# xfconf, standing in: properties kept one a line ("path value") in a file.
+fakes=$home/fakes
+mkdir -p "$fakes"
+xfconf=$home/xfconf
+: >"$xfconf"
+{
+  printf '#!/bin/bash\nstore=%q\n' "$xfconf"
+  cat <<'FAKE'
+p="" v="" list=0 remove=0
+while (($#)); do
+  case "$1" in
+    -c | -t) shift ;;
+    -p) p=$2; shift ;;
+    -s) v=$2; shift ;;
+    -l) list=1 ;;
+    -r) remove=1 ;;
+  esac
+  shift
+done
+if ((list)); then grep -F "$p/" "$store" || true
+elif ((remove)); then grep -vF "$p " "$store" >"$store.new" || true; mv "$store.new" "$store"
+else printf '%s %s\n' "$p" "$v" >>"$store"; fi
+FAKE
+} >"$fakes/xfconf-query"
+chmod +x "$fakes/xfconf-query"
+
 install() {
-  HOME=$home XDG_CONFIG_HOME="" tools/install --from "$built" "$@"
+  HOME=$home XDG_CONFIG_HOME="" PATH="$fakes:$PATH" tools/install --from "$built" "$@"
 }
 
 install
-for p in jackstayd jackstay jackstay-session; do
+for p in jackstayd jackstay jackstay-ui jackstay-session; do
   [[ -x "$home/.local/bin/$p" ]] || fail "$p not installed"
 done
 cmp -s "$built/jackstayd" "$home/.local/bin/jackstayd" || fail "jackstayd is not the built one"
-cmp -s data/systemd/jackstayd.service "$home/.config/systemd/user/jackstayd.service" \
-  || fail "unit differs"
+for unit in jackstayd.service jackstay-ui.service; do
+  cmp -s "data/systemd/$unit" "$home/.config/systemd/user/$unit" || fail "$unit differs"
+done
 grep -qx "Exec=$home/.local/bin/jackstay-session" "$home/.config/autostart/jackstay.desktop" \
   || fail "autostart entry does not run the installed jackstay-session"
 [[ "$(stat -c %a "$home/.config/autostart/jackstay.desktop")" == 644 ]] || fail "entry mode"
@@ -58,10 +85,19 @@ grep -qx 'Hidden=true' "$entry" || fail "Hidden=true not added"
 
 mkdir -p "$home/.local/state/jackstay"
 touch "$home/.local/state/jackstay/index"
+# A hotkey for the popup, beside a binding of the user's own.
+printf '/commands/custom/<Alt>F2 xfce4-appfinder\n' >>"$xfconf"
+install --hotkey '<Primary><Alt>h' >/dev/null
+grep -qxF "/commands/custom/<Primary><Alt>h $home/.local/bin/jackstay popup" "$xfconf" \
+  || fail "hotkey not bound: $(cat "$xfconf")"
+
 install --uninstall >/dev/null
-for f in .local/bin/jackstayd .local/bin/jackstay .local/bin/jackstay-session \
-  .config/systemd/user/jackstayd.service .config/autostart/jackstay.desktop; do
+! grep -qF 'jackstay popup' "$xfconf" || fail "hotkey left bound"
+grep -qxF '/commands/custom/<Alt>F2 xfce4-appfinder' "$xfconf" || fail "the user's binding removed"
+for f in .local/bin/jackstayd .local/bin/jackstay .local/bin/jackstay-ui \
+  .local/bin/jackstay-session .config/systemd/user/jackstayd.service \
+  .config/systemd/user/jackstay-ui.service .config/autostart/jackstay.desktop; do
   [[ ! -e "$home/$f" ]] || fail "$f not removed"
 done
 [[ -e "$home/.local/state/jackstay/index" ]] || fail "the history was removed"
-printf 'install, reinstall, --replace-clipman and --uninstall did what they say\n'
+printf 'install, reinstall, --replace-clipman, --hotkey and --uninstall did what they say\n'

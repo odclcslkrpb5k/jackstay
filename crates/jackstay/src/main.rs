@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use jackstay_proto::control::{Error, Kinds, Request, Response, Summary, printable};
 use jackstayd::client::{Client, ClientError};
+use jackstayd::ui_socket;
 
 const USAGE: &str = "\
 usage: jackstay [--runtime-dir DIR] COMMAND
@@ -20,19 +21,13 @@ commands:
   clear                      clear the clipboard, deleting what was on it unless pinned
   clear-history              delete every unpinned entry and clear the clipboard
   import-clipman [--remove]  import xfce4-clipman's history; --remove deletes its files after
-  popup                      the history popup, for a hotkey (not built yet: says so, exit 4)";
+  popup                      show the history popup at the pointer (for a hotkey; needs jackstay-ui)";
 
-/// Exit statuses: 0 done, 1 refused by the daemon, 2 bad usage, 3 the daemon unreachable, 4 not
-/// in this version.
+/// Exit statuses: 0 done, 1 refused by the daemon, 2 bad usage, 3 the daemon (or, for `popup`,
+/// jackstay-ui) unreachable.
 const REFUSED: u8 = 1;
 const USAGE_ERROR: u8 = 2;
 const UNREACHABLE: u8 = 3;
-const NOT_YET: u8 = 4;
-
-/// What `jackstay popup` says until the popup exists (plan §6, M2). The command is there now so
-/// that a hotkey bound to it keeps working when the popup arrives.
-const POPUP_NOT_YET: &str = "the history popup is not built yet; for now: jackstay list, then \
-                             jackstay select ID";
 
 /// How many entries one page of `list --all` asks for.
 const PAGE: u32 = 500;
@@ -107,7 +102,7 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
     let mut popup = false;
     let request = match (command.as_str(), rest) {
         ("status", []) => Request::Status,
-        // Asks for the status only to say whether the daemon runs, which the popup will need.
+        // Not the daemon's: the UI's socket (docs/ui.md).
         ("popup", []) => {
             popup = true;
             Request::Status
@@ -139,18 +134,25 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
             .ok_or((UNREACHABLE, "XDG_RUNTIME_DIR is not set".to_owned()))?
             .join("jackstay"),
     };
+    if popup {
+        return ui_socket::request_popup(&runtime, Duration::from_secs(5)).map_err(|e| {
+            let why = if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) {
+                "jackstay-ui is not running".to_owned()
+            } else {
+                format!("jackstay-ui did not answer: {e}")
+            };
+            (UNREACHABLE, why)
+        });
+    }
     let mut client = Client::connect(&runtime.join("control"), Duration::from_secs(30))
         .map_err(|e| failed(&e))?;
     if all {
         return list_all(&mut client);
     }
     let response = client.ask(&request).map_err(|e| failed(&e))?;
-    if popup {
-        return match response {
-            Response::Status(_) => Err((NOT_YET, POPUP_NOT_YET.to_owned())),
-            other => show(&request, other),
-        };
-    }
     show(&request, response)
 }
 
@@ -172,20 +174,7 @@ fn list_all(client: &mut Client) -> Result<(), Failure> {
 }
 
 fn refused(e: Error) -> Failure {
-    let why = match e {
-        Error::NoSuchEntry => "no such entry",
-        Error::TooManyPinned => "too many pinned entries (history.max_pinned)",
-        Error::StoreFailed => {
-            "done in memory, but the history on disk could not be updated (see the journal)"
-        }
-        Error::ClaimFailed => {
-            "another application holds the clipboard; it was not cleared or replaced"
-        }
-        Error::ImportFailed => "clipman's history could not be read or removed",
-        Error::UnsupportedVersion | Error::BadSequence => "jackstayd refused the request",
-        Error::Internal => "jackstayd failed (see the journal)",
-    };
-    (REFUSED, why.to_owned())
+    (REFUSED, e.explain().to_owned())
 }
 
 fn show(request: &Request, response: Response) -> Result<(), Failure> {

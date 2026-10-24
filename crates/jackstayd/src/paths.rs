@@ -122,6 +122,14 @@ pub fn private_dir(dir: &Path) -> Result<(), PathError> {
 /// # Errors
 /// The lock file cannot be opened.
 pub fn lock(runtime: &Path) -> io::Result<Option<File>> {
+    lock_named(runtime, "lock")
+}
+
+/// Takes the lock `<dir>/<name>`, as [`lock`] does.
+///
+/// # Errors
+/// The lock file cannot be opened.
+pub fn lock_named(dir: &Path, name: &str) -> io::Result<Option<File>> {
     let nofollow = i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).unwrap_or(0);
     let file = OpenOptions::new()
         .read(true)
@@ -130,7 +138,7 @@ pub fn lock(runtime: &Path) -> io::Result<Option<File>> {
         .truncate(false)
         .mode(0o600)
         .custom_flags(nofollow)
-        .open(runtime.join("lock"))?;
+        .open(dir.join(name))?;
     match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => Ok(Some(file)),
         Err(e) if e == rustix::io::Errno::WOULDBLOCK => Ok(None),

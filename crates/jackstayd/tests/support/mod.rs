@@ -226,6 +226,16 @@ pub fn previews(home: &Home) -> Vec<String> {
     }
 }
 
+/// As [`previews`], or `None` if the daemon could not be asked: one that has just been full
+/// closes a newcomer until it has seen the others go.
+pub fn try_previews(home: &Home) -> Option<Vec<String>> {
+    let mut c = Client::connect(&home.socket(), Duration::from_secs(10)).ok()?;
+    match c.ask(&Request::List { offset: 0, limit: 100 }).ok()? {
+        Response::List { entries, .. } => Some(entries.into_iter().map(|e| e.preview).collect()),
+        _ => None,
+    }
+}
+
 pub fn ids(home: &Home) -> Vec<u64> {
     match ask(home, Request::List { offset: 0, limit: 100 }) {
         Response::List { entries, .. } => entries.into_iter().map(|e| e.id).collect(),

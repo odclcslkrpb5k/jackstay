@@ -26,3 +26,14 @@ unknown-git = "deny"
 [[licenses.exceptions]]
 crate = "libfuzzer-sys"
 allow = ["NCSA"]
+
+# Build-time only, through gtk-rs's build scripts and macros: proc-macro2's Unicode tables are under
+# Unicode-3.0 (permissive, GPL-compatible); system-deps' cfg-expr uses target-lexicon, Apache-2.0
+# with LLVM's exception, which only adds permissions. Neither is in a shipped binary's code.
+[[licenses.exceptions]]
+crate = "unicode-ident"
+allow = ["Unicode-3.0"]
+
+[[licenses.exceptions]]
+crate = "target-lexicon"
+allow = ["Apache-2.0 WITH LLVM-exception"]

@@ -297,13 +297,11 @@ fn at_most_sixteen_clients_and_pipelined_requests_keep_their_order() {
     ok(std::io::Read::read_to_end(&mut extra, &mut buf));
     assert!(buf.is_empty(), "the 17th is closed at once");
     drop(held);
-    // Until the daemon has seen those close, it is still full, and closes a newcomer at once.
-    eventually("room for a client again", || {
-        Client::connect(&home.socket(), Duration::from_secs(5)).is_ok()
-    });
     // A clear (answered once the store confirms) and a status sent together: answered in order.
+    // Until the daemon has seen all sixteen close, possibly over several turns, it is still full
+    // and closes a newcomer at once: so the first look is retried.
     let owner = copy(&x, "secret");
-    eventually("the copy", || previews(&home) == ["secret"]);
+    eventually("the copy", || try_previews(&home).is_some_and(|p| p == ["secret"]));
     let mut s = raw(&home);
     let hello = Request::Hello { version: jackstay_proto::control::VERSION };
     ok(s.write_all(&frames(&[hello, Request::Clear, Request::Status])));

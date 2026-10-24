@@ -20,11 +20,12 @@ Jackstay is intended to replace both [Synergy](https://symless.com/synergy) and
 
 ## Status
 
-Early development. Milestone M1 is done. Working now: the clipboard manager (`jackstayd` and the `jackstay` command):
-history of CLIPBOARD copies kept after their application quits, restored after a restart,
-clearing, pinning and xfce4-clipman's history imported. Not yet: the popup and tray (M2), and
-sharing between machines (M3 to M5). See [the plan](docs/plan.md) and
-[the daemon's design](docs/daemon.md).
+Early development. Working now: the clipboard manager (`jackstayd`), its history popup
+(`jackstay-ui`) and the `jackstay` command: CLIPBOARD copies kept after their application quits
+and restored after a restart, a searchable history at the pointer, clearing, pinning, and
+xfce4-clipman's history imported. Not yet: the tray and settings (M2), and sharing between
+machines (M3 to M5). See [the plan](docs/plan.md), [the daemon](docs/daemon.md) and
+[the desktop side](docs/ui.md).
 
 ## Install
 
@@ -32,16 +33,18 @@ Needs Docker (the build runs in the development container) and Xubuntu 26.04 or 
 whose glibc is at least the container's (2.43).
 
 ```sh
-tools/install --replace-clipman --start
+tools/install --replace-clipman --hotkey '<Primary><Alt>h' --start
 ```
 
-- Builds `jackstayd` and `jackstay` and copies them, with `jackstay-session`, to `~/.local/bin`;
-  the systemd user unit to `~/.config/systemd/user`; an autostart entry to `~/.config/autostart`.
+- Builds `jackstayd`, `jackstay` and `jackstay-ui` and copies them, with `jackstay-session`, to
+  `~/.local/bin`; their systemd user units to `~/.config/systemd/user`; an autostart entry to `~/.config/autostart`.
   Nothing outside your home directory is touched. Running it again upgrades, restarting a
   running daemon.
 - `--replace-clipman` stops xfce4-clipman and turns off its autostart, as clipman's own Quit
   does. Two clipboard managers fight, so `jackstayd` refuses to run beside clipman. If clipman
   is in the panel as a plugin, remove it there too (Panel Preferences, Items).
+- `--hotkey KEYS` binds the history popup to KEYS in Xfce's keyboard shortcuts (here Ctrl+Alt+H;
+  leave it out to bind one yourself to `~/.local/bin/jackstay popup`).
 - `--start` starts it now; otherwise it starts at the next login.
 
 On its first start Jackstay imports clipman's saved history behind its own. clipman's files are
@@ -57,7 +60,7 @@ jackstay delete ID
 jackstay clear           # clear the clipboard and delete what was on it, unless pinned
 jackstay clear-history   # delete every unpinned entry and clear the clipboard
 jackstay status
-jackstay popup           # for a hotkey; the popup itself comes next (M2), until then it says so
+jackstay popup           # the history at the pointer: type to search, Enter to paste
 ```
 
 Nothing copied is filtered or hidden: a copied password is kept like anything else, and
