@@ -62,6 +62,18 @@ plant_advisory_in_dependency() {
   cargo generate-lockfile --quiet
 }
 
+# The same, behind a file that is not valid UTF-8 and is scanned first: a decoding scanner died
+# there, unseen, and passed everything after it.
+plant_hidden_character_after_latin1() {
+  printf 'caf\xe9\n' > aaa-latin1.txt
+  plant_hidden_character
+}
+
+# A zero-width space inside a comment: invisible in review, refused by the gate.
+plant_hidden_character() {
+  printf '\n// planted\xe2\x80\x8b here\n' >> crates/proto/src/lib.rs
+}
+
 plant_empty_fuzz_corpus() {
   rm -f crates/proto/fuzz/corpus/decode/*
 }
@@ -75,6 +87,8 @@ plants=(
   "unchecked_arithmetic_in_parser|clippy|arithmetic operation that can potentially result in unexpected side-effects"
   "crate_without_workspace_lints|workspace lints reach every crate|crates/planted/Cargo.toml: missing"
   "lockfile_drift|clippy|cannot update the lock file .* because --locked was passed"
+  "hidden_character|hidden characters|crates/proto/src/lib.rs:[0-9]+: hidden character"
+  "hidden_character_after_latin1|hidden characters|crates/proto/src/lib.rs:[0-9]+: hidden character"
   "unformatted|format|^Diff in .*/crates/proto/src/lib.rs"
   "failing_test|tests|test planted \.\.\. FAILED"
   "empty_fuzz_corpus|tests|only 0 corpus inputs"

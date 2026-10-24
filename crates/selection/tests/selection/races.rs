@@ -297,3 +297,25 @@ fn a_capture_cut_short_after_reporting_content_says_so() {
     assert_eq!(r, vec![]);
     let _ = (refuse, OURS);
 }
+
+#[test]
+fn a_late_write_to_an_abandoned_property_is_deleted_at_once() {
+    let mut x = FakeX::new();
+    let (mut e, _) = engine(&mut x);
+    x.take_calls();
+    send!(e, &mut x, set(&mut x, Some(FIREFOX), 10), Millis(0));
+    let (_, abandoned) = one(x.converts());
+    send!(e, &mut x, set(&mut x, Some(QT_APP), 20), Millis(1));
+    x.take_calls();
+    // Firefox answers the conversion we gave up on.
+    x.put(OURS, abandoned, "ATOM", Format::Bits32, &[0; 4096]);
+    let late = Event::PropertyNotify {
+        window: OURS,
+        atom: abandoned,
+        state: jackstay_selection::PropertyState::NewValue,
+        time: Timestamp(0),
+    };
+    assert_eq!(send!(e, &mut x, late, Millis(2)), vec![]);
+    assert!(x.take_calls().contains(&Call::Delete { window: OURS, property: abandoned }));
+    assert!(!x.props.contains_key(&(OURS, abandoned)));
+}

@@ -223,6 +223,14 @@ impl Engine {
             }
             Event::PropertyNotify { window, atom, state, .. } => {
                 if window == self.our_window && state == PropertyState::NewValue {
+                    // A late write to one of our idle properties (an owner answering a
+                    // conversion we gave up on) is deleted at once, rather than left holding
+                    // what may be megabytes in the server; for an INCR owner the delete also
+                    // asks for its next chunk, so a stale transfer drains instead of hanging.
+                    if self.pool.is_idle(atom) {
+                        port.delete_property(self.our_window, atom);
+                        return reports;
+                    }
                     let progress = self.with_capture(port, now, |c, cx| c.on_new_value(cx, atom));
                     self.progressed(progress, &mut reports);
                     self.finish_save_if_ready(port, now, &mut reports);

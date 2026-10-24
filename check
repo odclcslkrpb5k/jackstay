@@ -62,8 +62,25 @@ deny_whole_graph() {
   cargo deny --manifest-path "$mirror/Cargo.toml" --config deny.toml --locked check
 }
 
+# CD-7: no hidden characters in tracked text. NUL and the other C0 controls but tab, newline and
+# carriage return; DEL; and the Unicode bidirectional and zero-width characters that make source
+# read differently from how it compiles. Escapes (`\0`, `\u{200b}`) are the way to write them.
+# The scan reads bytes and matches those characters' UTF-8 encodings, so a file that is not valid
+# UTF-8 cannot stop it partway (a decoding perl dies on one, and its END block hid the death).
+hidden_characters() {
+  git ls-files -z -- ':!*.png' ':!crates/proto/fuzz/corpus' \
+    | xargs -0 -r perl -ne '
+        if (/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]|\xE2\x80[\x8B-\x8F\xAA-\xAE]|\xE2\x81[\xA0-\xA4\xA6-\xA9]|\xEF\xBB\xBF/) {
+          printf "%s:%d: hidden character\n", $ARGV, $.;
+          $bad = 1;
+        }
+        close ARGV if eof;
+        END { $? ||= $bad ? 1 : 0 }'
+}
+
 fuzz=crates/proto/fuzz/Cargo.toml
 step "workspace lints reach every crate" workspace_lints_opt_in
+step "hidden characters" hidden_characters
 step "format" cargo fmt --all --check
 step "format (fuzz targets)" cargo fmt --manifest-path "$fuzz" --check
 step "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings

@@ -13,7 +13,7 @@ RUN apt-get update --error-on=any \
  && apt-get install -y --no-install-recommends --snapshot "${APT_SNAPSHOT}" \
       build-essential pkg-config curl git \
       libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
-      xvfb xauth x11-utils x11-xserver-utils xdotool \
+      xvfb xauth x11-utils x11-xserver-utils xdotool xclip xsel \
  && rm -rf /var/lib/apt/lists/*
 
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH

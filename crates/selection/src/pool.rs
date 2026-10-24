@@ -55,6 +55,12 @@ impl Pool {
         Some(atom)
     }
 
+    /// Whether `atom` is one of ours that no transfer is using: anything written to it now is a
+    /// late write from an abandoned or finished transfer.
+    pub(crate) fn is_idle(&self, atom: Atom) -> bool {
+        self.slots.iter().any(|s| s.0 == atom && s.1 != State::InUse)
+    }
+
     /// Properties handed out and not yet released or quarantined.
     pub(crate) fn in_use(&self) -> usize {
         self.slots.iter().filter(|s| s.1 == State::InUse).count()
