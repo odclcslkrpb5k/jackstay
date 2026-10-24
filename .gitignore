@@ -1,3 +1,4 @@
 # Agent notes are local durable context, never committed
 /docs/claude-notes/
 /.cache/
+/target/

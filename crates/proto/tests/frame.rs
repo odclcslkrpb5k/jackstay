@@ -154,8 +154,11 @@ fn inline_flag_must_be_zero_or_one() {
 }
 
 #[test]
-fn target_names_are_printable_ascii() {
-    let payload = announce_payload(b"UTF8 STRING", 1, None);
+fn target_names_are_printable_ascii_with_spaces() {
+    let libreoffice =
+        br#"application/x-openoffice-embed-source-xml;windows_formatname="Star Embed Source (XML)""#;
+    assert!(TargetName::parse(libreoffice).is_ok());
+    let payload = announce_payload(b"UTF8\tSTRING", 1, None);
     assert_eq!(
         decode(&raw_frame(1, &payload)),
         Err(DecodeError::Limit(LimitError::TargetNameNotPrintableAscii))
@@ -185,7 +188,7 @@ fn an_announcement_that_would_not_fit_a_frame_cannot_be_built() {
 }
 
 fn arb_target() -> impl Strategy<Value = Target> {
-    let name = "[!-~]{1,40}".prop_map(|s| ok(TargetName::parse(s.as_bytes())));
+    let name = "[ -~]{1,40}".prop_map(|s| ok(TargetName::parse(s.as_bytes())));
     prop_oneof![
         (name.clone(), any::<u64>()).prop_map(|(n, size)| Target::deferred(n, size)),
         (name, proptest::collection::vec(any::<u8>(), 0..512))

@@ -50,7 +50,7 @@ deny_whole_graph() {
   local expected seen
   expected=$(cargo tree --workspace --locked --target x86_64-unknown-linux-gnu \
       --edges normal,build,dev --prefix none --format '{p}' \
-    | sed -E 's/^([^ ]+) v([^ ]+).*/\1@\2/' | sort -u)
+    | grep -v '^$' | sed -E 's/^([^ ]+) v([^ ]+).*/\1@\2/' | sort -u)
   seen=$(cargo deny --manifest-path "$mirror/Cargo.toml" --locked list --format human \
     | sed -E 's/^[^:]*: //' | tr ',' '\n' | sed -E 's/^ +//' | grep -v '^$' | sort -u)
   if [[ "$seen" != "$expected" ]]; then

@@ -25,8 +25,9 @@ impl EntryId {
     }
 }
 
-/// A selection target name, such as `UTF8_STRING` or `image/png`: non-empty printable ASCII, at
-/// most [`MAX_TARGET_NAME_LEN`] bytes. Its length is kept as a `u8`, which the limit guarantees.
+/// A selection target name, such as `UTF8_STRING` or `image/png`: non-empty printable ASCII,
+/// spaces included (some office suites put spaces and quotes in theirs), at most
+/// [`MAX_TARGET_NAME_LEN`] bytes. Its length is kept as a `u8`, which the limit guarantees.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TargetName {
     name: String,
@@ -45,7 +46,7 @@ impl TargetName {
             return Err(too_long);
         }
         let len = u8::try_from(bytes.len()).map_err(|_| too_long)?;
-        if !bytes.iter().all(u8::is_ascii_graphic) {
+        if !bytes.iter().all(|b| (b' '..=b'~').contains(b)) {
             return Err(LimitError::TargetNameNotPrintableAscii);
         }
         let name =

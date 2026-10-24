@@ -264,15 +264,17 @@ One Cargo workspace. Each crate has one job, and only `x11-input` may contain `u
 |---|---|---|
 | `proto` | Wire and socket message types, their encoders and decoders, version negotiation | forbidden |
 | `clip` | The clipboard model and history store; no I/O | forbidden |
-| `x11-clip` | Selection protocol over `RustConnection` | forbidden |
+| `selection` | The ICCCM selection protocol as pure state machines: capture, INCR both ways, MULTIPLE, keep-alive, CLIPBOARD_MANAGER; talks to X only through a port trait | forbidden |
+| `x11-clip` | Implements that port over x11rb's `RustConnection`; the clipboard thread's event loop | forbidden |
 | `x11-input` | Barriers, grabs, XI2, XTest, libxkbcommon; the only FFI adapter (ER-3) | allowed, audited |
 | `net` | QUIC sessions, pairing, reconnect | forbidden |
 | `jackstayd` | Wires the above into threads and channels; config; supervision | forbidden |
 | `jackstay-ui` | gtk3-rs popup, settings, ksni tray | forbidden in our code |
 | `jackstay` | CLI: `popup`, `clear`, `switch <screen>`, `lock`, `status`, `pair`; a thin socket client | forbidden |
 
-Logic lives in `clip` and `proto`, which need no display server and are tested by property tests
-and fuzzing. The X11 crates are thin and are tested against real X servers (§5.7).
+Logic lives in `clip`, `selection` and `proto`, which need no display server and are tested by
+scripted event sequences, property tests and fuzzing (`selection` and `proto` read bytes other
+programs control, so they deny every panicking construct, as `proto` does). The X11 crates are thin and are tested against real X servers (§5.7).
 
 ### 5.2 Clipboard model
 
@@ -514,7 +516,7 @@ usable on its own, and each target's main control exists before the owner depend
 | M0 | Skeleton and spikes | Workspace, Docker image, `./check`, CI, lint and deny configs, one planted bug per control watched failing; the standard session's measurement list (§5.8) answered; spikes: XTest motion triggers barriers on Xvfb, and whether XTest keys stay down after the injecting client dies. Spikes **done 2026-10-23** (`spikes/x11-probes`; results in §5.3 and §5.7) |
 | M1 | Headless clipboard manager | Capture, keep-alive, CLIPBOARD_MANAGER, history store, clearing (`jackstay clear`), clipman import, `jackstay popup` placeholder; core tier of the conformance matrix in `./check` |
 | M2 | Clipboard UI and application tier | Popup, tray, settings; application tier of the matrix. **Dogfood:** the owner disables clipman for two weeks; done when no lost or wrong entry is reported, and every report has become a matrix case |
-| M3 | Link | Pairing, QUIC session, reconnect, heartbeat, two-machine harness |
+| M3 | Link | Pairing, QUIC session, reconnect, heartbeat, two-machine harness; `proto` adopts `clip`'s lossless Latin-1 `TargetName` (up to 4096 bytes, u16 length on the wire) in place of its ASCII-only one, and the fuzz corpus is regrown |
 | M4 | Input sharing | §5.3 working; latency acceptance on the owner's LAN. **Dogfood:** the owner runs Jackstay instead of Synergy for input (Synergy stays installed as the fallback), with Synergy's clipboard sharing missed for the duration |
 | M5 | Clipboard sharing | §5.4 working; the owner uninstalls Synergy |
 | M6 | Hardening and packaging | Soak test passing, fuzzing in CI, a `.deb` |

@@ -59,6 +59,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jackstay-clip"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "jackstay-proto"
 version = "0.0.0"
 dependencies = [
