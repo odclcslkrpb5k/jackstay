@@ -42,11 +42,13 @@ RUN apt-get update --error-on=any --snapshot "${APT_SNAPSHOT}" \
  && rm -rf /var/lib/apt/lists/*
 
 # The conformance matrix's clients (docs/conformance.md): each toolkit's own clipboard code, and
-# xterm. Appended for the same reason.
+# xterm. Appended for the same reason. nss_wrapper gives the tray tests' dbus-daemon a user entry
+# under any uid the container runs as (CI's has none in /etc/passwd).
 RUN apt-get update --error-on=any --snapshot "${APT_SNAPSHOT}" \
  && apt-get install -y --no-install-recommends --snapshot "${APT_SNAPSHOT}" \
       libgtk-3-dev libgtk-4-dev qt6-base-dev qt6-qpa-plugins libxcb-cursor0 \
       xterm xfonts-base fonts-dejavu-core \
+      libnss-wrapper \
  && rm -rf /var/lib/apt/lists/*
 
 # Per-run caches live in the bind-mounted tree (gitignored), so the container runs as the host user.

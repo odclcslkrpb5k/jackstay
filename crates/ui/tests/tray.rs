@@ -5,7 +5,9 @@
 mod support;
 
 use std::io::{BufRead, BufReader};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -13,6 +15,8 @@ use gtk::gio;
 use gtk::glib::{self, prelude::ToVariant};
 use jackstay_proto::control::Request;
 use support::*;
+
+static NEXT_BUS: AtomicU32 = AtomicU32::new(0);
 
 /// A session bus of its own.
 struct Bus {
@@ -22,8 +26,25 @@ struct Bus {
 
 impl Bus {
     fn start() -> Self {
+        // dbus-daemon will not start for a uid with no passwd entry, which is how CI runs the
+        // container: nss_wrapper gives it one, for this process alone.
+        let ids = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "bus-ids-{}-{}",
+            std::process::id(),
+            NEXT_BUS.fetch_add(1, Ordering::Relaxed)
+        ));
+        ok(std::fs::create_dir_all(&ids));
+        let (uid, gid) = (rustix::process::getuid().as_raw(), rustix::process::getgid().as_raw());
+        ok(std::fs::write(
+            ids.join("passwd"),
+            format!("tester:x:{uid}:{gid}:tester:/tmp:/bin/sh\n"),
+        ));
+        ok(std::fs::write(ids.join("group"), format!("tester:x:{gid}:\n")));
         let mut child = ok(Command::new("dbus-daemon")
             .args(["--session", "--nofork", "--print-address=1"])
+            .env("LD_PRELOAD", "libnss_wrapper.so")
+            .env("NSS_WRAPPER_PASSWD", ids.join("passwd"))
+            .env("NSS_WRAPPER_GROUP", ids.join("group"))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn());
