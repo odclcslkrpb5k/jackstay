@@ -36,9 +36,14 @@ The engine owns one window, created by the adapter with `PropertyChangeMask`.
 
 ## Properties for incoming transfers: a pool, never reused while in doubt
 
-Each conversion the engine asks for uses a fresh property atom from a pool (`JACKSTAY_P0` …
-`JACKSTAY_P31`). A reply is accepted only if it matches the conversion it answers on (selection,
-target, property, time). A property whose conversion was abandoned (superseded, timed out) is
+Each conversion the engine asks for uses a property atom from a pool (`JACKSTAY_P0`, … interned as
+needed, eight before any is reused, then round-robin, at most 256) that no other transfer is using
+or might still write to. A reply is accepted only if it matches the conversion it answers on
+(selection, target, property, time). Every conversion in a capture is asked with the capture's
+selection time, and owners echo it. A reply naming our property may also carry `CurrentTime`, but a
+refusal (property `None`) must carry exactly the conversion's time: otherwise a refusal of an older
+conversion of the same target, sent by a newer owner that saw our older request, would be taken as
+the newer owner's answer. A property whose conversion was abandoned (superseded, timed out) is
 **quarantined** for 60 s before reuse. Owners keep going long after we stop listening: GTK keeps a
 transfer alive for 30 s (gtkselection.c:140), Chromium for 10 s (selection_owner.cc:46). A late
 reply, or a late INCR chunk on a reused property, would otherwise be read as part of a newer copy.
@@ -49,7 +54,20 @@ reply, or a late INCR chunk on a reused property, would otherwise be read as par
 - **Ours(content, since)**: we own it, and serve `content`; `since` is the time we claimed with.
 - **Ours(cleared, since)**: we own it and offer only `TARGETS` and `TIMESTAMP`, so a paste
   yields nothing. This is "clear clipboard" when another application still owns it.
-- **Unowned.**
+- **Unowned.** Also the state after `SelectionClear`, until the `SetSelectionOwner` notification
+  that follows it arrives.
+
+**Events judged by time.** Queries answer with the server's state now; the events being handled
+may be older. While we own CLIPBOARD, a `SetSelectionOwner` notification or `SelectionClear` whose
+time is earlier than our claim is stale: the server has already put it behind us, and acting on it
+would make the engine refuse pastes of what it owns. A death notification counts only if its
+selection time is that of the owner the engine believes holds the clipboard.
+
+**Every transition settles what is pending.** Whenever ownership changes (a new owner, a death, a
+claim of ours, `SelectionClear`): the capture is abandoned and its property quarantined, and the
+daemon is told if it had reported content not yet complete (`CaptureEnded`); the liveness probe
+stops and its property is quarantined; and a pending `SAVE_TARGETS` is answered (`None` if the
+clipboard moved on, nothing if its requestor is the owner that died).
 
 CLIPBOARD is captured, kept alive and served. PRIMARY is neither captured nor kept alive in M1
 (plan §5.2); the engine is written per selection, so turning it on later is configuration.
@@ -103,20 +121,28 @@ and abandons a capture in progress for that selection.
      notifications that arrive before the conversion's `SelectionNotify`, and the `Delete`
      notifications our own reads cause, are ignored.
    - Past the per-target byte limit, the target is `TooLarge`. The engine deletes the property
-     explicitly (a bounded read does not), stops reading, and quarantines it.
+     explicitly (a bounded read does not). An owner that wrote a whole property is finished with
+     it, so it is released; an INCR owner may still be sending, so its property is quarantined.
+     A `TARGETS` reply of type `INCR` is treated as a refusal, and its property quarantined.
 6. **Publish progressively.** The first time a target is kept, the capture is published to the
    daemon as content. Each later target updates it, so a slow image never holds the text back,
    and a capture cut short still has what it got.
 
 ## Keep-alive
 
-The **keep-alive candidate** is the latest captured content, tagged with the (owner window,
-selection timestamp) it came from. It is ended by any `SetSelectionOwner` notification from
-another client, owner None included. Otherwise a copy-and-quit tool whose capture kept nothing
-would leave the previous copy to be served as if it were current.
+The **keep-alive candidate** is the latest captured content, tagged with the selection timestamp of
+the `SetSelectionOwner` notification that started its capture. It is ended by any
+`SetSelectionOwner` notification from another client, owner None included. Otherwise a
+copy-and-quit tool whose capture kept nothing would leave the previous copy to be served as if it
+were current.
 
 Triggered by an XFixes `SelectionClientClose` or `SelectionWindowDestroy` notification for
-CLIPBOARD whose owner and selection timestamp match the candidate's tag:
+CLIPBOARD whose selection timestamp matches the candidate's tag. These notifications carry owner
+`None` (xfixes/select.c sets `owner` only for `SetSelectionOwner`), so the owner window cannot be
+matched. The selection timestamp can: the server leaves it unchanged at death, so it equals the
+time the dead owner claimed with. Only one of the two notifications fires per death, because the
+first clears the selection's window and client (dix/selection.c, `DeleteWindowFromAnySelections`,
+`DeleteClientFromAnySelections`).
 
 - Claim CLIPBOARD with the notification's **selection timestamp** (`lastTimeChanged`), not its
   event timestamp. When an owner dies the server leaves `lastTimeChanged` unchanged
@@ -124,6 +150,9 @@ CLIPBOARD whose owner and selection timestamp match the candidate's tag:
   than it (line 181). So any client that claimed after the death always beats ours, and ours can
   never overwrite it. The event timestamp is the current time, which could.
 - A capture still in progress when its owner dies keeps whatever it already published.
+- An owner that already held CLIPBOARD when the engine started is captured, but its claim time is
+  unknown, so its death cannot be matched and it is not kept alive. A daemon started at login
+  normally starts before any application has copied.
 - The selection becoming unowned *without* the owner dying (an application releasing it
   deliberately) is not kept alive. clipman's restore-on-empty fights deliberate clears.
 
@@ -139,6 +168,8 @@ A `SelectionRequest` on `CLIPBOARD_MANAGER` for `SAVE_TARGETS` comes from an app
 about to exit. GTK 3 waits 10 s for the answer (gtkclipboard.c:2176) and Qt 5 s
 (qxcbclipboard.cpp:190), and Qt turns INCR off while closing (qxcbclipboard.cpp:446-449). So:
 
+0. A `SAVE_TARGETS` that arrives before the owner has answered `TARGETS` (an application that
+   copies and quits at once) is kept, and merged into the capture once `TARGETS` is answered.
 1. **Is the requestor the CLIPBOARD owner?** Qt sends `SAVE_TARGETS` when it owns CLIPBOARD *or
    only PRIMARY* (qxcbclipboard.cpp:219-229). If `GetSelectionOwner(CLIPBOARD)` is not the
    requestor's window, reply success at once and take nothing: claiming would steal CLIPBOARD
@@ -186,8 +217,9 @@ A `SelectionRequest` for a selection we own:
   yet made waits within that deadline (the reply is deferred), so a 33 MB encode never blocks the
   engine. If the deadline passes, the request is refused. Transcoding lands in its own slice
   after the engine.
-- **Data** up to the INCR threshold (the server's maximum request size less header room, capped
-  at 256 KiB) is written in one `ChangeProperty`, then notified. Above it, INCR:
+- **Data** up to the INCR threshold (the port's `max_property_bytes`: the server's maximum request
+  size, with BIG-REQUESTS if it has it, less the request header; capped at 256 KiB) is written in
+  one `ChangeProperty`, then notified. Above it, INCR:
   1. select `PropertyChangeMask | StructureNotifyMask` on the requestor;
   2. write type `INCR` with the total size, and notify;
   3. on each `PropertyNotify(Delete)` of that property, write the next chunk;
@@ -247,7 +279,7 @@ its most consequential claims were checked in the X server and Qt source before 
 | 1 | `SAVE_TARGETS` from an app that owns only PRIMARY would make us steal CLIPBOARD from a live app (Qt does send it then; checked) | Act only if the requestor owns CLIPBOARD; else reply success, take nothing |
 | 2 | "Everything you can" converts targets with side effects (`DELETE` clears Emacs's selection) | Never-convert list on every path |
 | 3 | One fixed property per selection lets late replies and INCR chunks from abandoned transfers corrupt newer captures | Property pool, replies matched on (selection, target, property, time), 60 s quarantine |
-| 4 | The keep-alive candidate goes stale: copy-and-quit with nothing kept serves the previous copy | Candidate tagged with (owner, selection time); ended by any owner change |
+| 4 | The keep-alive candidate goes stale: copy-and-quit with nothing kept serves the previous copy | Candidate tagged with its selection time; ended by any owner change. (Death notifications carry owner None, found while implementing, so the tag cannot include the owner window.) |
 | 5 | Claiming with the event timestamp can overwrite a newer owner; the server does not touch `lastTimeChanged` on death (checked: dix/selection.c:217, 181) | Claim with `selectionTimestamp` |
 | 6 | `SAVE_TARGETS` with property None; GTK 4 treats a None reply as failure | None means all; reply with a non-None property |
 | 7 | The `SAVE_TARGETS` budget exceeded what apps wait (GTK 3 10 s, Qt 5 s) | 4 s budget; reuse and extend the in-flight capture |
@@ -259,3 +291,21 @@ its most consequential claims were checked in the X server and Qt source before 
 | 13 | The canonical set dropped RTF, SVG, `text/x-moz-url`, Chromium web data | Fetch all `text/*`, vector images, and those named formats |
 | 14 | `TARGETS` parsing: None, duplicates, type `TARGETS`; no image fallback | Specified |
 | 15 | Owner windows rarely carry `WM_CLASS` | Attribution chain |
+
+### Pass 2 (code review), 2026-10-24
+
+A separately briefed reviewer read the implementation against this document. Each finding below
+has a test that fails without its fix (checked by reverting each fix in a copy of the tree).
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | Replies not matched on time; a late refusal from an older conversion was taken as the new owner's, dropping it to text-only and releasing a property still in use | Refusals must match the conversion's time exactly ("Properties for incoming transfers") |
+| 2 | Stale `SetSelectionOwner`, `SelectionClear` and death events, queued before our claim, made the engine believe it no longer owned CLIPBOARD, so every paste was refused | "Events judged by time" |
+| 3 | An outstanding probe's property leaked on ownership changes; with a hung owner the pool would run dry and capture would stop, silently | Probe stopped and its property quarantined on every transition |
+| 4 | `SAVE_TARGETS` before the `TARGETS` reply lost what it asked for (copy-and-quit) | Kept and merged after `TARGETS` (step 0) |
+| 5 | A pending `SAVE_TARGETS` left unanswered or wrongly answered on transitions | "Every transition settles what is pending" |
+| 6 | A `TARGETS` reply of type `INCR` released a property its owner was still writing | Treated as refusal; property quarantined |
+| 7 | The owner present at start can never be kept alive | Documented (Keep-alive) |
+| 8 | A small reply replacing an INCR transfer left its requestor watched | Unwatched |
+| — | Divergences: state after `SelectionClear`; `MULTIPLE` offered when cleared; non-INCR `TooLarge` released, not quarantined; INCR threshold hard-coded at 256 KiB (exceeds the request limit without BIG-REQUESTS: `BadLength`, lost paste); no end report for a capture cut short | Document and code aligned; threshold from the port; `CaptureEnded` |
+| — | The port's unstated contract (byte order, inclusive limits, event queueing during queries, `server_time`'s property, our own window's mask) | Written in `Port`'s documentation |

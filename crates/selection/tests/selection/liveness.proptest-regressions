@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 121267755b6cc94bd8d2a57f18ba3cd84a69451ababf1da92aca067433301bf7 # shrinks to steps = [Owner { name: 6, owner: Some(2), change: 0, time: 0 }, Advance { ms: 10000 }]
