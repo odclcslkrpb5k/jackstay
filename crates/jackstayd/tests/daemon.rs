@@ -291,7 +291,18 @@ fn at_most_sixteen_clients_and_pipelined_requests_keep_their_order() {
     let x = Xvfb::start();
     let home = Home::new();
     let d = Daemon::start(&x, &home);
-    let held: Vec<Client> = (0..16).map(|_| client(&home)).collect();
+    // Each retried: the connection Daemon::start checked with may not yet be seen to close, and
+    // until it is, the sixteenth is one too many.
+    let held: Vec<Client> = (0..16)
+        .map(|_| {
+            let mut c = None;
+            eventually("room for a client", || {
+                c = Client::connect(&home.socket(), Duration::from_secs(10)).ok();
+                c.is_some()
+            });
+            c.unwrap_or_else(|| panic!("no client"))
+        })
+        .collect();
     let mut extra = raw(&home);
     let mut buf = Vec::new();
     ok(std::io::Read::read_to_end(&mut extra, &mut buf));

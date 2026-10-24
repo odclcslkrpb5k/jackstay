@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use jackstay_ui::listen::{ListenError, bind};
 use jackstayd::ui_socket;
 
+#[track_caller]
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,

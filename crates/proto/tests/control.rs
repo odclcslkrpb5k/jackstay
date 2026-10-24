@@ -5,6 +5,7 @@ use jackstay_proto::control::{
 use jackstay_proto::{DecodeError, LimitError};
 use proptest::prelude::*;
 
+#[track_caller]
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,

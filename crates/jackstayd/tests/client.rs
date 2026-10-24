@@ -8,6 +8,7 @@ use std::time::Duration;
 use jackstay_proto::control::{self, Error, Response, VERSION};
 use jackstayd::client::{Client, ClientError};
 
+#[track_caller]
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,

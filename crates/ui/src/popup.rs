@@ -100,7 +100,9 @@ impl Popup {
             state: RefCell::new(State::default()),
         });
         let p = Rc::clone(&popup);
-        popup.search.connect_search_changed(move |_| p.refill());
+        // `changed`, not `search-changed`: that one waits 150 ms after the last key, and an Enter
+        // pressed sooner would paste from the list before it was filtered.
+        popup.search.connect_changed(move |_| p.refill());
         let p = Rc::clone(&popup);
         popup.list.connect_row_activated(move |_, row| p.choose(usize::try_from(row.index()).ok()));
         let p = Rc::clone(&popup);

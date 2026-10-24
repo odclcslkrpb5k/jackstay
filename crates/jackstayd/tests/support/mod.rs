@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use jackstay_proto::control::{Request, Response};
 use jackstayd::client::Client;
 
+#[track_caller]
 pub fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,
@@ -179,10 +180,12 @@ pub fn refused(mut child: Child) -> Option<i32> {
     }
 }
 
+#[track_caller]
 pub fn client(home: &Home) -> Client {
     ok(Client::connect(&home.socket(), Duration::from_secs(10)))
 }
 
+#[track_caller]
 pub fn ask(home: &Home, r: Request) -> Response {
     ok(client(home).ask(&r))
 }
@@ -219,6 +222,7 @@ pub fn kill(mut child: Child) {
 }
 
 /// The previews `jackstay list` would show, newest first.
+#[track_caller]
 pub fn previews(home: &Home) -> Vec<String> {
     match ask(home, Request::List { offset: 0, limit: 100 }) {
         Response::List { entries, .. } => entries.into_iter().map(|e| e.preview).collect(),
@@ -244,6 +248,7 @@ pub fn ids(home: &Home) -> Vec<u64> {
 }
 
 /// Waits up to 10 s for `check`.
+#[track_caller]
 pub fn eventually(what: &str, mut check: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !check() {

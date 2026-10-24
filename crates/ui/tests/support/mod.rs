@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use jackstay_proto::control::{self, Kinds, Request, Response, Summary, VERSION};
 use jackstayd::ui_socket;
 
+#[track_caller]
 pub fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,
@@ -21,6 +22,7 @@ pub fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     }
 }
 
+#[track_caller]
 pub fn eventually(what: &str, mut check: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !check() {

@@ -34,13 +34,17 @@ fn clients() -> &'static Path {
                 .output());
             assert!(flags.status.success(), "pkg-config {packages:?}");
             let flags = String::from_utf8_lossy(&flags.stdout).into_owned();
+            // Built under a name of its own and renamed into place, so another test process
+            // never runs it half-written.
+            let building = out.join(format!("{name}.{}.tmp", std::process::id()));
             let status = ok(Command::new(compiler)
                 .args([std, "-fPIC", "-Wall", "-Wextra", "-Werror", "-O1", "-o"])
-                .arg(out.join(name))
+                .arg(&building)
                 .arg(src.join(file))
                 .args(flags.split_whitespace())
                 .status());
             assert!(status.success(), "{name} did not build");
+            ok(std::fs::rename(&building, out.join(name)));
         };
         build("cc", "-std=c11", "gtk3.c", &["gtk+-3.0"], "clip-gtk3");
         build("cc", "-std=c11", "gtk4.c", &["gtk4", "gio-unix-2.0"], "clip-gtk4");

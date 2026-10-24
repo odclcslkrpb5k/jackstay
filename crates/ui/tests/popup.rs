@@ -33,9 +33,9 @@ fn typing_searches_and_enter_pastes_the_first_match() {
     let ui = start("search");
     let daemon = Daemon::start(&ui.runtime, history());
     ui.popup();
+    // Enter straight after the last letter, as a quick typist presses it.
     ui.x.xdotool(&["type", "--delay", "40", "PASS"]);
-    std::thread::sleep(Duration::from_millis(200));
-    ui.keys(&["Return"]);
+    ui.x.xdotool(&["key", "Return"]);
     ui.closed();
     // Searched again from scratch next time: Enter is the newest.
     ui.popup();
@@ -213,13 +213,17 @@ fn grabber() -> PathBuf {
             let flags =
                 ok(Command::new("pkg-config").args(["--cflags", "--libs", "gtk+-3.0"]).output());
             let flags = String::from_utf8_lossy(&flags.stdout).into_owned();
+            // Built under a name of its own and renamed into place, so another test process
+            // never runs it half-written.
+            let building = out.with_extension(format!("{}.tmp", std::process::id()));
             let built = ok(Command::new("cc")
                 .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-o"])
-                .arg(&out)
+                .arg(&building)
                 .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/helpers/grabber.c"))
                 .args(flags.split_whitespace())
                 .status());
             assert!(built.success(), "grabber did not build");
+            ok(std::fs::rename(&building, &out));
             out
         })
         .clone()
@@ -270,7 +274,6 @@ fn a_refused_delete_keeps_the_search() {
     let daemon = Daemon::refusing_deletes(&ui.runtime, history());
     ui.popup();
     ui.x.xdotool(&["type", "--delay", "40", "third"]);
-    std::thread::sleep(Duration::from_millis(200));
     ui.keys(&["ctrl+d"]);
     eventually("the delete asked", || !daemon.changes().is_empty());
     std::thread::sleep(Duration::from_millis(200));

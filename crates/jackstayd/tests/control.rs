@@ -12,6 +12,7 @@ use jackstay_proto::control::{
 };
 use jackstayd::control::{ClientId, Clients, Dropped, MAX_CLIENTS, MAX_OUTPUT, REQUESTS_PER_TURN};
 
+#[track_caller]
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,

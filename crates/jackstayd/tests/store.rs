@@ -13,6 +13,7 @@ use jackstay_clip::{
 use jackstay_store::BlobHash;
 use jackstayd::store::{Loaded, Paths, Reply, Request, Snapshot, Store, load, run};
 
+#[track_caller]
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,

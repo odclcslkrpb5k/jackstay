@@ -8,6 +8,7 @@ use jackstay_clip::{History, Limits};
 use jackstayd::import::{ImportError, Imported, import, remove};
 use jackstayd::tracker::Tracker;
 
+#[track_caller]
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,

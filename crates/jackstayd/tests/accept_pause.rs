@@ -9,6 +9,7 @@ use std::time::Duration;
 use jackstayd::control::{Clients, Dropped};
 use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
 
+#[track_caller]
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,

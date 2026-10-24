@@ -8,6 +8,7 @@ use std::process::{Command, Output};
 
 use jackstay_proto::control::{self, Error, Kinds, Request, Response, Status, Summary, VERSION};
 
+#[track_caller]
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use jackstayd::ui_socket::{self, request_popup};
 
+#[track_caller]
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,

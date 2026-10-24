@@ -7,6 +7,7 @@ use jackstay_clip::{
 };
 use proptest::prelude::*;
 
+#[track_caller]
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
         Ok(v) => v,
