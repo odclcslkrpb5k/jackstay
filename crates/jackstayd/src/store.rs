@@ -412,6 +412,10 @@ impl Store {
         let mut wrote = false;
         for (blob, kept) in &needed {
             if !self.durable.contains(blob) {
+                // Made again if it went while running, or no save would succeed until a restart.
+                if !wrote {
+                    make_blobs_dir(&self.paths).map_err(at(Step::WriteBlob))?;
+                }
                 self.write_blob(blob, kept.bytes())?;
                 wrote = true;
             }

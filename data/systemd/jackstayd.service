@@ -1,0 +1,25 @@
+# Jackstay's clipboard manager, a systemd user service (docs/daemon.md, "Starting and stopping").
+# Started per graphical session by jackstay-session (XDG autostart), never enabled on its own.
+[Unit]
+Description=Jackstay clipboard manager
+Documentation=https://github.com/odclcslkrpb5k/jackstay
+# xfce4-session does not start graphical-session.target, so on Xfce these order nothing; the
+# daemon ends with the session when the X server goes (exit status 4).
+PartOf=graphical-session.target
+After=graphical-session.target
+# Status 5 (X not reachable, a login race) and 101 are retried every 2 s, up to 10 times a minute.
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=%h/.local/bin/jackstayd
+Restart=on-failure
+RestartSec=2
+# 0 stopped, 2 bad setup, 3 another manager, 4 X gone (logout): restarting would not help.
+RestartPreventExitStatus=0 2 3 4
+WatchdogSec=30
+WatchdogSignal=SIGKILL
+# A core dump would hold clipboard contents.
+LimitCORE=0

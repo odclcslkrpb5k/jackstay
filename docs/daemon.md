@@ -76,8 +76,11 @@ Under `$XDG_STATE_HOME/jackstay/` (default `~/.local/state/jackstay/`; a relativ
 `$XDG_STATE_HOME` is ignored, per the XDG spec). History is state: worth keeping across restarts,
 not a document; `~/.local/state` is less often backed up than `~/.local/share`.
 
-- The directory is created `0700`; an existing one is checked with `fstat` and its mode fixed;
-  if it is a symbolic link the daemon refuses (exit 2). Files are created with `O_NOFOLLOW |
+- The directory is created `0700`; an existing one is checked with `lstat` and its mode fixed;
+  if it is a symbolic link, not a directory, or another user's, the daemon refuses (exit 2). Its
+  own `lock` (`flock`) keeps a second daemon with another runtime directory from sharing the
+  history (exit 3). A history that cannot be read refuses the start (exit 2): running without one
+  would let a clear made now be undone by the next start that reads the old one. Files are created with `O_NOFOLLOW |
   O_EXCL` (temporary names) and mode `0600`, then renamed.
 - `blobs/<sha256 hex>`: one file per distinct kept target's bytes.
 - `index`: a version line, the next entry id, a `cleared` flag, then one record per entry, newest
@@ -120,18 +123,30 @@ not a document; `~/.local/state` is less often backed up than `~/.local/share`.
 
 `$XDG_RUNTIME_DIR/jackstay/control`, a Unix stream socket in a `0700` directory; if
 `$XDG_RUNTIME_DIR` is unset the daemon refuses (exit 2) rather than fall back to `/tmp`. Beside
-it, `lock`: the daemon takes an exclusive `flock` before anything else; a second instance exits
-(status 3) and says another jackstayd runs. A stale socket is removed only while holding the lock.
+it, `lock`: the daemon takes an exclusive `flock` before it creates anything (flags and the
+configuration are read first, so a bad one refuses without touching anything); a second instance
+exits (status 3) and says another jackstayd runs. A stale socket is removed only while holding the
+lock.
 
 Each connection's peer is checked with `SO_PEERCRED`: another uid is refused before reading.
-Sockets are non-blocking. Per client: frames of at most 1 MiB, at most 4 MiB queued for output
-(a client that falls behind is disconnected), at most 16 clients. A malformed frame disconnects.
+Sockets are non-blocking, and what one client can cost the clipboard thread is bounded
+(`crates/jackstayd/src/control.rs`): at most 16 clients; a request frame of at most 16 bytes,
+refused from its header; a client is read only while it has under 64 KiB buffered and under 1 MiB of
+responses unread, and while it is not waiting for a deferred response; at most 64 of its requests
+per turn of the loop; one with 4 MiB unread is disconnected; one that has not said `Hello` within
+10 s is disconnected. A partial frame does not count as work, so a client that stalls mid-frame
+lets the loop sleep. A malformed frame disconnects. A client that closes its end for writing still
+has what it sent handled and answered. When accepting fails (out of descriptors), accepting pauses
+for a second rather than spin.
 
 Frames as in `proto` (length, kind, payload) with the same no-panic decoding, fuzzed, in a message
 namespace of its own with its own version (`control`), separate from the peer protocol. Requests:
 `Status`, `List { limit }` (ids, times, sources, kinds, sizes, a text preview of at most 200
 characters), `Select { id }`, `Delete { id }`, `Pin { id, pinned }`, `Clear`, `ClearHistory`,
 `Subscribe` (history changes, for the UI later). Responses carry a result or an error code (ER-8).
+A clear answers `ClaimFailed` if another application held the clipboard, so it was not cleared.
+Sources and previews are cleaned of control, format and separator characters, in the daemon and
+again in the CLI, so nothing a client sets (its `WM_CLASS`) reaches a terminal as an escape.
 
 `jackstay` is the thin CLI over it: `status`, `list`, `select`, `delete`, `pin`, `unpin`, `clear`,
 `clear-history`, `import-clipman`.
@@ -152,10 +167,12 @@ plugin.c:183, 196):
 The file is read as GLib reads it (`crates/store/src/clipman.rs`): one clipman would refuse to
 load imports nothing, and empty items are skipped as clipman skips them.
 
-Import, on first start (no `imported-clipman` marker) and on `jackstay import-clipman`: images then
-texts, oldest first, each added at the **back** of history (older than anything Jackstay has),
-skipping content already present, with the file's modification time as the copy time; then the
-marker is written. clipman's own files are left alone, but the command says plainly that they still
+Import, on first start (no `imported-clipman` marker) and on `jackstay import-clipman`: each item is
+added at the **back** of history (older than anything Jackstay has), texts newest first and then
+images newest first, so each keeps clipman's order; content already present is skipped, and the
+file's modification time is the copy time. At first start the import comes after the restore, so
+nothing imported is put back on the clipboard; the marker is written only once the imported history
+is on disk. The import runs on the clipboard thread (a few small files, read once, on request). clipman's own files are left alone, but the command says plainly that they still
 hold that history, and `jackstay import-clipman --remove` deletes them (pre-migration secrets would
 otherwise survive every Jackstay clear). (`History::append_oldest`: a full history evicts the
 import itself.)
@@ -165,26 +182,31 @@ import itself.)
 At start, after the lock:
 
 - `CLIPBOARD_MANAGER` already owned (xfce4-clipman's daemon owns it with `CurrentTime` and never
-  answers): exit 3, naming the owner's `WM_CLASS`. X releases a selection when its owner
+  answers): exit 3. X releases a selection when its owner
   disconnects, so a dead clipman cannot leave it owned.
-- A process of this user named exactly `xfce4-clipman` (`/proc/*/comm`, same uid), or the clipman
-  plugin in the panel's plugin list (`xfconf-query -c xfce4-panel -p /plugins -lv`, 2 s timeout,
-  looking for `clipman`): exit 3.
+- A process of this user that is clipman (`/proc/*/comm` exactly `xfce4-clipman`, or a command
+  line naming the panel plugin, `xfce4-clipman-plugin` or `libclipman.so`, as the panel's
+  `wrapper-2.0` is given it), or the plugin in the panel's plugin list (`xfconf-query -c
+  xfce4-panel -p /plugins -lv`, read on a thread, 2 s timeout, a `/plugins/plugin-N` whose value is
+  `xfce4-clipman-plugin`): exit 3. These names are from xfce4-panel's and clipman's sources and
+  are to be confirmed on a live Xubuntu.
 - While running, the process check repeats every 30 s; clipman starting after us also exits us
   (3), with the reason in the journal, since two managers fight over ownership.
 - xfsettingsd 4.20 has no clipboard manager, so it is no conflict.
 
 ## Starting and stopping
 
-- A systemd user unit, `jackstayd.service`, `Type=notify`, `Restart=on-failure`, `RestartSec=2`,
-  `RestartPreventExitStatus=0 2 3 4`, no `WantedBy=` (it is started per session, below). No
+- A systemd user unit, `jackstayd.service` (`data/systemd/`), `Type=notify`, `Restart=on-failure`,
+  `RestartSec=2`, `RestartPreventExitStatus=0 2 3 4`, at most 10 starts a minute, no `WantedBy=` (it
+  is started per session, below). xfce4-session does not start `graphical-session.target`, so the
+  daemon ends with the session through the X server going away (status 4). No
   `ProtectSystem=` or other sandboxing that needs user namespaces (restricted by AppArmor on
   Ubuntu) and no `PrivateNetwork=` (it would cut the abstract X socket).
 - Started from XDG autostart by `jackstay-session`, which runs `systemctl --user start
   jackstayd.service`. xfce4-session's xinitrc already exports `DISPLAY` and `XAUTHORITY` to systemd
   (xinitrc.in:86-95); the script imports them again anyway, which is harmless.
 - `SIGTERM` (through a signal pipe, `signal-hook`): stop taking requests, let the store write the
-  latest snapshot, exit 0.
+  latest snapshot, exit 0; a save that fails then is logged.
 - Flags for running a second instance beside the live one: `--display`, `--state-dir`,
   `--runtime-dir`.
 
@@ -208,7 +230,7 @@ key named in the journal. The whole history is held in memory, within these limi
 | Status | Meaning | Restart |
 |---|---|---|
 | 0 | Stopped by request | no |
-| 2 | Configuration, paths or state directory invalid | no |
+| 2 | Configuration, paths or state directory invalid, or the history unreadable | no |
 | 3 | Another clipboard manager, or another jackstayd, is running | no |
 | 4 | X connection lost after running (logout) | no |
 | 5 | X not reachable at start (login race) | yes |

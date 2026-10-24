@@ -21,15 +21,39 @@ pub enum DecodeError {
 /// A limit that a message must keep, whether it is being decoded or built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LimitError {
-    TooManyTargets { count: usize },
-    DuplicateTarget { name: crate::TargetName },
+    TooManyTargets {
+        count: usize,
+    },
+    DuplicateTarget {
+        name: crate::TargetName,
+    },
     NoTargets,
     TargetNameEmpty,
-    TargetNameTooLong { len: usize },
+    TargetNameTooLong {
+        len: usize,
+    },
     TargetNameNotPrintableAscii,
-    InlineTooLarge { len: usize },
-    InlineSizeMismatch { size: u64, inline_len: usize },
-    PayloadTooLarge { len: usize },
+    InlineTooLarge {
+        len: usize,
+    },
+    InlineSizeMismatch {
+        size: u64,
+        inline_len: usize,
+    },
+    PayloadTooLarge {
+        len: usize,
+    },
+    TextTooLong {
+        len: usize,
+    },
+    TextNotUtf8,
+    TooManyEntries {
+        count: usize,
+    },
+    /// A code or bit set this version does not know.
+    UnknownCode {
+        code: u8,
+    },
 }
 
 impl From<LimitError> for DecodeError {
@@ -65,6 +89,10 @@ impl fmt::Display for LimitError {
                 write!(f, "target size {size} but {inline_len} inline bytes")
             }
             LimitError::PayloadTooLarge { len } => write!(f, "encoded payload of {len} bytes"),
+            LimitError::TextTooLong { len } => write!(f, "text of {len} bytes"),
+            LimitError::TextNotUtf8 => write!(f, "text not UTF-8"),
+            LimitError::TooManyEntries { count } => write!(f, "{count} entries"),
+            LimitError::UnknownCode { code } => write!(f, "unknown code {code}"),
         }
     }
 }

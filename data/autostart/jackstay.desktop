@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Jackstay
+Comment=Clipboard manager
+Exec=jackstay-session
+OnlyShowIn=XFCE;
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

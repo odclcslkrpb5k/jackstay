@@ -1,0 +1,6 @@
+#!/bin/sh
+# Starts jackstayd for this graphical session (run from XDG autostart). xfce4-session already
+# exports DISPLAY and XAUTHORITY to the systemd user manager; importing them again is harmless.
+set -eu
+systemctl --user import-environment DISPLAY XAUTHORITY
+exec systemctl --user start jackstayd.service

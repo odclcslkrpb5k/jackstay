@@ -16,6 +16,7 @@
 )]
 
 mod announce;
+pub mod control;
 mod error;
 mod frame;
 mod reader;

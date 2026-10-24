@@ -1,0 +1,16 @@
+[package]
+name = "jackstay"
+description = "Jackstay's command line: list, select, pin, delete and clear clipboard history"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+jackstay-proto = { path = "../proto", version = "=0.0.0" }
+jackstayd = { path = "../jackstayd", version = "=0.0.0" }

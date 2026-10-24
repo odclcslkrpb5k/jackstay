@@ -284,6 +284,15 @@ fn the_store_thread_coalesces_acknowledges_and_saves_on_stop() {
     assert!(replies.try_recv().is_err(), "nothing failed");
 }
 
+#[test]
+fn saves_succeed_again_once_blobs_can_be_written() {
+    let dir = state_dir();
+    let mut store = Store::new(Paths::new(dir.clone()), &loaded(&dir));
+    ok(fs::remove_dir(dir.join("blobs")));
+    ok(store.save(&Snapshot::of(&history(&[("after the directory went", None)]), false), false));
+    same(&loaded(&dir).history, &history(&[("after the directory went", None)]));
+}
+
 /// Makes `path` a non-empty directory, so creating a file there fails.
 fn block(path: &Path) {
     ok(fs::create_dir_all(path.join("x")));
