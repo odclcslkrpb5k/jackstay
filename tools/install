@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Installs Jackstay for this user (README, "Install"): builds in the dev container, then copies the
+# binaries to ~/.local/bin, the systemd user unit and an XDG autostart entry to ~/.config. Nothing
+# outside the home directory is touched, and the history in ~/.local/state/jackstay is kept by
+# --uninstall.
+set -euo pipefail
+IFS=$'\n\t'
+
+usage() {
+  cat <<'EOF'
+usage: tools/install [--replace-clipman] [--start]
+       tools/install --uninstall
+  --replace-clipman  stop xfce4-clipman and turn off its autostart, as its own Quit does
+                     (running xfce4-clipman again turns it back on)
+  --start            start jackstayd now, in this graphical session
+  --uninstall        stop jackstayd and remove what this installed; the history stays
+EOF
+}
+
+cd "$(dirname "$0")/.."
+tree=$PWD
+
+from=""
+replace_clipman=0
+start=0
+uninstall=0
+while (($#)); do
+  case "$1" in
+    --replace-clipman) replace_clipman=1 ;;
+    --start) start=1 ;;
+    --uninstall) uninstall=1 ;;
+    # Install already-built binaries from DIR instead of building (for testing this script).
+    --from) from=${2:?--from needs a directory}; shift ;;
+    -h | --help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+: "${HOME:?HOME is not set}"
+config=${XDG_CONFIG_HOME:-$HOME/.config}
+[[ "$config" == /* ]] || config=$HOME/.config
+bin=$HOME/.local/bin
+unit_dir=$config/systemd/user
+autostart_dir=$config/autostart
+programs=(jackstayd jackstay)
+
+# systemctl --user, if there is a user manager to talk to.
+user_systemctl() {
+  local IFS=' '
+  if command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then
+    systemctl --user "$@"
+  else
+    printf 'no systemd user manager here; skipped: systemctl --user %s\n' "$*"
+  fi
+}
+
+# Writes stdin to $1 through a temporary file renamed over it, so a reader never sees half of it.
+write_file() {
+  local dest=$1 mode=$2 tmp
+  mkdir -p "$(dirname "$dest")"
+  tmp=$(mktemp "$dest.tmp-XXXXXX")
+  cat >"$tmp"
+  chmod "$mode" "$tmp"
+  mv -f "$tmp" "$dest"
+}
+
+if ((uninstall)); then
+  user_systemctl stop jackstayd.service || true
+  rm -f "$autostart_dir/jackstay.desktop" "$unit_dir/jackstayd.service" \
+    "$bin/jackstay-session" "${programs[@]/#/$bin/}"
+  user_systemctl daemon-reload
+  printf 'removed; the history is still in %s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/jackstay"
+  printf 'to have xfce4-clipman back, run it: xfce4-clipman &\n'
+  exit 0
+fi
+
+# A desktop entry's Exec takes a quoted path only with escapes; refuse a home that would need them.
+if [[ "$bin" =~ [^A-Za-z0-9_./-] ]]; then
+  printf '%s: a home directory with spaces or quotes is not supported\n' "$bin" >&2
+  exit 1
+fi
+
+if [[ -z "$from" ]]; then
+  ./dev env CARGO_TARGET_DIR=/work/.cache/target \
+    cargo build --release --locked -p jackstayd -p jackstay
+  from=$tree/.cache/target/release
+fi
+for p in "${programs[@]}"; do
+  [[ -x "$from/$p" ]] || { printf '%s/%s: not built\n' "$from" "$p" >&2; exit 1; }
+done
+
+for p in "${programs[@]}"; do
+  write_file "$bin/$p" 0755 <"$from/$p"
+done
+write_file "$bin/jackstay-session" 0755 <data/jackstay-session
+write_file "$unit_dir/jackstayd.service" 0644 <data/systemd/jackstayd.service
+sed "s|^Exec=jackstay-session\$|Exec=$bin/jackstay-session|" data/autostart/jackstay.desktop \
+  | write_file "$autostart_dir/jackstay.desktop" 0644
+grep -qx "Exec=$bin/jackstay-session" "$autostart_dir/jackstay.desktop" || {
+  printf 'autostart entry: Exec not set to %s/jackstay-session\n' "$bin" >&2
+  exit 1
+}
+user_systemctl daemon-reload
+# A running daemon is restarted on the new binary; its history is saved on the way down.
+user_systemctl try-restart jackstayd.service
+printf 'installed jackstayd, jackstay and jackstay-session in %s\n' "$bin"
+
+if ((replace_clipman)); then
+  # What clipman's own Quit does: Hidden=true in its autostart entry. Running clipman again sets
+  # it back to false. Its history files are written on every copy, so stopping it loses nothing.
+  entry=$autostart_dir/xfce4-clipman-plugin-autostart.desktop
+  if [[ -f "$entry" ]]; then
+    if grep -q '^Hidden=' "$entry"; then
+      sed 's/^Hidden=.*/Hidden=true/' "$entry" | write_file "$entry" 0644
+    else
+      sed '/^\[Desktop Entry\]$/a Hidden=true' "$entry" | write_file "$entry" 0644
+    fi
+  elif [[ -f /etc/xdg/autostart/xfce4-clipman-plugin-autostart.desktop ]]; then
+    sed 's/^Hidden=.*/Hidden=true/' /etc/xdg/autostart/xfce4-clipman-plugin-autostart.desktop \
+      | write_file "$entry" 0644
+    grep -q '^Hidden=true$' "$entry" \
+      || sed -i '/^\[Desktop Entry\]$/a Hidden=true' "$entry"
+  fi
+  if pkill -x -u "$(id -u)" xfce4-clipman; then
+    for _ in $(seq 50); do
+      pgrep -x -u "$(id -u)" xfce4-clipman >/dev/null || break
+      sleep 0.1
+    done
+    printf 'stopped xfce4-clipman and turned off its autostart\n'
+  else
+    printf 'xfce4-clipman was not running; its autostart is off\n'
+  fi
+  printf 'if clipman is also in the panel as a plugin, remove it there (Panel > Panel Preferences > Items)\n'
+fi
+
+if ((start)); then
+  [[ -n "${DISPLAY:-}" ]] || { printf 'DISPLAY is not set: not in a graphical session\n' >&2; exit 1; }
+  "$bin/jackstay-session"
+  for _ in $(seq 50); do
+    if "$bin/jackstay" status >/dev/null 2>&1; then
+      "$bin/jackstay" status
+      exit 0
+    fi
+    sleep 0.2
+  done
+  printf 'jackstayd did not answer; see: journalctl --user -u jackstayd\n' >&2
+  exit 1
+fi
+printf 'it starts at the next login; to start it now: %s/jackstay-session\n' "$bin"

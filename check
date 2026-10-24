@@ -68,6 +68,7 @@ deny_whole_graph() {
 # The scan reads bytes and matches those characters' UTF-8 encodings, so a file that is not valid
 # UTF-8 cannot stop it partway (a decoding perl dies on one, and its END block hid the death).
 hidden_characters() {
+  # shellcheck disable=SC2016 # perl code, quoted for perl
   git ls-files -z -- ':!*.png' ':!crates/*/fuzz/corpus/*' \
     | xargs -0 -r perl -ne '
         if (/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]|\xE2\x80[\x8B-\x8F\xAA-\xAE]|\xE2\x81[\xA0-\xA4\xA6-\xA9]|\xEF\xBB\xBF/) {
@@ -78,6 +79,25 @@ hidden_characters() {
         END { $? ||= $bad ? 1 : 0 }'
 }
 
+# Every tracked shell script, found by its #! line.
+shell_scripts() {
+  local scripts=() f
+  while IFS= read -r -d '' f; do
+    if head -n1 -- "$f" | grep -Eq '^#!(/usr/bin/env )?/?(usr/)?(bin/)?(ba)?sh'; then
+      scripts+=("$f")
+    fi
+  done < <(git ls-files -z -- ':!*.png' ':!crates/*/fuzz/corpus/*')
+  (( ${#scripts[@]} > 0 )) || { printf 'no shell scripts found\n'; return 1; }
+  printf '%s shell scripts\n' "${#scripts[@]}"
+  shellcheck -- "${scripts[@]}"
+}
+
+# tools/install, run against a home of its own, from the binaries just built.
+install_script() {
+  cargo build --workspace --locked --bins
+  tools/test-install
+}
+
 # Every decoder crate's fuzz targets: a separate package each, with its own lockfile.
 shopt -s nullglob
 fuzz=(crates/*/fuzz/Cargo.toml)
@@ -85,12 +105,14 @@ shopt -u nullglob
 (( ${#fuzz[@]} > 0 )) || { printf 'no fuzz crates found\n'; exit 2; }
 step "workspace lints reach every crate" workspace_lints_opt_in
 step "hidden characters" hidden_characters
+step "shell scripts (shellcheck)" shell_scripts
 step "format" cargo fmt --all --check
 for f in "${fuzz[@]}"; do
   step "format (fuzz targets, ${f%/Cargo.toml})" cargo fmt --manifest-path "$f" --check
 done
 step "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
 step "tests" cargo test --workspace --locked
+step "install script" install_script
 step "dependencies (cargo-deny, whole graph)" deny_whole_graph
 for f in "${fuzz[@]}"; do
   step "fuzz targets build (${f%/Cargo.toml})" cargo check --manifest-path "$f" --locked

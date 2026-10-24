@@ -188,8 +188,15 @@ At start, after the lock:
   line naming the panel plugin, `xfce4-clipman-plugin` or `libclipman.so`, as the panel's
   `wrapper-2.0` is given it), or the plugin in the panel's plugin list (`xfconf-query -c
   xfce4-panel -p /plugins -lv`, read on a thread, 2 s timeout, a `/plugins/plugin-N` whose value is
-  `xfce4-clipman-plugin`): exit 3. These names are from xfce4-panel's and clipman's sources and
-  are to be confirmed on a live Xubuntu.
+  `xfce4-clipman-plugin`): exit 3. These names are from xfce4-panel's and clipman's sources. On
+  the owner's Xubuntu 26.04 (2026-10-24) clipman runs as the stand-alone `xfce4-clipman` from
+  autostart, and the panel listing names it only as the systray's icon
+  (`/plugins/plugin-5/names-ordered [..,clipman,..]`), which is rightly not a match; the
+  plugin's own id is still unconfirmed live.
+- clipman writes its history on every copy and clear, not only at quit, so stopping it with
+  `SIGTERM` loses nothing. Its tray Quit sets `Hidden=true` in
+  `~/.config/autostart/xfce4-clipman-plugin-autostart.desktop`, and starting it sets `false`;
+  `tools/install --replace-clipman` does the same as Quit.
 - While running, the process check repeats every 30 s; clipman starting after us also exits us
   (3), with the reason in the journal, since two managers fight over ownership.
 - xfsettingsd 4.20 has no clipboard manager, so it is no conflict.
@@ -202,6 +209,8 @@ At start, after the lock:
   daemon ends with the session through the X server going away (status 4). No
   `ProtectSystem=` or other sandboxing that needs user namespaces (restricted by AppArmor on
   Ubuntu) and no `PrivateNetwork=` (it would cut the abstract X socket).
+- Installed by `tools/install` (README, "Install"), tested by the gate against a home of its
+  own (`tools/test-install`).
 - Started from XDG autostart by `jackstay-session`, which runs `systemctl --user start
   jackstayd.service`. xfce4-session's xinitrc already exports `DISPLAY` and `XAUTHORITY` to systemd
   (xinitrc.in:86-95); the script imports them again anyway, which is harmless.

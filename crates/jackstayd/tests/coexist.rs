@@ -19,4 +19,11 @@ fn the_panel_listing_is_read_by_plugin_id() {
     let without = "/plugins/plugin-1         applicationsmenu\n/plugins/plugin-12/popup-size  xfce4-clipman-plugin\n/plugins/notes  xfce4-clipman-plugin\n";
     assert!(!panel_lists_clipman(without));
     assert!(!panel_lists_clipman(""));
+    // Xubuntu 26.04 with clipman as a stand-alone tray app (the shape seen live; the lists made
+    // up): its settings and its tray icon's name appear, but no plugin is clipman.
+    let tray = "/plugins/clipman/settings/save-on-quit               true\n\
+                /plugins/plugin-5/known-legacy-items                 [notes,clipman,thunar]\n\
+                /plugins/plugin-5/names-ordered                      [clipman,task manager]\n\
+                /plugins/plugin-5                                    systray\n";
+    assert!(!panel_lists_clipman(tray));
 }

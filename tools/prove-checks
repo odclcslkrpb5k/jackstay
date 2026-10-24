@@ -2,6 +2,7 @@
 # Proves each gate control still bites: plants one bug per control in a copy of the tree and
 # asserts that ./check fails, and fails at that control's step (TS-5 for checkers, CP-3).
 # Run inside the dev container: ./dev tools/prove-checks [plant-name...]
+# shellcheck disable=SC2329 # each plant_* function is called by name, below
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -85,6 +86,12 @@ plant_broken_store_fuzz_target() {
 plant_empty_store_fuzz_corpus() {
   rm -f crates/store/fuzz/corpus/clipman/*
 }
+plant_unquoted_shell_variable() {
+  printf '\nplanted() { ls %s1; }\n' '$' >> tools/fuzz
+}
+plant_broken_install() {
+  sed -i 's/^Exec=jackstay-session$/Exec=jackstay-session --planted/' data/autostart/jackstay.desktop
+}
 plant_empty_fuzz_corpus() {
   rm -f crates/proto/fuzz/corpus/decode/*
 }
@@ -103,6 +110,8 @@ plants=(
   "hidden_character_after_latin1|hidden characters|crates/proto/src/lib.rs:[0-9]+: hidden character"
   "unformatted|format|^Diff in .*/crates/proto/src/lib.rs"
   "failing_test|tests|test planted \.\.\. FAILED"
+  "unquoted_shell_variable|shell scripts (shellcheck)|SC2086"
+  "broken_install|install script|autostart entry: Exec not set"
   "empty_fuzz_corpus|tests|only 0 corpus inputs"
   "empty_store_fuzz_corpus|tests|only 0 clipman corpus inputs"
   "broken_store_fuzz_target|fuzz targets build (crates/store/fuzz)|mismatched types"

@@ -20,12 +20,64 @@ Jackstay is intended to replace both [Synergy](https://symless.com/synergy) and
 
 ## Status
 
-Early development.
+Early development. Working now: the clipboard manager (`jackstayd` and the `jackstay` command):
+history of CLIPBOARD copies kept after their application quits, restored after a restart,
+clearing, pinning and xfce4-clipman's history imported. Not yet: the popup and tray (M2), and
+sharing between machines (M3 to M5). See [the plan](docs/plan.md) and
+[the daemon's design](docs/daemon.md).
+
+## Install
+
+Needs Docker (the build runs in the development container) and Xubuntu 26.04 or another system
+whose glibc is at least the container's (2.43).
+
+```sh
+tools/install --replace-clipman --start
+```
+
+- Builds `jackstayd` and `jackstay` and copies them, with `jackstay-session`, to `~/.local/bin`;
+  the systemd user unit to `~/.config/systemd/user`; an autostart entry to `~/.config/autostart`.
+  Nothing outside your home directory is touched. Running it again upgrades, restarting a
+  running daemon.
+- `--replace-clipman` stops xfce4-clipman and turns off its autostart, as clipman's own Quit
+  does. Two clipboard managers fight, so `jackstayd` refuses to run beside clipman. If clipman
+  is in the panel as a plugin, remove it there too (Panel Preferences, Items).
+- `--start` starts it now; otherwise it starts at the next login.
+
+On its first start Jackstay imports clipman's saved history behind its own. clipman's files are
+left in place until `jackstay import-clipman --remove`.
+
+## Use
+
+```sh
+jackstay list            # the newest 20 entries; --all for every one
+jackstay select ID       # put an entry back on the clipboard
+jackstay pin ID          # keep it through clears and limits (unpin ID to undo)
+jackstay delete ID
+jackstay clear           # clear the clipboard and delete what was on it, unless pinned
+jackstay clear-history   # delete every unpinned entry and clear the clipboard
+jackstay status
+```
+
+Nothing copied is filtered or hidden: a copied password is kept like anything else, and
+`jackstay clear` is how to get rid of it. Settings are in `~/.config/jackstay/config.toml`
+([keys](docs/daemon.md#configuration)); the journal is `journalctl --user -u jackstayd`.
+
+## Uninstall
+
+```sh
+tools/install --uninstall
+```
+
+Stops `jackstayd` and removes what `tools/install` added. The history stays in
+`~/.local/state/jackstay`; delete that directory to remove it. Running `xfce4-clipman` turns its
+autostart back on.
 
 ## Development
 
 The only requirement is Docker. `./dev <command>` runs a command in the pinned development
-container (Ubuntu 26.04, Rust 1.99.1), for example `./dev cargo build`.
+container (Ubuntu 26.04, Rust 1.99.1), for example `./dev cargo build`. `./check` is the one gate,
+the same one CI runs; `./dev tools/prove-checks` shows each of its checks catching a planted bug.
 
 ## License
 

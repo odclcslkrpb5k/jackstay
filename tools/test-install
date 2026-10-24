@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Runs tools/install against a home of its own and checks what it wrote, what --replace-clipman
+# changed and what --uninstall removed. Only in the dev container: --replace-clipman stops this
+# user's xfce4-clipman, and here the only one is the stand-in started below.
+set -euo pipefail
+IFS=$'\n\t'
+
+cd "$(dirname "$0")/.."
+if [[ "${JACKSTAY_DEV_CONTAINER:-}" != 1 ]]; then
+  printf 'run in the dev container: ./dev tools/test-install\n' >&2
+  exit 2
+fi
+built=${CARGO_TARGET_DIR:-$PWD/target}/debug
+home=$PWD/.cache/install-test
+rm -rf "$home"
+mkdir -p "$home"
+
+fail() {
+  printf 'install test: %s\n' "$*" >&2
+  exit 1
+}
+install() {
+  HOME=$home XDG_CONFIG_HOME="" tools/install --from "$built" "$@"
+}
+
+install
+for p in jackstayd jackstay jackstay-session; do
+  [[ -x "$home/.local/bin/$p" ]] || fail "$p not installed"
+done
+cmp -s "$built/jackstayd" "$home/.local/bin/jackstayd" || fail "jackstayd is not the built one"
+cmp -s data/systemd/jackstayd.service "$home/.config/systemd/user/jackstayd.service" \
+  || fail "unit differs"
+grep -qx "Exec=$home/.local/bin/jackstay-session" "$home/.config/autostart/jackstay.desktop" \
+  || fail "autostart entry does not run the installed jackstay-session"
+[[ "$(stat -c %a "$home/.config/autostart/jackstay.desktop")" == 644 ]] || fail "entry mode"
+install # again, over the first
+[[ -z "$(find "$home" -name '*.tmp-*')" ]] || fail "temporary files left"
+
+entry=$home/.config/autostart/xfce4-clipman-plugin-autostart.desktop
+printf '[Desktop Entry]\nName=Clipman\nExec=xfce4-clipman\nHidden=false\n' >"$entry"
+# A script's process is named after the script. (/bin/sleep, copied, refuses another name.)
+# shellcheck disable=SC2016 # the stand-in's own code
+printf '#!/bin/sh\ntrap '"'"'kill $! 2>/dev/null; exit 0'"'"' TERM\nsleep 60 &\nwait\n' \
+  >"$home/xfce4-clipman"
+chmod +x "$home/xfce4-clipman"
+"$home/xfce4-clipman" &
+clipman=$!
+sleep 0.2
+[[ "$(cat "/proc/$clipman/comm")" == xfce4-clipman ]] || fail "the stand-in is misnamed"
+install --replace-clipman >/dev/null
+grep -qx 'Hidden=true' "$entry" || fail "clipman's autostart still on"
+! grep -qx 'Hidden=false' "$entry" || fail "clipman's entry has both"
+! kill -0 "$clipman" 2>/dev/null || fail "clipman not stopped"
+# An entry without the key gets one.
+printf '[Desktop Entry]\nName=Clipman\nExec=xfce4-clipman\n' >"$entry"
+install --replace-clipman >/dev/null
+grep -qx 'Hidden=true' "$entry" || fail "Hidden=true not added"
+
+mkdir -p "$home/.local/state/jackstay"
+touch "$home/.local/state/jackstay/index"
+install --uninstall >/dev/null
+for f in .local/bin/jackstayd .local/bin/jackstay .local/bin/jackstay-session \
+  .config/systemd/user/jackstayd.service .config/autostart/jackstay.desktop; do
+  [[ ! -e "$home/$f" ]] || fail "$f not removed"
+done
+[[ -e "$home/.local/state/jackstay/index" ]] || fail "the history was removed"
+printf 'install, reinstall, --replace-clipman and --uninstall did what they say\n'

@@ -36,6 +36,11 @@ RUN cargo +1.99.1 install --locked --root /opt/cargo \
  && rm -rf /opt/cargo/registry /opt/cargo/git \
  && chmod -R a+rX /opt/rustup /opt/cargo
 
+# Added after the Rust layers so that adding it did not rebuild them.
+RUN apt-get update --error-on=any --snapshot "${APT_SNAPSHOT}" \
+ && apt-get install -y --no-install-recommends --snapshot "${APT_SNAPSHOT}" shellcheck \
+ && rm -rf /var/lib/apt/lists/*
+
 # Per-run caches live in the bind-mounted tree (gitignored), so the container runs as the host user.
 ENV JACKSTAY_DEV_CONTAINER=1 CARGO_HOME=/work/.cache/cargo \
     RUSTUP_TOOLCHAIN=1.99.1 \

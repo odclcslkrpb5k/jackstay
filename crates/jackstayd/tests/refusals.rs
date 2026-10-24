@@ -77,11 +77,20 @@ fn clipman_running_or_in_the_panel_is_refused() {
     assert_eq!(status(&root, Some(&bin)), Some(3));
     ok(std::fs::remove_file(&query));
     // It runs, though not from the panel.
+    // A script's process is named after the script. (/bin/sleep, copied, refuses another name.)
     let clipman = root.join("xfce4-clipman");
-    ok(std::fs::copy("/bin/sleep", &clipman));
-    let mut running = ok(Command::new(&clipman).arg("30").spawn());
+    ok(std::fs::write(
+        &clipman,
+        "#!/bin/sh\ntrap 'kill $! 2>/dev/null; exit 0' TERM\nsleep 30 &\nwait\n",
+    ));
+    ok(std::fs::set_permissions(&clipman, std::os::unix::fs::PermissionsExt::from_mode(0o755)));
+    let mut running = ok(Command::new(&clipman).spawn());
+    std::thread::sleep(Duration::from_millis(200));
+    let comm = std::fs::read_to_string(format!("/proc/{}/comm", running.id())).unwrap_or_default();
+    assert_eq!(comm, "xfce4-clipman\n", "the stand-in runs, under clipman's name");
     let refused = status(&root, Some(&bin));
-    let _ = running.kill();
+    // TERM, which it handles by stopping its sleep too.
+    let _ = Command::new("kill").arg(running.id().to_string()).status();
     let _ = running.wait();
     assert_eq!(refused, Some(3));
 }
