@@ -1,10 +1,12 @@
 # The conformance matrix
 
-Real clipboard clients copying and pasting through the real daemon on Xvfb (plan §5.7). The core
-tier (M1) is here. The application tier (Firefox, Chrome, LibreOffice, xfce4-terminal, an
-Electron app) comes with M2.
+Real clipboard clients copying and pasting through the real daemon on Xvfb (plan §5.7), in two
+tiers: the core tier (M1), each toolkit's clipboard code driven directly, and the application
+tier (M2), the owner's applications driven as a person drives them.
 
-`crates/jackstayd/tests/conformance.rs`, run by `./check` as an ordinary test (about 25 s).
+`crates/jackstayd/tests/conformance.rs` (the core tier, about 25 s) and
+`crates/jackstayd/tests/applications.rs` (the application tier, about 2.5 min), run by `./check` as
+ordinary tests. The oracle both share is `tests/conformance/matrix.rs`.
 
 ## Clients
 
@@ -66,6 +68,84 @@ Besides the rows:
 - **A target over `capture.per_target`** is not kept: served while its owner lives, gone with it,
   and the rest of the entry kept.
 - **xterm pasting** what the daemon kept, through its UTF-8 path into its tty.
+
+## Application tier
+
+The owner's applications at the owner's versions (docs/dependencies.md), each in the image:
+
+| Application | Version | Driven by |
+|---|---|---|
+| Firefox | 156.0 | keys and its context menu (xdotool), pages served by the test |
+| Chrome for Testing | 155.0.8059.39 | the same |
+| VS Code (Electron) | 1.137.0 | keys in its editor; what it pasted is saved and read back |
+| LibreOffice Writer | 26.2.6.3, GTK 3 plugin (Xubuntu's) | UNO (`tests/conformance/office.py`): `.uno:Copy`, `.uno:Paste` |
+| xfce4-terminal | 1.1.5 (VTE) | a triple click and Ctrl+Shift+C; pasting into `cat` |
+
+**As a source,** each copy is a row as above (the core tier's clients are the sinks while the
+application lives and after it quits), started afresh and quit its own way: Ctrl+Q (Firefox,
+VS Code), closing the window (Chrome), LibreOffice's own exit through UNO (as Don't Save
+answers it), the shell ending (xfce4-terminal). It has quit once its process has exited or the
+daemon serves in its place, whichever comes first: under load Firefox's process can outlive its
+windows by more than 30 s. An application's quit may take up to 9 s: the
+daemon's 4 s `SAVE_TARGETS` budget and the application's own exit, and less than GTK 3's 10 s
+wait on the manager (Chrome and VS Code wait on their own terms).
+
+A source that renders a target anew on each request (LibreOffice, below) gives the test bytes the
+daemon cannot have: for those targets the daemon's bytes must not be empty, must never change,
+and must make up, with the rest, the size the live capture kept before the source quit.
+
+| Application | Rows |
+|---|---|
+| Firefox, Chrome | a selection with markup; 20 MiB of selected text; Copy Image of a small and a 2600×2600 image; Copy Link |
+| VS Code | selected code; 1 MiB selected |
+| LibreOffice | Writer text; a small and a 2600×2600 image |
+| xfce4-terminal | a selected line with characters outside Latin-1 |
+
+Each row also checks what the application put there: the text selected, the link, the image's
+size (from the PNG's header).
+
+**As a sink,** each pastes what the daemon kept from a copy whose owner (xclip, or the GTK 3
+client for text with HTML) has quit, and what it pasted is read back from the application:
+
+| Application | Pastes | Read back |
+|---|---|---|
+| Firefox, Chrome | text, 20 MiB of text, text with HTML, a small and a 2600×2600 image | a paste event's data, sent to the test by the page: each type, and each image's pixels from a canvas, compared pixel for pixel |
+| VS Code | text, 1 MiB of text | the file it saved |
+| LibreOffice | text, a small and a 2600×2600 image | the document's text, and the pasted graphic's size in pixels |
+| xfce4-terminal | text, 64 KiB of text | what `cat` read from its tty |
+
+A key sent before a window, an editor or a menu is ready is lost, not queued: copies by key are
+made again until something owns the clipboard, and pastes by key until they land (a browser's,
+until its paste event begins, so that nothing is pasted twice).
+
+The tests run one at a time. Each application holds inotify instances (VS Code about 10, a
+browser 3), and `fs.inotify.max_user_instances` (128 on Ubuntu) counts every one the user holds,
+in a container or on the desktop: a desktop can hold all but a dozen, and VS Code, starved,
+may never open its window (the test then says so). Raising the limit, for instance to 1024 in
+`/etc/sysctl.d/`, gives room to spare.
+
+## What the applications do
+
+Observed with the versions above. None is a fault of the daemon's, but each shapes what a
+clipboard manager can promise.
+
+- **LibreOffice renders some targets differently from one request to the next.** Its first
+  export of a copy as RTF or HTML lacks styles that later exports have (the daemon, fetching
+  first, keeps the first), its own document format (`application/x-openoffice-embed-source-xml`
+  and `application/x-libreoffice-internal-id-<pid>`) differs on every export, and its `Link` is
+  empty when `SAVE_TARGETS` asks for it at exit. These are checked against what the daemon
+  serves, which must never change, rather than against what the test reads from LibreOffice.
+- **LibreOffice ends `text/html`, `text/rtf`, `text/richtext` and `text/markdown` with a NUL**,
+  and Qt drops it from `text/html` when it reads it (GTK does not). The matrix expects Qt's
+  reading. Its Markdown, unlike its RTF and HTML, is the same on every request.
+- **LibreOffice renders every format it offers when `SAVE_TARGETS` asks**: after copying a
+  2600×2600 image its exit waits up to the daemon's 4 s budget (docs/selection.md,
+  "CLIPBOARD_MANAGER", 3), against 0.2 to 2 s with no manager.
+- **xfce4-terminal asks before pasting a line break** ("Potentially Unsafe Paste"); the tests
+  answer Paste.
+- **Copy Image:** Chrome offers `image/png` and HTML only; Firefox offers about twenty image
+  types through GTK, and refuses `image/jpeg`. The daemon keeps the PNG from either.
+- **Chrome takes minutes to parse 20 MiB of HTML;** the large-text page fetches its text instead.
 
 ## Found by the matrix in Jackstay
 

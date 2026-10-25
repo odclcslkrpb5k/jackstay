@@ -16,11 +16,16 @@ fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     }
 }
 
-fn dir(name: &str) -> PathBuf {
-    let d =
-        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("cli-{}-{name}", std::process::id()));
+/// A directory of its own for one test. Short: a socket's path in it must fit in 108 bytes, under
+/// however deep a tree and with however long a process id.
+fn dir() -> PathBuf {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let d = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("c{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     ok(std::fs::create_dir_all(&d));
+    let socket = d.join("control").into_os_string().len();
+    assert!(socket < 108, "socket path {socket} bytes long: run from a shallower tree");
     d
 }
 
@@ -44,7 +49,7 @@ fn jackstay(args: &[&str], display: bool, bin: Option<&Path>) -> Output {
 fn bad_usage_is_2_and_no_daemon_is_3() {
     assert_eq!(jackstay(&[], false, None).status.code(), Some(2));
     assert_eq!(jackstay(&["select", "x"], false, None).status.code(), Some(2));
-    let empty = dir("empty");
+    let empty = dir();
     let runtime = empty.to_str().unwrap_or_default();
     assert_eq!(jackstay(&["--runtime-dir", runtime, "status"], false, None).status.code(), Some(3));
     let help = jackstay(&["help"], false, None);
@@ -55,7 +60,7 @@ fn bad_usage_is_2_and_no_daemon_is_3() {
 /// so as a desktop notification too, since run from a hotkey or a menu nothing shows stderr.
 #[test]
 fn popup_and_settings_ask_the_ui_and_say_so_where_a_user_sees_it_if_none_runs() {
-    let root = dir("popup");
+    let root = dir();
     let bin = root.join("bin");
     ok(std::fs::create_dir_all(&bin));
     let said = root.join("notified");
@@ -136,12 +141,8 @@ fn scripted(runtime: &Path, answers: Vec<Response>) -> std::thread::JoinHandle<V
 
 /// `jackstay ARGS` against a daemon answering `answers`: its status, its stdout, and the requests
 /// the daemon got.
-fn exchange(
-    name: &str,
-    args: &[&str],
-    answers: Vec<Response>,
-) -> (Option<i32>, String, Vec<Request>) {
-    let root = dir(name);
+fn exchange(args: &[&str], answers: Vec<Response>) -> (Option<i32>, String, Vec<Request>) {
+    let root = dir();
     let server = scripted(&root, answers);
     let runtime = root.to_str().unwrap_or_default().to_owned();
     let mut full = vec!["--runtime-dir", &runtime];
@@ -161,7 +162,7 @@ fn each_command_sends_its_request_and_ok_is_success() {
         (vec!["clear"], Request::Clear),
         (vec!["clear-history"], Request::ClearHistory),
     ] {
-        let (code, out, got) = exchange("each", &args, vec![Response::Ok]);
+        let (code, out, got) = exchange(&args, vec![Response::Ok]);
         assert_eq!((code, out.as_str(), got), (Some(0), "", vec![want]), "{args:?}");
     }
 }
@@ -176,7 +177,7 @@ fn refusals_are_1_and_say_why() {
         (Error::ImportFailed, "could not be read or removed"),
         (Error::Internal, "jackstayd failed"),
     ] {
-        let root = dir("refused");
+        let root = dir();
         let server = scripted(&root, vec![Response::Error(error)]);
         let out =
             jackstay(&["--runtime-dir", root.to_str().unwrap_or_default(), "clear"], false, None);
@@ -185,8 +186,7 @@ fn refusals_are_1_and_say_why() {
         assert!(String::from_utf8_lossy(&out.stderr).contains(says), "{error:?}");
     }
     // A response that does not fit the request is refused too.
-    let (code, _, _) =
-        exchange("mismatch", &["clear"], vec![Response::Imported { added: 0, skipped: 0 }]);
+    let (code, _, _) = exchange(&["clear"], vec![Response::Imported { added: 0, skipped: 0 }]);
     assert_eq!(code, Some(1));
 }
 
@@ -201,16 +201,16 @@ fn status_says_what_is_on_the_clipboard_and_warns_of_a_failing_store() {
             store_failing: failing,
         })
     };
-    let (code, out, got) = exchange("status1", &["status"], vec![status(Some(5), true, false)]);
+    let (code, out, got) = exchange(&["status"], vec![status(Some(5), true, false)]);
     assert_eq!((code, got), (Some(0), vec![Request::Status]));
     assert_eq!(out, "entries: 3 (1 pinned)\non the clipboard: entry 5\n");
-    let (_, out, _) = exchange("status2", &["status"], vec![status(None, true, true)]);
+    let (_, out, _) = exchange(&["status"], vec![status(None, true, true)]);
     assert_eq!(
         out,
         "entries: 3 (1 pinned)\non the clipboard: nothing (cleared)\n\
          warning: the history on disk is not up to date (see the journal)\n"
     );
-    let (_, out, _) = exchange("status3", &["status"], vec![status(None, false, false)]);
+    let (_, out, _) = exchange(&["status"], vec![status(None, false, false)]);
     assert!(out.ends_with("on the clipboard: not known\n"));
 }
 
@@ -238,7 +238,7 @@ fn list_shows_each_entry_and_says_when_there_are_more() {
         summary(3, 7200, 3 << 20, Kinds::FILES | Kinds::RICH_TEXT | Kinds::OTHER),
         summary(4, 3 * 86_400, 0, 0),
     ];
-    let (code, out, got) = exchange("list", &["list"], vec![Response::List { total: 30, entries }]);
+    let (code, out, got) = exchange(&["list"], vec![Response::List { total: 30, entries }]);
     assert_eq!((code, got), (Some(0), vec![Request::List { offset: 0, limit: 20 }]));
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 5, "{out}");
@@ -253,7 +253,6 @@ fn list_shows_each_entry_and_says_when_there_are_more() {
     assert_eq!(fields(lines[3])[1..4], ["3d", "0", "B"]);
     assert_eq!(lines[4], "(4 of 30; jackstay list --all for every entry)");
     let (_, out, _) = exchange(
-        "list-all-shown",
         &["list"],
         vec![Response::List { total: 1, entries: vec![summary(1, 0, 1, Kinds::TEXT)] }],
     );
@@ -265,7 +264,6 @@ fn list_all_pages_until_every_entry_is_shown() {
     let page =
         |from: u64, n: u64| (from..from + n).map(|i| summary(i + 10, 1, 1, Kinds::TEXT)).collect();
     let (code, out, got) = exchange(
-        "all",
         &["list", "--all"],
         vec![
             Response::List { total: 700, entries: page(0, 500) },
@@ -280,7 +278,6 @@ fn list_all_pages_until_every_entry_is_shown() {
     assert_eq!(out.lines().count(), 700);
     // An empty page ends it, whatever the total says.
     let (_, _, got) = exchange(
-        "all-empty",
         &["list", "--all"],
         vec![
             Response::List { total: 900, entries: page(0, 500) },
@@ -290,7 +287,6 @@ fn list_all_pages_until_every_entry_is_shown() {
     assert_eq!(got.len(), 2);
     // An error mid-way is a refusal.
     let (code, _, _) = exchange(
-        "all-error",
         &["list", "--all"],
         vec![
             Response::List { total: 900, entries: page(0, 500) },
@@ -303,7 +299,7 @@ fn list_all_pages_until_every_entry_is_shown() {
 #[test]
 fn import_reports_counts_and_where_clipmans_files_are() {
     let (code, out, got) =
-        exchange("import", &["import-clipman"], vec![Response::Imported { added: 3, skipped: 1 }]);
+        exchange(&["import-clipman"], vec![Response::Imported { added: 3, skipped: 1 }]);
     assert_eq!((code, got), (Some(0), vec![Request::ImportClipman { remove: false }]));
     assert_eq!(
         out,
@@ -311,17 +307,13 @@ fn import_reports_counts_and_where_clipmans_files_are() {
          clipman's own files still hold its history: jackstay import-clipman --remove\n"
     );
     let (_, out, got) = exchange(
-        "import-remove",
         &["import-clipman", "--remove"],
         vec![Response::Imported { added: 3, skipped: 0 }],
     );
     assert_eq!(got, [Request::ImportClipman { remove: true }]);
     assert_eq!(out, "imported 3 entries from clipman (0 skipped)\n");
-    let (_, out, _) = exchange(
-        "import-none",
-        &["import-clipman"],
-        vec![Response::Imported { added: 0, skipped: 2 }],
-    );
+    let (_, out, _) =
+        exchange(&["import-clipman"], vec![Response::Imported { added: 0, skipped: 2 }]);
     assert_eq!(out.lines().count(), 1, "nothing added, nothing to remove");
     assert_eq!(jackstay(&["import-clipman", "--all"], false, None).status.code(), Some(2));
     assert_eq!(jackstay(&["list", "--remove"], false, None).status.code(), Some(2));

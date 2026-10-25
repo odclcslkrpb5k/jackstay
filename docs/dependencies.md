@@ -27,3 +27,15 @@ Built from source with `cargo install --locked` at exact versions (Dockerfile):
 | cargo-deny | 0.20.2 | advisories, licenses, sources, bans |
 | cargo-mutants | 27.1.0 | mutation testing of checkers and regression tests (TS-5) |
 | cargo-fuzz | 0.13.2 | fuzzing every decoder, on nightly-2026-10-15 only |
+
+The matrix's applications (docs/conformance.md, "Application tier"), at the owner's versions. They
+are tools the tests run, never linked or shipped; the image that holds them is built locally and
+in CI and not published.
+
+| Application | Version | From | License |
+|---|---|---|---|
+| Firefox | 156.0 | Mozilla's release tarball, checksum-pinned (Ubuntu's `firefox` package is a snap stub) | MPL-2.0 |
+| Chrome for Testing | 155.0.8059.39 | Google's Chrome for Testing build, checksum-pinned (Ubuntu's Chromium is a snap) | BSD-3-Clause and others (Chromium's) |
+| VS Code | 1.137.0 | Microsoft's tarball, checksum-pinned: the Electron application the owner uses | Microsoft's product license (use, not redistribution) |
+| LibreOffice Writer | 26.2.6.3 | the apt snapshot, with its GTK 3 plugin and `python3-uno` | MPL-2.0 |
+| xfce4-terminal | 1.1.5 | the apt snapshot | GPL-2.0-or-later |

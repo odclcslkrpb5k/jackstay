@@ -31,6 +31,11 @@ static SOCKET_DIR: std::sync::Once = std::sync::Once::new();
 
 impl Xvfb {
     pub fn start() -> Self {
+        Self::with_screen("640x480x24")
+    }
+
+    /// One with a screen of its own size, as `WIDTHxHEIGHTxDEPTH`.
+    pub fn with_screen(screen: &str) -> Self {
         SOCKET_DIR.call_once(|| {
             let dir = Path::new("/tmp/.X11-unix");
             let _ = std::fs::create_dir(dir);
@@ -40,7 +45,7 @@ impl Xvfb {
         let number =
             100 + (std::process::id() % 200) * 256 + NEXT.fetch_add(1, Ordering::Relaxed) % 256;
         let script = format!(
-            "exec setpriv --pdeathsig KILL Xvfb :{number} -displayfd 3 -nolisten tcp -screen 0 640x480x24 3>&1 1>/dev/null 2>/dev/null"
+            "exec setpriv --pdeathsig KILL Xvfb :{number} -displayfd 3 -nolisten tcp -screen 0 {screen} 3>&1 1>/dev/null 2>/dev/null"
         );
         let mut child = ok(Command::new("sh").args(["-c", &script]).stdout(Stdio::piped()).spawn());
         let mut ready = BufReader::new(child.stdout.take().unwrap_or_else(|| panic!("no stdout")));

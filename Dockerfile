@@ -51,6 +51,35 @@ RUN apt-get update --error-on=any --snapshot "${APT_SNAPSHOT}" \
       libnss-wrapper \
  && rm -rf /var/lib/apt/lists/*
 
+# The matrix's application tier (docs/conformance.md): the owner's applications at the owner's
+# versions. LibreOffice and xfce4-terminal from the snapshot; Firefox (the archive's is a snap
+# stub), Chrome for Testing (Ubuntu's Chromium is a snap) and VS Code (Electron) as their
+# makers' builds, checksum-pinned, with the libraries they load.
+ARG FIREFOX_VERSION=156.0
+ARG FIREFOX_SHA256=1d44cd02351c307c3e19061ea2a4d18a30f236e6be862b94f2282564afdb0167
+ARG CHROME_VERSION=155.0.8059.39
+ARG CHROME_SHA256=55672d1f392fd3e7b7a08621b6e804e6bcb39d40cf155504abb74b3a021ea8ea
+ARG VSCODE_VERSION=1.137.0
+ARG VSCODE_SHA256=8871d637292568e34c2d27daa5320a3b3c805f41f94014dfceafbe6134187fce
+RUN apt-get update --error-on=any --snapshot "${APT_SNAPSHOT}" \
+ && apt-get install -y --no-install-recommends --snapshot "${APT_SNAPSHOT}" \
+      xz-utils unzip \
+      libreoffice-writer libreoffice-gtk3 python3-uno xfce4-terminal \
+      libasound2t64 libnss3 libgbm1 libxss1 libxkbfile1 libsecret-1-0 libcups2t64 \
+      libatk-bridge2.0-0t64 libvulkan1 libxcomposite1 libxdamage1 libxrandr2 libcurl4t64 \
+      fonts-liberation \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /opt/apps /tmp/apps && cd /tmp/apps \
+ && curl -fsSLo firefox.tar.xz \
+      "https://ftp.mozilla.org/pub/firefox/releases/${FIREFOX_VERSION}/linux-x86_64/en-US/firefox-${FIREFOX_VERSION}.tar.xz" \
+ && curl -fsSLo chrome.zip \
+      "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" \
+ && curl -fsSLo vscode.tar.gz "https://update.code.visualstudio.com/${VSCODE_VERSION}/linux-x64/stable" \
+ && printf '%s  %s\n' "${FIREFOX_SHA256}" firefox.tar.xz "${CHROME_SHA256}" chrome.zip \
+      "${VSCODE_SHA256}" vscode.tar.gz | sha256sum -c - \
+ && cd /opt/apps && tar xJf /tmp/apps/firefox.tar.xz && unzip -q /tmp/apps/chrome.zip \
+ && tar xzf /tmp/apps/vscode.tar.gz && rm -rf /tmp/apps && chmod -R a+rX /opt/apps
+
 # Per-run caches live in the bind-mounted tree (gitignored), so the container runs as the host user.
 ENV JACKSTAY_DEV_CONTAINER=1 CARGO_HOME=/work/.cache/cargo \
     RUSTUP_TOOLCHAIN=1.99.1 \
