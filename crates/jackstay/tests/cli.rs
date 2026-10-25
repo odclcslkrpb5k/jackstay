@@ -51,10 +51,10 @@ fn bad_usage_is_2_and_no_daemon_is_3() {
     assert!(String::from_utf8_lossy(&help.stdout).contains("popup"));
 }
 
-/// `popup` asks the running jackstay-ui; without one it fails with status 3, and says so as a
-/// desktop notification too, since run from a hotkey nothing shows its stderr.
+/// `popup` and `settings` ask the running jackstay-ui; without one they fail with status 3, and say
+/// so as a desktop notification too, since run from a hotkey or a menu nothing shows stderr.
 #[test]
-fn popup_asks_the_ui_and_says_so_where_a_hotkey_user_sees_it_if_none_runs() {
+fn popup_and_settings_ask_the_ui_and_say_so_where_a_user_sees_it_if_none_runs() {
     let root = dir("popup");
     let bin = root.join("bin");
     ok(std::fs::create_dir_all(&bin));
@@ -66,26 +66,38 @@ fn popup_asks_the_ui_and_says_so_where_a_hotkey_user_sees_it_if_none_runs() {
     ));
     ok(std::fs::set_permissions(&notify, std::os::unix::fs::PermissionsExt::from_mode(0o755)));
     let runtime = root.to_str().unwrap_or_default();
-    // A UI that answers.
+    // A UI that answers each of two requests.
     let listener = ok(UnixListener::bind(root.join("ui")));
     let ui = std::thread::spawn(move || {
-        let (mut s, _) = ok(listener.accept());
-        let mut asked = [0u8; 6];
-        ok(s.read_exact(&mut asked));
-        ok(s.write_all(b"ok\n"));
+        let mut asked = Vec::new();
+        for _ in 0..2 {
+            let (mut s, _) = ok(listener.accept());
+            let mut byte = [0u8];
+            while asked.last() != Some(&b'\n') {
+                ok(s.read_exact(&mut byte));
+                asked.push(byte[0]);
+            }
+            ok(s.write_all(b"ok\n"));
+            asked.push(b'|');
+        }
         asked
     });
-    let out = jackstay(&["--runtime-dir", runtime, "popup"], true, Some(&bin));
-    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(&ok(ui.join().map_err(|_| "ui")), b"popup\n");
+    for window in ["popup", "settings"] {
+        let out = jackstay(&["--runtime-dir", runtime, window], true, Some(&bin));
+        assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    assert_eq!(&ok(ui.join().map_err(|_| "ui")), b"popup\n|settings\n|");
     assert!(!said.exists(), "nothing to tell");
     // None.
     let _ = std::fs::remove_file(root.join("ui"));
-    let out = jackstay(&["--runtime-dir", runtime, "popup"], true, Some(&bin));
-    assert_eq!(out.status.code(), Some(3));
-    let notified = ok(std::fs::read_to_string(&said));
-    assert!(notified.starts_with("--app-name=Jackstay\nJackstay\n"), "{notified}");
-    assert!(notified.contains("jackstay-ui is not running"), "{notified}");
+    for window in ["popup", "settings"] {
+        let _ = std::fs::remove_file(&said);
+        let out = jackstay(&["--runtime-dir", runtime, window], true, Some(&bin));
+        assert_eq!(out.status.code(), Some(3));
+        let notified = ok(std::fs::read_to_string(&said));
+        assert!(notified.starts_with("--app-name=Jackstay\nJackstay\n"), "{notified}");
+        assert!(notified.contains("jackstay-ui is not running"), "{notified}");
+    }
     // Another command's failure is not announced.
     let _ = std::fs::remove_file(&said);
     let _ = jackstay(&["--runtime-dir", runtime, "status"], true, Some(&bin));

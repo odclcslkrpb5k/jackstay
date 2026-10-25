@@ -65,6 +65,14 @@ grep -qx "Exec=$home/.local/bin/jackstay-session" "$home/.config/autostart/jacks
   || fail "autostart entry does not run the installed jackstay-session"
 [[ "$(stat -c %a "$home/.config/autostart/jackstay.desktop")" == 644 ]] || fail "entry mode"
 install # again, over the first
+# Starting at login turned off stays off through an upgrade, and on stays on.
+sed -i '/^\[Desktop Entry\]$/a Hidden=true' "$home/.config/autostart/jackstay.desktop"
+install >/dev/null
+grep -qx 'Hidden=true' "$home/.config/autostart/jackstay.desktop" || fail "login turned back on"
+[[ "$(grep -c '^Hidden' "$home/.config/autostart/jackstay.desktop")" == 1 ]] || fail "Hidden twice"
+sed -i '/^Hidden=/d' "$home/.config/autostart/jackstay.desktop"
+install >/dev/null
+! grep -q '^Hidden' "$home/.config/autostart/jackstay.desktop" || fail "login turned off"
 [[ -z "$(find "$home" -name '*.tmp-*')" ]] || fail "temporary files left"
 
 entry=$home/.config/autostart/xfce4-clipman-plugin-autostart.desktop

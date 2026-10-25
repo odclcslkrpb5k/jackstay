@@ -1,13 +1,15 @@
 //! The UI's socket, served on a thread of its own (docs/ui.md, "The UI's socket"): `jackstay
-//! popup` connects, and if it is this user's and asks for the popup, `asked` runs.
+//! popup` or `jackstay settings` connects, and if it is this user's and asks for a window,
+//! `asked` runs.
 
 use std::fs::File;
 use std::io::{self, Read as _, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use jackstayd::{paths, ui_socket};
+use jackstayd::paths;
+use jackstayd::ui_socket::{self, Ask};
 
 /// How long a client has to say what it wants.
 const READ_WITHIN: Duration = Duration::from_millis(500);
@@ -49,21 +51,22 @@ pub fn bind(runtime: &Path) -> Result<Listener, ListenError> {
 }
 
 impl Listener {
-    /// Serves forever on a new thread: each request for the popup from this user runs `asked`,
-    /// and is answered once it has.
+    /// Serves forever on a new thread: each request from this user runs `asked`, and is answered
+    /// once it has.
     ///
     /// # Errors
     /// The thread could not be started.
-    pub fn serve(self, asked: impl Fn() + Send + 'static) -> io::Result<()> {
+    pub fn serve(self, asked: impl Fn(Ask) + Send + 'static) -> io::Result<()> {
         let uid = rustix::process::getuid();
         let Listener { listener, _lock: lock } = self;
         std::thread::Builder::new().name("ui-socket".to_owned()).spawn(move || {
             let _held = lock;
             for stream in listener.incoming().flatten() {
-                if rustix::net::sockopt::socket_peercred(&stream).is_ok_and(|c| c.uid == uid)
-                    && wants_popup(&stream)
-                {
-                    asked();
+                if !rustix::net::sockopt::socket_peercred(&stream).is_ok_and(|c| c.uid == uid) {
+                    continue;
+                }
+                if let Some(ask) = read_ask(&stream) {
+                    asked(ask);
                     let _ = (&stream).write_all(ui_socket::OK);
                 }
             }
@@ -72,12 +75,19 @@ impl Listener {
     }
 }
 
-fn wants_popup(stream: &UnixStream) -> bool {
-    if stream.set_read_timeout(Some(READ_WITHIN)).is_err() {
-        return false;
+/// The request a client sends: one whole line, within [`READ_WITHIN`].
+fn read_ask(stream: &UnixStream) -> Option<Ask> {
+    let deadline = Instant::now() + READ_WITHIN;
+    let mut line = Vec::with_capacity(Ask::LONGEST);
+    let mut byte = [0u8];
+    // A byte at a time, so nothing past the newline is taken.
+    while line.len() < Ask::LONGEST && line.last() != Some(&b'\n') {
+        let left = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())?;
+        stream.set_read_timeout(Some(left)).ok()?;
+        if (&*stream).read(&mut byte).ok()? == 0 {
+            return None;
+        }
+        line.extend_from_slice(&byte);
     }
-    let mut got = Vec::new();
-    let want = u64::try_from(ui_socket::POPUP.len()).unwrap_or(0);
-    let _ = stream.take(want).read_to_end(&mut got);
-    got == ui_socket::POPUP
+    Ask::parse(&line)
 }

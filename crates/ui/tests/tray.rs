@@ -232,7 +232,8 @@ fn the_item_registers_as_the_panel_expects_and_names_its_icon_and_menu() {
     let layout =
         t.call("/MenuBar", "com.canonical.dbusmenu.GetLayout", &["0", "int32 -1", "@as []"]);
     let layout = layout.unwrap_or_default();
-    for label in ["Show history", "Clear clipboard", "Clear history…", "separator"] {
+    for label in ["Show history", "Clear clipboard", "Clear history…", "Settings…", "separator"]
+    {
         assert!(layout.contains(label), "{label} in {layout}");
     }
 }
@@ -280,6 +281,16 @@ fn the_menu_shows_history_clears_and_asks_before_clearing_history() {
     t.click_menu(99);
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(daemon.changes().len(), 3);
+    // Settings… opens the settings window.
+    t.click_menu(6);
+    eventually("the settings window", || {
+        let out =
+            t.ui.x
+                .command("xdotool")
+                .args(["search", "--onlyvisible", "--name", "Jackstay settings"])
+                .output();
+        out.is_ok_and(|o| o.status.success())
+    });
 }
 
 #[test]

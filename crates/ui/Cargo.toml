@@ -1,6 +1,6 @@
 [package]
 name = "jackstay-ui"
-description = "Jackstay's desktop side: the history popup (and, next, the tray and settings)"
+description = "Jackstay's desktop side: the history popup, the tray icon and the settings window"
 version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true

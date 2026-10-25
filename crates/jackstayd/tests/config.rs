@@ -1,4 +1,10 @@
-use jackstayd::config::{Config, ConfigError, parse};
+use std::num::NonZeroUsize;
+
+use jackstayd::config::{
+    Config, ConfigError, MAX_BYTES, MAX_ENTRIES, MAX_PER_ENTRY, MAX_PER_TARGET, MAX_PINNED, parse,
+    render,
+};
+use proptest::prelude::*;
 
 #[test]
 fn an_empty_file_is_the_defaults() {
@@ -49,4 +55,37 @@ fn unknown_keys_and_bad_values_are_refused_by_name() {
     assert_eq!(ConfigError::UnknownKey("a.b".into()).to_string(), "unknown configuration key a.b");
     assert_eq!(ConfigError::BadValue("a.b".into()).to_string(), "bad value for a.b");
     assert_eq!(ConfigError::Syntax.to_string(), "the configuration is not valid TOML");
+}
+
+#[test]
+fn render_writes_only_what_differs_from_the_defaults() {
+    let header = "# Written by Jackstay's settings window; a key left out has its default (docs/daemon.md).\n";
+    assert_eq!(render(&Config::default()), header);
+    let c = Config { max_pinned: 3, per_entry: 1 << 30, ..Config::default() };
+    assert_eq!(
+        render(&c),
+        format!("{header}\n[history]\nmax_pinned = 3\n\n[capture]\nper_entry = 1073741824\n")
+    );
+    let c = Config { per_target: 5, per_entry: 5, ..Config::default() };
+    assert_eq!(render(&c), format!("{header}\n[capture]\nper_target = 5\nper_entry = 5\n"));
+}
+
+proptest! {
+    #[test]
+    fn render_reads_back(
+        entries in 1..=MAX_ENTRIES,
+        bytes in 0..=MAX_BYTES,
+        pinned in 0..=MAX_PINNED,
+        target in 1..=MAX_PER_TARGET,
+        extra in 0..=MAX_PER_ENTRY,
+    ) {
+        let c = Config {
+            max_entries: NonZeroUsize::new(usize::try_from(entries).unwrap_or(1)).unwrap_or(NonZeroUsize::MIN),
+            max_bytes: bytes,
+            max_pinned: usize::try_from(pinned).unwrap_or(0),
+            per_target: target,
+            per_entry: target.saturating_add(extra).min(MAX_PER_ENTRY),
+        };
+        prop_assert_eq!(parse(&render(&c)), Ok(c));
+    }
 }

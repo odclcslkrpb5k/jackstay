@@ -232,7 +232,9 @@ At start, after the lock:
 | `capture.per_entry` | 128 MiB | |
 
 Parsed once at start into a typed config; an unknown key or a bad value refuses (exit 2) with the
-key named in the journal. The whole history is held in memory, within these limits.
+key named in the journal. The whole history is held in memory, within these limits. The settings
+window writes this file (docs/ui.md, "Settings") with only the keys that differ from their
+defaults, and restarts the daemon to read it; comments in a file written by hand are not kept.
 
 ## Exit statuses
 

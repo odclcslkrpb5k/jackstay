@@ -2,7 +2,7 @@
 
 `jackstay-ui` (`crates/ui`), in Rust with gtk3-rs (plan §4.3). It holds no history: everything it
 shows comes from `jackstayd` over the control socket, and everything it changes goes back the same
-way. The popup and the tray icon are done; the settings window follows.
+way. The settings are the exception: they are files, and Xfce's own shortcuts (below).
 
 ## The popup
 
@@ -34,8 +34,8 @@ way. The popup and the tray icon are done; the settings window follows.
 A StatusNotifierItem, which Xfce 4.20's systray hosts beside the legacy XEmbed icons (clipman's
 among them). A click on the icon opens the history popup at the pointer, as clipman's icon opens
 its history. The menu, which the panel draws and opens, has **Show history**, **Clear
-clipboard**, and **Clear history…**, which asks first in a dialog whose default is Cancel (the
-popup's second press cannot work from a menu).
+clipboard**, **Clear history…**, which asks first in a dialog whose default is Cancel (the
+popup's second press cannot work from a menu), and **Settings…**.
 
 - Exported through GLib's own D-Bus (gio), which gtk-rs links already: the
   `org.kde.StatusNotifierItem` interface at `/StatusNotifierItem` and `com.canonical.dbusmenu` at
@@ -53,6 +53,37 @@ popup's second press cannot work from a menu).
 - A reply of the wrong D-Bus type is dropped by GLib, and the host shows no menu: the menu's
   replies are built as tuples of their members, and `tests/tray_menu.rs` checks every type.
 
+## Settings
+
+`jackstay settings`, or the tray's **Settings…**, opens a window with:
+
+- **History:** entries kept, size kept (MiB), pinned entries; **Copying:** largest item kept and
+  most kept from one copy (MiB). These are the daemon's `config.toml` keys (docs/daemon.md,
+  "Configuration"), each field limited to the range the daemon accepts, and checked with the
+  daemon's own parser before saving, so a saved file is never one the daemon refuses. A size
+  given in bytes by hand is shown to the nearest MiB and kept exact unless its field changes.
+  The daemon reads the file only as it starts, so saving a change restarts it, or starts it if
+  a refused file had stopped it (`systemctl --user --no-block restart jackstayd.service`; its
+  history is saved on the way down). The file is replaced whole; a symbolic link to it is
+  followed and kept. Lowering a limit drops the oldest entries beyond it; lowering the largest item kept
+  drops saved entries bigger than it, as the window says. A file the daemon refuses is shown as
+  the defaults, with why, and saving replaces it.
+- **History hotkey:** the popup's binding in Xfce's keyboard shortcuts, the same
+  `/commands/custom/KEYS` that `tools/install --hotkey` writes, for `~/.local/bin/jackstay popup`
+  (the `jackstay` beside `jackstay-ui`). **Change…** takes the next keys pressed (Esc stops);
+  Esc alone stops (Ctrl+Esc and the like can be bound). They need Ctrl, Alt or Super unless they
+  are a function key, and keys another command or a window manager action has are refused,
+  named (Xfce's defaults too, until it has copied them to its custom bindings). Saving binds the
+  new keys first, then removes the popup's other bindings; a save that leaves the hotkey alone
+  leaves every binding alone. Without `xfconf-query` the hotkey cannot be changed here.
+- **Start at login:** `Hidden` in `~/.config/autostart/jackstay.desktop`, as Xfce's Session and
+  Startup sets it; `tools/install` keeps it turned off through an upgrade. Without that entry (`tools/install` writes it) this cannot be changed here.
+
+Nothing changes until **Save**; **Cancel** or Esc forgets. A change that could not be made keeps
+the window open (opening it again if it was closed meanwhile), saying which; the others are still
+made, and Save waits until the settings are read again. The window reads and saves on a thread
+of its own, so a slow `xfconf-query` or `systemctl` never stalls the popup.
+
 ## Threads
 
 The GTK thread never touches a socket. A worker thread owns the connection to `jackstayd`
@@ -64,13 +95,14 @@ leaves the popup waiting for its list, never frozen.
 ## The UI's socket
 
 `$XDG_RUNTIME_DIR/jackstay/ui`, beside the control socket, in the same 0700 directory. `jackstay
-popup` connects, writes `popup\n`, and reads `ok\n` once the UI has taken the request. The UI
-answers only its own user (`SO_PEERCRED`), and gives a client 500 ms to say what it wants. One
-UI runs at a time: it holds `ui.lock` in the runtime directory, and under that lock removes a
-socket a previous UI left.
+popup` connects, writes `popup\n` (`jackstay settings` writes `settings\n`), and reads `ok\n` once
+the UI has taken the request. The UI answers only its own user (`SO_PEERCRED`), and gives a
+client 500 ms to send the whole line. One UI runs at a time: it holds `ui.lock` in the runtime
+directory, and under that lock removes a socket a previous UI left.
 
-`jackstay popup` exits 0 once asked, and 3 if no UI answers. Run from a hotkey nothing shows its
-stderr, so it also says so as a desktop notification (`notify-send`, when there is a display).
+`jackstay popup` and `jackstay settings` exit 0 once asked, and 3 if no UI answers. Run from a
+hotkey or a menu nothing shows their stderr, so they also say so as a desktop notification
+(`notify-send`, when there is a display).
 
 ## Starting and stopping
 
@@ -88,6 +120,17 @@ the panel with `gdbus`: the item's registration and properties, the menu's layou
 icon, each menu item (the dialog's Cancel default included), a host's `EventGroup`, a panel
 restarting, and no session bus at all. The tests give every UI `DBUS_SESSION_BUS_ADDRESS`
 (`disabled:` when they want no bus): unset, GLib would try to start one.
+
+`crates/ui/tests/settings.rs` runs the settings window on Xvfb with `xfconf-query` and
+`systemctl` stood in for by scripts: a limit saved (and only it, with exact bytes kept) and the
+daemon restarted; nothing saved when nothing changed, on Cancel or Esc, or for limits the daemon
+would refuse; a refused file replaced; failures keeping the window open; the hotkey rebound,
+refused when taken or without a modifier, and removed; starting at login turned off and on; no
+`xfconf-query` or autostart entry. GTK 3 clicks a button reached by its mnemonic only after
+showing the press for 250 ms, so the tests wait that long before the next key. `xdotool key F9`
+adds an Alt press (the F-keys' Ctrl+Alt level in the keymap), so a bare function key is tested
+without a display, in `tests/desktop.rs`, with the shortcut listing, the autostart entry and the
+fields' mapping.
 
 `crates/ui/tests/popup.rs` runs the real `jackstay-ui` on Xvfb, driven with xdotool (keys go
 through its grab, as a person's do), against a stand-in daemon that records every request: Enter,

@@ -1,4 +1,5 @@
-//! `jackstay-ui`: the history popup, shown when `jackstay popup` asks (docs/ui.md).
+//! `jackstay-ui`: the history popup, shown when `jackstay popup` asks, the tray icon, and the
+//! settings window (docs/ui.md).
 
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -7,10 +8,13 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk::glib;
+use jackstay_ui::desktop::Places;
 use jackstay_ui::listen::{self, ListenError};
 use jackstay_ui::popup::Popup;
+use jackstay_ui::settings::{self, Settings};
 use jackstay_ui::tray::{self, Action};
 use jackstay_ui::worker;
+use jackstayd::ui_socket::Ask;
 
 /// Exit statuses, as the daemon's: 2 bad setup, 3 another UI running, 5 no display.
 const BAD_SETUP: i32 = 2;
@@ -20,6 +24,8 @@ const NO_DISPLAY: i32 = 5;
 thread_local! {
     /// The popup, for work handed to the GTK thread from the others.
     static POPUP: RefCell<Option<Rc<Popup>>> = const { RefCell::new(None) };
+    /// The settings window, likewise.
+    static SETTINGS: RefCell<Option<Rc<Settings>>> = const { RefCell::new(None) };
 }
 
 fn log(line: &str) {
@@ -48,6 +54,26 @@ fn on_popup(f: impl FnOnce(&Popup) + Send + 'static) {
             }
         });
     });
+}
+
+/// Runs `f` with the settings window, on the GTK thread.
+fn on_settings(f: impl FnOnce(&Settings) + Send + 'static) {
+    glib::MainContext::default().invoke(move || {
+        SETTINGS.with(|s| {
+            if let Some(settings) = s.borrow().as_ref() {
+                f(settings);
+            }
+        });
+    });
+}
+
+/// Where the settings live: from the environment, with `jackstay` beside this program, as
+/// `tools/install` puts it.
+fn places() -> Result<Places, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("own path: {}", e.kind()))?;
+    let bin = exe.parent().ok_or("own path has no directory")?;
+    Places::from_env(&|name| std::env::var_os(name), bin)
+        .ok_or_else(|| "neither XDG_CONFIG_HOME nor HOME is set".to_owned())
 }
 
 fn main() {
@@ -82,18 +108,38 @@ fn main() {
             std::process::exit(BAD_SETUP);
         }
     };
+    let places = match places() {
+        Ok(p) => p,
+        Err(why) => {
+            log(&why);
+            std::process::exit(BAD_SETUP);
+        }
+    };
+    let tasks = match settings::spawn(places.clone(), |f| on_settings(move |s| s.finished(f))) {
+        Ok(t) => t,
+        Err(e) => {
+            log(&format!("settings thread: {e}"));
+            std::process::exit(BAD_SETUP);
+        }
+    };
     let popup = Popup::new(jobs);
-    let tray_popup = Rc::clone(&popup);
+    let settings = Settings::new(places, tasks);
+    let (tray_popup, tray_settings) = (Rc::clone(&popup), Rc::clone(&settings));
     POPUP.with(|p| *p.borrow_mut() = Some(popup));
+    SETTINGS.with(|s| *s.borrow_mut() = Some(settings));
     // Without a session bus there is no tray; the popup still works from its hotkey.
     if let Err(e) = tray::start(move |action| match action {
         Action::ShowHistory => tray_popup.request(),
         Action::ClearClipboard => tray_popup.clear(),
         Action::ClearHistory => tray_popup.confirm_clear_history(),
+        Action::Settings => tray_settings.request(),
     }) {
         log(&format!("no tray icon: {e}"));
     }
-    if let Err(e) = listener.serve(|| on_popup(Popup::request)) {
+    if let Err(e) = listener.serve(|ask| match ask {
+        Ask::Popup => on_popup(Popup::request),
+        Ask::Settings => on_settings(Settings::request),
+    }) {
         log(&format!("ui socket: {e}"));
         std::process::exit(BAD_SETUP);
     }

@@ -121,7 +121,13 @@ done
 for icon in "${icons[@]}"; do
   write_file "$icon_dir/$icon" 0644 <"data/icons/$icon"
 done
+# Starting at login turned off (the settings window, or Xfce's Session and Startup) stays off.
+hidden=""
+if grep -qE '^Hidden *= *true *$' "$autostart_dir/jackstay.desktop" 2>/dev/null; then
+  hidden='Hidden=true'
+fi
 sed "s|^Exec=jackstay-session\$|Exec=$bin/jackstay-session|" data/autostart/jackstay.desktop \
+  | { if [[ -n "$hidden" ]]; then sed '/^\[Desktop Entry\]$/a Hidden=true'; else cat; fi; } \
   | write_file "$autostart_dir/jackstay.desktop" 0644
 grep -qx "Exec=$bin/jackstay-session" "$autostart_dir/jackstay.desktop" || {
   printf 'autostart entry: Exec not set to %s/jackstay-session\n' "$bin" >&2

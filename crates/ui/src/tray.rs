@@ -101,14 +101,17 @@ pub enum Action {
     ClearClipboard,
     /// Asks first.
     ClearHistory,
+    Settings,
 }
 
 /// The menu: (id, label, action); id 0 is the root, and a `None` label is a separator.
-const MENU: [(i32, Option<&str>, Option<Action>); 4] = [
+const MENU: [(i32, Option<&str>, Option<Action>); 6] = [
     (1, Some("Show history"), Some(Action::ShowHistory)),
     (2, None, None),
     (3, Some("Clear clipboard"), Some(Action::ClearClipboard)),
     (4, Some("Clear history…"), Some(Action::ClearHistory)),
+    (5, None, None),
+    (6, Some("Settings…"), Some(Action::Settings)),
 ];
 
 /// The action of menu item `id`, if it has one.

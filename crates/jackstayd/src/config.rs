@@ -1,6 +1,7 @@
 //! `~/.config/jackstay/config.toml` (docs/daemon.md, "Configuration"): every key optional, every
 //! value checked, an unknown key refused, so a typo never silently means a default.
 
+use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 
 /// The daemon's settings, all in entries or bytes.
@@ -52,9 +53,17 @@ impl std::fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// The largest `history.max_entries`.
+pub const MAX_ENTRIES: u64 = 0xFFFF_FFFF;
+/// The largest `history.max_bytes`.
+pub const MAX_BYTES: u64 = u64::MAX >> 1;
+/// The largest `history.max_pinned`.
+pub const MAX_PINNED: u64 = 0xFFFF_FFFF;
 /// The largest per-target limit: the engine holds a target in memory, and one beyond this is no
 /// copy anyone means to keep.
-const MAX_PER_TARGET: u64 = 1 << 30;
+pub const MAX_PER_TARGET: u64 = 1 << 30;
+/// The largest `capture.per_entry`.
+pub const MAX_PER_ENTRY: u64 = MAX_PER_TARGET << 2;
 
 fn number(value: &toml::Value, key: &str, min: u64, max: u64) -> Result<u64, ConfigError> {
     value
@@ -79,17 +88,17 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             let name = format!("{section}.{key}");
             match (section.as_str(), key.as_str()) {
                 ("history", "max_entries") => {
-                    let n = number(value, &name, 1, u64::from(u32::MAX))?;
+                    let n = number(value, &name, 1, MAX_ENTRIES)?;
                     config.max_entries = usize::try_from(n)
                         .ok()
                         .and_then(NonZeroUsize::new)
                         .ok_or(ConfigError::BadValue(name))?;
                 }
                 ("history", "max_bytes") => {
-                    config.max_bytes = number(value, &name, 0, u64::MAX >> 1)?;
+                    config.max_bytes = number(value, &name, 0, MAX_BYTES)?;
                 }
                 ("history", "max_pinned") => {
-                    let n = number(value, &name, 0, u64::from(u32::MAX))?;
+                    let n = number(value, &name, 0, MAX_PINNED)?;
                     config.max_pinned =
                         usize::try_from(n).map_err(|_| ConfigError::BadValue(name))?;
                 }
@@ -97,7 +106,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                     config.per_target = number(value, &name, 1, MAX_PER_TARGET)?;
                 }
                 ("capture", "per_entry") => {
-                    config.per_entry = number(value, &name, 1, MAX_PER_TARGET << 2)?;
+                    config.per_entry = number(value, &name, 1, MAX_PER_ENTRY)?;
                 }
                 _ => return Err(ConfigError::UnknownKey(name)),
             }
@@ -107,4 +116,32 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         return Err(ConfigError::BadValue("capture.per_entry".to_owned()));
     }
     Ok(config)
+}
+
+/// The file's text for `config`, as the settings window writes it: only the keys that differ from
+/// their defaults, so a default changed later still applies to the rest. [`parse`] reads it back
+/// as `config`.
+#[must_use]
+pub fn render(config: &Config) -> String {
+    let wide = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    let default = Config::default();
+    let keys = [
+        ("history", "max_entries", wide(config.max_entries.get()), wide(default.max_entries.get())),
+        ("history", "max_bytes", config.max_bytes, default.max_bytes),
+        ("history", "max_pinned", wide(config.max_pinned), wide(default.max_pinned)),
+        ("capture", "per_target", config.per_target, default.per_target),
+        ("capture", "per_entry", config.per_entry, default.per_entry),
+    ];
+    let mut text = String::from(
+        "# Written by Jackstay's settings window; a key left out has its default (docs/daemon.md).\n",
+    );
+    let mut section = "";
+    for (in_section, key, value, _) in keys.iter().filter(|(.., value, default)| value != default) {
+        if *in_section != section {
+            section = in_section;
+            let _ = write!(text, "\n[{section}]\n");
+        }
+        let _ = writeln!(text, "{key} = {value}");
+    }
+    text
 }

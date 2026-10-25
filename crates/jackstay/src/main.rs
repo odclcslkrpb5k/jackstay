@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use jackstay_proto::control::{Error, Kinds, Request, Response, Summary, printable};
 use jackstayd::client::{Client, ClientError};
-use jackstayd::ui_socket;
+use jackstayd::ui_socket::{self, Ask};
 
 const USAGE: &str = "\
 usage: jackstay [--runtime-dir DIR] COMMAND
@@ -21,10 +21,11 @@ commands:
   clear                      clear the clipboard, deleting what was on it unless pinned
   clear-history              delete every unpinned entry and clear the clipboard
   import-clipman [--remove]  import xfce4-clipman's history; --remove deletes its files after
-  popup                      show the history popup at the pointer (for a hotkey; needs jackstay-ui)";
+  popup                      show the history popup at the pointer (for a hotkey; needs jackstay-ui)
+  settings                   open the settings window (needs jackstay-ui)";
 
-/// Exit statuses: 0 done, 1 refused by the daemon, 2 bad usage, 3 the daemon (or, for `popup`,
-/// jackstay-ui) unreachable.
+/// Exit statuses: 0 done, 1 refused by the daemon, 2 bad usage, 3 the daemon (or, for `popup` and
+/// `settings`, jackstay-ui) unreachable.
 const REFUSED: u8 = 1;
 const USAGE_ERROR: u8 = 2;
 const UNREACHABLE: u8 = 3;
@@ -40,7 +41,7 @@ fn main() -> ExitCode {
             eprintln!("jackstay: {message}");
             // Run from a hotkey, nothing shows stderr.
             let skip = if args.first().is_some_and(|a| a == "--runtime-dir") { 2 } else { 0 };
-            if args.get(skip).is_some_and(|a| a == "popup") {
+            if args.get(skip).is_some_and(|a| a == "popup" || a == "settings") {
                 notify(&message);
             }
             ExitCode::from(code)
@@ -99,12 +100,16 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
         args.first().and_then(|a| a.to_str()).ok_or_else(|| usage("no command"))?.to_owned();
     let rest = args.get(1..).unwrap_or_default();
     let mut all = false;
-    let mut popup = false;
+    let mut window = None;
     let request = match (command.as_str(), rest) {
         ("status", []) => Request::Status,
         // Not the daemon's: the UI's socket (docs/ui.md).
         ("popup", []) => {
-            popup = true;
+            window = Some(Ask::Popup);
+            Request::Status
+        }
+        ("settings", []) => {
+            window = Some(Ask::Settings);
             Request::Status
         }
         ("list", []) => Request::List { offset: 0, limit: 20 },
@@ -134,8 +139,8 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
             .ok_or((UNREACHABLE, "XDG_RUNTIME_DIR is not set".to_owned()))?
             .join("jackstay"),
     };
-    if popup {
-        return ui_socket::request_popup(&runtime, Duration::from_secs(5)).map_err(|e| {
+    if let Some(ask) = window {
+        return ui_socket::request(&runtime, ask, Duration::from_secs(5)).map_err(|e| {
             let why = if matches!(
                 e.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused

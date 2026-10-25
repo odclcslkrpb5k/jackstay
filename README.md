@@ -20,11 +20,11 @@ Jackstay is intended to replace both [Synergy](https://symless.com/synergy) and
 
 ## Status
 
-Early development. Working now: the clipboard manager (`jackstayd`), its history popup and tray
-icon (`jackstay-ui`) and the `jackstay` command: CLIPBOARD copies kept after their application
-quits and restored after a restart, a searchable history at the pointer or from the tray,
-clearing, pinning, and xfce4-clipman's history imported. Not yet: settings (M2), and sharing
-between machines (M3 to M5). See [the plan](docs/plan.md), [the daemon](docs/daemon.md) and
+Early development. Working now: the clipboard manager (`jackstayd`), its history popup, tray
+icon and settings window (`jackstay-ui`) and the `jackstay` command: CLIPBOARD copies kept after
+their application quits and restored after a restart, a searchable history at the pointer or from
+the tray, clearing, pinning, and xfce4-clipman's history imported. Not yet: sharing between
+machines (M3 to M5). See [the plan](docs/plan.md), [the daemon](docs/daemon.md) and
 [the desktop side](docs/ui.md).
 
 ## Install
@@ -61,11 +61,13 @@ jackstay clear           # clear the clipboard and delete what was on it, unless
 jackstay clear-history   # delete every unpinned entry and clear the clipboard
 jackstay status
 jackstay popup           # the history at the pointer: type to search, Enter to paste
+jackstay settings        # limits, the popup's hotkey, starting at login (also in the tray's menu)
 ```
 
 Nothing copied is filtered or hidden: a copied password is kept like anything else, and
-`jackstay clear` is how to get rid of it. Settings are in `~/.config/jackstay/config.toml`
-([keys](docs/daemon.md#configuration)); the journal is `journalctl --user -u jackstayd`.
+`jackstay clear` is how to get rid of it. The settings window writes
+`~/.config/jackstay/config.toml` ([keys](docs/daemon.md#configuration)), which can also be edited
+by hand; the journal is `journalctl --user -u jackstayd`.
 
 ## Uninstall
 

@@ -240,7 +240,7 @@ pub fn start_with(name: &str, adjust: impl FnOnce(&mut Command)) -> Ui {
 
 impl Ui {
     pub fn popup(&self) {
-        ok(ui_socket::request_popup(&self.runtime, Duration::from_secs(5)));
+        ok(ui_socket::request(&self.runtime, ui_socket::Ask::Popup, Duration::from_secs(5)));
         eventually("the popup", || self.visible());
     }
 
