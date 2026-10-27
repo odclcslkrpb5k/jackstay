@@ -686,14 +686,19 @@ fn vscode(r: &Rig, file: &Path) -> (App, String) {
     let name = file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
     let Some(w) = find(r, "--name", &format!("^{name} - Visual Studio Code"), 60) else {
         let log = std::fs::read_to_string(r.home.root.join("applications.log"));
-        let starved = log.is_ok_and(|l| l.contains("inotify_init() failed: Too many open files"));
+        let starved =
+            log.as_ref().is_ok_and(|l| l.contains("inotify_init() failed: Too many open files"));
         assert!(
             !starved,
             "VS Code did not start: this user's inotify instances ran out (it takes about 10; \
              fs.inotify.max_user_instances, 128 on Ubuntu, counts the whole desktop's; see \
              docs/conformance.md)"
         );
-        panic!("VS Code: no window for {name}");
+        // It fails this way only on CI, so say what it wrote.
+        let log = log.unwrap_or_default();
+        let tail: Vec<&str> = log.lines().rev().take(40).collect();
+        let tail: Vec<&str> = tail.into_iter().rev().collect();
+        panic!("VS Code: no window for {name}; the end of its log:\n{}", tail.join("\n"));
     };
     (app, w)
 }
