@@ -80,10 +80,13 @@ fn clear_empties_primary_too() {
     let x = Xvfb::start();
     let s = Session::start(&x);
     let selected = xclip_copy_to(&x, "primary", "UTF8_STRING", b"selected secret");
-    assert_eq!(
-        xclip_paste_from(&x, "primary", "UTF8_STRING").as_deref(),
-        Some(&b"selected secret"[..])
-    );
+    // PRIMARY is not captured, so no report says when xclip has it: ask until it answers.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while xclip_paste_from(&x, "primary", "UTF8_STRING").as_deref() != Some(&b"selected secret"[..])
+    {
+        assert!(std::time::Instant::now() < deadline, "xclip never owned PRIMARY");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     s.clear();
     assert!(s.wait_for(Duration::from_secs(5), |r| *r == Report::Claimed).is_some());
     let pasted = xclip_paste_from(&x, "primary", "UTF8_STRING");

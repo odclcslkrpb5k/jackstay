@@ -133,7 +133,13 @@ impl Source {
             let _ = BufReader::new(out).read_line(&mut line);
             assert_eq!(line, "owned\n", "{kit:?} did not take the clipboard");
         }
-        eventually("the source to own the clipboard", || owned_by_other(x, home));
+        // xclip and xsel answer one request at a time: while the daemon captures a large offer,
+        // each TARGETS asked here waits its turn (up to 10 s each, under CI's load).
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !owned_by_other(x, home) {
+            assert!(Instant::now() < deadline, "{kit:?}: timed out waiting to own the clipboard");
+            std::thread::sleep(Duration::from_millis(50));
+        }
         Source { child, stdin }
     }
 }

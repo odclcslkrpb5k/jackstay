@@ -5,7 +5,13 @@ IFS=$'\n\t'
 
 cd "$(dirname "$0")"
 image="jackstay-dev:local"
-docker build --quiet --tag "$image" . >/dev/null
+# Quiet, but a failed build is built again with its output shown: a quiet build reports only
+# which step failed, not why (an apt fetch on CI, 2026-10-27). Layers that built are cached, and
+# a step that fails only now and then gets this second try.
+if ! docker build --quiet --tag "$image" . >/dev/null; then
+  printf 'dev: the image did not build; again, with its output:\n' >&2
+  docker build --progress=plain --tag "$image" . >&2
+fi
 mkdir -p .cache
 exec docker run --rm --init \
   --user "$(id -u):$(id -g)" \
