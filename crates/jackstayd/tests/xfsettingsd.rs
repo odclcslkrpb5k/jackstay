@@ -84,20 +84,7 @@ fn xfsettingsd(x: &Xvfb, bus: &Bus, home: &Home, clipboard: bool) -> Child {
         let exited = ok(child.try_wait());
         if exited.is_some() || Instant::now() >= deadline {
             let log = std::fs::read_to_string(home.root.join("xfsettingsd.log"));
-            // What else could reach the display then (CI only, so far).
-            let xdpyinfo = x.command("xdpyinfo").output().map(|o| (o.status, o.stderr.len()));
-            let rust = RustConnection::connect(Some(&x.display)).map(drop);
-            let server = std::path::Path::new(&format!("/proc/{}", x.child.id())).exists();
-            let sockets = std::fs::read_dir("/tmp/.X11-unix")
-                .map(|d| d.filter_map(Result::ok).map(|e| e.file_name()).collect::<Vec<_>>());
-            panic!(
-                "xfsettingsd did not start (exited: {exited:?}); its log: {log:?}; display {}: \
-                 xdpyinfo {xdpyinfo:?}, x11rb {rust:?}, server alive {server}, sockets {sockets:?}, \
-                 env DISPLAY {:?} XAUTHORITY {:?}",
-                x.display,
-                std::env::var_os("DISPLAY"),
-                std::env::var_os("XAUTHORITY"),
-            );
+            panic!("xfsettingsd did not start (exited: {exited:?}); its log: {log:?}");
         }
         std::thread::sleep(Duration::from_millis(20));
     }

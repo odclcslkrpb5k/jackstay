@@ -44,8 +44,10 @@ impl Xvfb {
         });
         let number =
             100 + (std::process::id() % 200) * 256 + NEXT.fetch_add(1, Ordering::Relaxed) % 256;
+        // -noreset: a server whose last client disconnects resets, and closes connections made
+        // meanwhile (xfsettingsd's, under load, after a test's own query: CI, 2026-10-27).
         let script = format!(
-            "exec setpriv --pdeathsig KILL Xvfb :{number} -displayfd 3 -nolisten tcp -screen 0 {screen} 3>&1 1>/dev/null 2>/dev/null"
+            "exec setpriv --pdeathsig KILL Xvfb :{number} -displayfd 3 -noreset -nolisten tcp -screen 0 {screen} 3>&1 1>/dev/null 2>/dev/null"
         );
         let mut child = ok(Command::new("sh").args(["-c", &script]).stdout(Stdio::piped()).spawn());
         let mut ready = BufReader::new(child.stdout.take().unwrap_or_else(|| panic!("no stdout")));
