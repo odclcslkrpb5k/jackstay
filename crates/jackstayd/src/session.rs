@@ -12,7 +12,9 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use jackstay_clip::EntryId;
-use jackstay_proto::control::{Error, MAX_LIST, Request, Response, Status};
+use jackstay_proto::control::{
+    Error, MAX_LIST, MAX_SOURCE_LEN, Request, Response, Status, printable,
+};
 use jackstay_selection::Report;
 use jackstay_x11_clip::Clipboard;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
@@ -21,7 +23,7 @@ use crate::control::{ClientId, Clients};
 use crate::import;
 use crate::notify::Notifier;
 use crate::store::{Reply, Request as StoreRequest, Snapshot};
-use crate::summary::summary;
+use crate::summary::{summary, truncate};
 use crate::tracker::{PinError, Tracker};
 
 /// The longest the loop sleeps, so it always turns (and feeds the watchdog).
@@ -119,6 +121,26 @@ fn log(line: &str) {
     let _ = writeln!(std::io::stderr(), "{line}");
 }
 
+/// Why we cannot run: who holds `CLIPBOARD_MANAGER`, if we could tell, and for Xfce's settings
+/// daemon, how to turn its clipboard manager off (docs/daemon.md, "Coexistence").
+pub(crate) fn manager_conflict(holder: Option<&str>) -> String {
+    let what = "another clipboard manager owns CLIPBOARD_MANAGER";
+    // Any client can set its WM_CLASS: cleaned as an entry's source is.
+    match holder.map(|h| truncate(&printable(h), MAX_SOURCE_LEN)) {
+        Some(h) if h == "xfsettingsd" => format!(
+            "{what}: xfsettingsd, whose clipboard manager runs unless it starts with \
+             XFSETTINGSD_NO_CLIPBOARD=1; tools/install sets that from the next login, and \
+             `XFSETTINGSD_NO_CLIPBOARD=1 xfsettingsd --replace --daemon` sets it now"
+        ),
+        Some(h) => format!("{what}: {h}"),
+        // Most likely still xfsettingsd's, on Xfce.
+        None => format!(
+            "{what}; on Xfce, xfsettingsd runs one unless started with \
+             XFSETTINGSD_NO_CLIPBOARD=1"
+        ),
+    }
+}
+
 fn describe(report: &Report) -> Option<String> {
     Some(match report {
         Report::Captured { capture, content, complete, .. } => format!(
@@ -130,7 +152,7 @@ fn describe(report: &Report) -> Option<String> {
         Report::CaptureFailed { capture } => format!("capture {capture}: nothing could be kept"),
         Report::OwnerHung => "the clipboard's owner stopped answering".to_owned(),
         Report::KeptAlive => "the owner exited; serving its last copy".to_owned(),
-        Report::ManagerConflict => "another clipboard manager owns CLIPBOARD_MANAGER".to_owned(),
+        Report::ManagerConflict { holder } => manager_conflict(holder.as_deref()),
         Report::ManagerLost => "another client took CLIPBOARD_MANAGER".to_owned(),
         Report::CaptureStarted { .. }
         | Report::CaptureEnded { .. }
@@ -192,7 +214,7 @@ impl Session {
             if let Some(line) = describe(r) {
                 log(&line);
             }
-            if matches!(r, Report::ManagerConflict | Report::ManagerLost) {
+            if matches!(r, Report::ManagerConflict { .. } | Report::ManagerLost) {
                 return Err(Exit::AnotherManager);
             }
             changed |= self.tracker.on_report(r, now);

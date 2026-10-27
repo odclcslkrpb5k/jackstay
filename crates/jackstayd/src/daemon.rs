@@ -19,7 +19,7 @@ use crate::config::{self, Config};
 use crate::control::Clients;
 use crate::import;
 use crate::paths::{self, Dirs, Overrides};
-use crate::session::{Exit, Parts, Session, StoreLink};
+use crate::session::{Exit, Parts, Session, StoreLink, manager_conflict};
 use crate::store::{self, Loaded, Paths, Reply, Snapshot, Store};
 use crate::tracker::Tracker;
 
@@ -157,9 +157,10 @@ fn connect(setup: &mut Setup) -> Result<(Clipboard, Tracker, bool), Refusal> {
         }
         Err(e) => return Err(bad(e)),
     };
-    if first.contains(&Report::ManagerConflict) {
-        let why = "another clipboard manager owns CLIPBOARD_MANAGER";
-        return Err((status::ANOTHER_MANAGER, why.to_owned()));
+    if let Some(Report::ManagerConflict { holder }) =
+        first.iter().find(|r| matches!(r, Report::ManagerConflict { .. }))
+    {
+        return Err((status::ANOTHER_MANAGER, manager_conflict(holder.as_deref())));
     }
     let limits = Limits { max_entries: config.max_entries, max_bytes: config.max_bytes };
     let history = std::mem::replace(&mut setup.loaded.history, History::new(limits));

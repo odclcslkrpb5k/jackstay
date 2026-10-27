@@ -182,7 +182,8 @@ import itself.)
 At start, after the lock:
 
 - `CLIPBOARD_MANAGER` already owned (xfce4-clipman's daemon owns it with `CurrentTime` and never
-  answers): exit 3. X releases a selection when its owner
+  answers; so does xfsettingsd's, below): exit 3, the journal naming the holder as an entry's
+  source is named (its process, from the server). X releases a selection when its owner
   disconnects, so a dead clipman cannot leave it owned.
 - A process of this user that is clipman (`/proc/*/comm` exactly `xfce4-clipman`, or a command
   line naming the panel plugin, `xfce4-clipman-plugin` or `libclipman.so`, as the panel's
@@ -199,7 +200,21 @@ At start, after the lock:
   `tools/install --replace-clipman` does the same as Quit.
 - While running, the process check repeats every 30 s; clipman starting after us also exits us
   (3), with the reason in the journal, since two managers fight over ownership.
-- xfsettingsd 4.20 has no clipboard manager, so it is no conflict.
+- **xfsettingsd runs a clipboard manager** (found in dogfood, 2026-10-26; plan §4.3 had said it
+  did not). xfsettingsd 4.20.1 makes libxfce4ui 4.20.2's `XfceClipboardManager` at start unless
+  `XFSETTINGSD_NO_CLIPBOARD` is set (xfsettingsd/main.c:161), and xfce4-session starts it
+  before autostart, so it holds `CLIPBOARD_MANAGER` first and jackstayd exits 3 with a message
+  saying how to turn it off. Taking the selection from it would not do: losing it does not stop
+  it (xfce-clipboard-manager.c:837), and its owner-change handler stays connected and takes
+  CLIPBOARD itself after any copy offering an image but no text (`owner_change`, :1195), so
+  ownership would flap. `tools/install` sets the variable in a marked block of `~/.xsessionrc`,
+  which the X session sources at login (Xsession.d's `40x11-common_xsessionrc`, after
+  lightdm-session); xfce4-session, and every xfsettingsd it starts or restores from a saved
+  session, inherit it. For the session already running, `XFSETTINGSD_NO_CLIPBOARD=1 xfsettingsd
+  --replace --daemon` (the owner's, 2026-10-26: the old one gives way). Without
+  `--replace`, an xfsettingsd starting after jackstayd makes no clipboard manager, so a
+  restart of it is harmless; with `--replace` and no variable, it takes the selection, and
+  jackstayd exits 3. `crates/jackstayd/tests/xfsettingsd.rs` runs the real one.
 
 ## Starting and stopping
 

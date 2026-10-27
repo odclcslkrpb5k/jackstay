@@ -535,6 +535,7 @@ dependencies = [
  "rustix",
  "signal-hook",
  "toml",
+ "x11rb",
 ]
 
 [[package]]

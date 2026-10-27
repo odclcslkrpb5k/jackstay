@@ -367,6 +367,27 @@ pub fn put_string(display: &str, window: u32, property: &str, value: &[u8]) {
     let _ = conn.sync();
 }
 
+/// A window with this `WM_CLASS`, named focused in the root's `_NET_ACTIVE_WINDOW` as a window
+/// manager names one; it lasts while the connection returned does.
+pub fn focus_window(display: &str, class: &str) -> RustConnection {
+    let (conn, root) = connect(display);
+    let window = conn.generate_id().unwrap_or_else(|e| panic!("{e}"));
+    let aux = CreateWindowAux::new();
+    let _ = conn.create_window(0, window, root, 0, 0, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &aux);
+    let wm_class = format!("{class}\0{class}\0");
+    let _ = conn.change_property8(
+        PropMode::REPLACE,
+        window,
+        AtomEnum::WM_CLASS,
+        AtomEnum::STRING,
+        wm_class.as_bytes(),
+    );
+    let active = atom(&conn, "_NET_ACTIVE_WINDOW");
+    let _ = conn.change_property32(PropMode::REPLACE, root, active, AtomEnum::WINDOW, &[window]);
+    let _ = conn.sync();
+    conn
+}
+
 /// Destroys another client's window, as any client may.
 pub fn destroy(display: &str, window: u32) {
     let (conn, _) = connect(display);

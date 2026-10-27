@@ -40,6 +40,11 @@ tools/install --replace-clipman --hotkey '<Primary><Alt>h' --start
   `~/.local/bin`; their systemd user units to `~/.config/systemd/user`; an autostart entry to `~/.config/autostart`.
   Nothing outside your home directory is touched. Running it again upgrades, restarting a
   running daemon.
+- It also adds `export XFSETTINGSD_NO_CLIPBOARD=1` to `~/.xsessionrc`, in a block marked
+  `jackstay`: Xfce's settings daemon otherwise runs a clipboard manager of its own, which Jackstay
+  cannot run beside. That takes effect at the next login; for this session, run
+  `XFSETTINGSD_NO_CLIPBOARD=1 xfsettingsd --replace --daemon` (the install says so when needed).
+  `--uninstall` removes the block.
 - `--replace-clipman` stops xfce4-clipman and turns off its autostart, as clipman's own Quit
   does. Two clipboard managers fight, so `jackstayd` refuses to run beside clipman. If clipman
   is in the panel as a plugin, remove it there too (Panel Preferences, Items).

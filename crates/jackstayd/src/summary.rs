@@ -43,7 +43,7 @@ pub fn text_start(entry: &Entry) -> Option<String> {
 }
 
 /// The longest prefix of `s` within `max` bytes, cut at a character boundary.
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     let end = s
         .char_indices()
         .map(|(i, c)| i.saturating_add(c.len_utf8()))

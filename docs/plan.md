@@ -243,8 +243,9 @@ These shape the design (§5) more than the stack, but the stack has to reach the
   selection with a correct timestamp, taken from a zero-length property append, since there is no
   user event to take one from. Targets are offered at once and fetched lazily over the network, so
   large items need a latency policy.
-- **Coexistence.** xfsettingsd 4.20 has no clipboard manager, but xfce4-clipman must not run
-  beside Jackstay, or selection ownership flaps. Synergy and Deskflow conflict only with input
+- **Coexistence.** xfce4-clipman must not run beside Jackstay, or selection ownership flaps;
+  nor may xfsettingsd's own clipboard manager, which this plan first said Xfce 4.20 lacked (it
+  has one, off only with `XFSETTINGSD_NO_CLIPBOARD`: docs/daemon.md, "Coexistence"). Synergy and Deskflow conflict only with input
   sharing. See §5.6.
 
 ### 4.4 Decisions

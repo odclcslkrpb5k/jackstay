@@ -96,7 +96,7 @@ impl Tracker {
             Report::KeptAlive
             | Report::Claimed
             | Report::ClaimFailed
-            | Report::ManagerConflict
+            | Report::ManagerConflict { .. }
             | Report::ManagerLost
             | Report::OwnerHung
             | Report::SaveAnswered { .. } => false,

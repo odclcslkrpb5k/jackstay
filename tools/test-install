@@ -49,6 +49,9 @@ install() {
   HOME=$home XDG_CONFIG_HOME="" XDG_DATA_HOME="" PATH="$fakes:$PATH" tools/install --from "$built" "$@"
 }
 
+# A session file of the user's own, kept around Jackstay's block.
+printf 'export LANG=en_CA.UTF-8\n' >"$home/.xsessionrc"
+chmod 600 "$home/.xsessionrc"
 install
 for p in jackstayd jackstay jackstay-ui jackstay-session; do
   [[ -x "$home/.local/bin/$p" ]] || fail "$p not installed"
@@ -64,7 +67,15 @@ done
 grep -qx "Exec=$home/.local/bin/jackstay-session" "$home/.config/autostart/jackstay.desktop" \
   || fail "autostart entry does not run the installed jackstay-session"
 [[ "$(stat -c %a "$home/.config/autostart/jackstay.desktop")" == 644 ]] || fail "entry mode"
+grep -qx 'export LANG=en_CA.UTF-8' "$home/.xsessionrc" || fail "the user's .xsessionrc lost"
+grep -qx 'export XFSETTINGSD_NO_CLIPBOARD=1' "$home/.xsessionrc" || fail "xfsettingsd's switch unset"
+[[ "$(stat -c %a "$home/.xsessionrc")" == 600 ]] || fail ".xsessionrc mode changed"
 install # again, over the first
+[[ "$(grep -c XFSETTINGSD_NO_CLIPBOARD "$home/.xsessionrc")" == 1 ]] || fail "switch set twice"
+sh -n "$home/.xsessionrc" || fail ".xsessionrc is not valid sh"
+[[ "$(env -i sh -c ". '$home/.xsessionrc'; echo \$XFSETTINGSD_NO_CLIPBOARD")" == 1 ]] \
+  || fail ".xsessionrc does not export the switch"
+
 # Starting at login turned off stays off through an upgrade, and on stays on.
 sed -i '/^\[Desktop Entry\]$/a Hidden=true' "$home/.config/autostart/jackstay.desktop"
 install >/dev/null
@@ -113,4 +124,44 @@ for f in .local/bin/jackstayd .local/bin/jackstay .local/bin/jackstay-ui \
   [[ ! -e "$home/$f" ]] || fail "$f not removed"
 done
 [[ -e "$home/.local/state/jackstay/index" ]] || fail "the history was removed"
-printf 'install, reinstall, --replace-clipman, --hotkey and --uninstall did what they say\n'
+[[ "$(cat "$home/.xsessionrc")" == 'export LANG=en_CA.UTF-8' ]] \
+  || fail ".xsessionrc not put back: $(cat "$home/.xsessionrc")"
+# A linked .xsessionrc (dotfiles in a repository) stays a link; the file it names is edited.
+mkdir -p "$home/dotfiles"
+printf 'export C=3\r\n' >"$home/dotfiles/xsessionrc"
+chmod 640 "$home/dotfiles/xsessionrc"
+ln -sf dotfiles/xsessionrc "$home/.xsessionrc"
+install >/dev/null
+install >/dev/null
+[[ -L "$home/.xsessionrc" ]] || fail "the .xsessionrc link was replaced"
+[[ "$(stat -c %a "$home/dotfiles/xsessionrc")" == 640 ]] || fail "the linked file's mode changed"
+[[ "$(grep -c XFSETTINGSD_NO_CLIPBOARD "$home/dotfiles/xsessionrc")" == 1 ]] \
+  || fail "the linked file's switch not set once"
+# Saved by an editor with carriage returns, the block is still found.
+sed -i 's/$/\r/' "$home/dotfiles/xsessionrc"
+install >/dev/null
+[[ "$(grep -c XFSETTINGSD_NO_CLIPBOARD "$home/dotfiles/xsessionrc")" == 1 ]] \
+  || fail "a block with carriage returns added again"
+install --uninstall >/dev/null
+[[ -L "$home/.xsessionrc" ]] || fail "uninstall replaced the link"
+! grep -q jackstay "$home/dotfiles/xsessionrc" || fail "uninstall left the block in the linked file"
+rm "$home/.xsessionrc"
+# An empty one of the user's own is left alone.
+: >"$home/.xsessionrc"
+install --uninstall >/dev/null
+[[ -e "$home/.xsessionrc" ]] || fail "the user's empty .xsessionrc removed"
+# A block missing its end line is refused, the file untouched.
+install >/dev/null
+printf 'export A=1\n# jackstay begin: no clipboard manager in xfsettingsd (tools/install)\nexport B=2\n' \
+  >"$home/.xsessionrc"
+cp "$home/.xsessionrc" "$home/xsessionrc.before"
+! install >/dev/null 2>&1 || fail "a block without its end was accepted"
+! install --uninstall >/dev/null 2>&1 || fail "uninstall accepted a block without its end"
+[[ -e "$home/.local/bin/jackstayd" ]] || fail "a refused uninstall removed something"
+cmp -s "$home/.xsessionrc" "$home/xsessionrc.before" || fail "a broken .xsessionrc was changed"
+# A .xsessionrc holding only the block goes with it.
+rm "$home/.xsessionrc"
+install >/dev/null
+install --uninstall >/dev/null
+[[ ! -e "$home/.xsessionrc" ]] || fail "an .xsessionrc of Jackstay's alone left behind"
+printf 'install, reinstall, .xsessionrc, --replace-clipman, --hotkey and --uninstall did what they say\n'

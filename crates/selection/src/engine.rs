@@ -45,14 +45,19 @@ pub enum Report {
     ClaimFailed,
     /// Another client took the clipboard from us.
     Lost,
-    /// Another clipboard manager owns `CLIPBOARD_MANAGER`.
-    ManagerConflict,
+    /// Another clipboard manager owns `CLIPBOARD_MANAGER`; `holder` is who, as for a source.
+    ManagerConflict { holder: Option<String> },
     /// Another client took `CLIPBOARD_MANAGER` from us.
     ManagerLost,
     /// The clipboard's owner stopped answering.
     OwnerHung,
     /// An exiting application's `SAVE_TARGETS` was answered; `taken` if we took the clipboard.
     SaveAnswered { taken: bool },
+}
+
+/// `CLIPBOARD_MANAGER` held by `other` (or by no one we could see, after a failed claim).
+fn conflict(port: &mut impl Port, other: Option<Window>) -> Report {
+    Report::ManagerConflict { holder: other.and_then(|o| port.source_of(o)) }
 }
 
 #[derive(Debug)]
@@ -139,15 +144,16 @@ impl Engine {
         let mut reports = Vec::new();
         let manager = engine.known.clipboard_manager;
         match port.selection_owner(manager) {
-            Some(other) if other != our_window => reports.push(Report::ManagerConflict),
+            Some(other) if other != our_window => reports.push(conflict(port, Some(other))),
             _ => {
                 let time = port.server_time();
                 port.set_selection_owner(manager, Some(our_window), time);
-                if port.selection_owner(manager) == Some(our_window) {
-                    engine.manager_owned = true;
-                    port.announce_manager(manager, time);
-                } else {
-                    reports.push(Report::ManagerConflict);
+                match port.selection_owner(manager) {
+                    Some(o) if o == our_window => {
+                        engine.manager_owned = true;
+                        port.announce_manager(manager, time);
+                    }
+                    other => reports.push(conflict(port, other)),
                 }
             }
         }

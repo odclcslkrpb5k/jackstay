@@ -8,6 +8,7 @@ use jackstay_selection::{Atom, Port, Property, Read, Timestamp, Window};
 use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::errors::{ConnectionError, ReplyError};
 use x11rb::protocol::Event as XEvent;
+use x11rb::protocol::res::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
     self, AtomEnum, ChangeWindowAttributesAux, ClientMessageEvent, ConnectionExt as _, EventMask,
     PropMode, SelectionNotifyEvent,
@@ -38,6 +39,8 @@ pub(crate) struct X11Port {
     pub queued: VecDeque<XEvent>,
     pub broken: Option<ConnectionError>,
     max_property: usize,
+    /// Whether the server has X-Resource 1.2, which names a client's process.
+    resources: bool,
 }
 
 impl std::fmt::Debug for X11Port {
@@ -48,6 +51,7 @@ impl std::fmt::Debug for X11Port {
             .field("queued", &self.queued.len())
             .field("broken", &self.broken)
             .field("max_property", &self.max_property)
+            .field("resources", &self.resources)
             .finish_non_exhaustive()
     }
 }
@@ -69,6 +73,7 @@ impl X11Port {
         root: xproto::Window,
         window: xproto::Window,
         time_property: xproto::Atom,
+        resources: bool,
     ) -> Self {
         // With BIG-REQUESTS the request also carries a 4-byte extended length, which x11rb adds
         // after checking the size against the maximum.
@@ -89,6 +94,7 @@ impl X11Port {
             queued: VecDeque::new(),
             broken: None,
             max_property,
+            resources,
         }
     }
 
@@ -128,7 +134,7 @@ impl X11Port {
         Some(class.iter().map(|&b| char::from(b)).collect())
     }
 
-    /// A window-valued property (`WM_CLIENT_LEADER`, `_NET_ACTIVE_WINDOW`).
+    /// A window-valued property (`WM_CLIENT_LEADER`).
     fn window_property(
         &mut self,
         window: xproto::Window,
@@ -144,8 +150,26 @@ impl X11Port {
         Some(Port::intern(self, &name).0)
     }
 
-    /// The name of the process behind `_NET_WM_PID`, only for a client on this machine: a remote
-    /// client's pid (ssh -X) would name an unrelated local process.
+    /// The name of the process that created `window`, as the server knows it (X-Resource's
+    /// `LocalClientPID`, from the socket's credentials): unlike `_NET_WM_PID`, no client can set
+    /// it, and it exists only for a client on this machine.
+    fn client_process(&mut self, window: xproto::Window) -> Option<String> {
+        let spec = res::ClientIdSpec { client: window, mask: res::ClientIdMask::LOCAL_CLIENT_PID };
+        let cookie = ask(self.conn.res_query_client_ids(&[spec]));
+        let reply = self.got(cookie)?;
+        let pid = reply
+            .ids
+            .iter()
+            .find(|id| id.spec.mask == res::ClientIdMask::LOCAL_CLIENT_PID)?
+            .value
+            .first()
+            .copied()?;
+        process_name(pid)
+    }
+
+    /// The name of the process behind `_NET_WM_PID`, for a server without X-Resource, and only
+    /// for a client on this machine: a remote client's pid (ssh -X) would name an unrelated local
+    /// process.
     fn pid_name(&mut self, window: xproto::Window) -> Option<String> {
         let machine = self.intern_name("WM_CLIENT_MACHINE")?;
         let cookie = ask(self.conn.get_property(false, window, machine, AtomEnum::STRING, 0, 64));
@@ -157,10 +181,15 @@ impl X11Port {
         let atom = self.intern_name("_NET_WM_PID")?;
         let cookie = ask(self.conn.get_property(false, window, atom, AtomEnum::CARDINAL, 0, 1));
         let pid = self.got(cookie)?.value32()?.next()?;
-        let comm = std::fs::read(format!("/proc/{pid}/comm")).ok()?;
-        let name = String::from_utf8_lossy(comm.get(..comm.len().min(64))?).trim().to_owned();
-        (!name.is_empty()).then_some(name)
+        process_name(pid)
     }
+}
+
+/// A local process's name (`/proc/PID/comm`), if it has one.
+fn process_name(pid: u32) -> Option<String> {
+    let comm = std::fs::read(format!("/proc/{pid}/comm")).ok()?;
+    let name = String::from_utf8_lossy(comm.get(..comm.len().min(64))?).trim().to_owned();
+    (!name.is_empty()).then_some(name)
 }
 
 impl Port for X11Port {
@@ -284,11 +313,10 @@ impl Port for X11Port {
         {
             return Some(class);
         }
-        if let Some(name) = self.pid_name(owner.0) {
-            return Some(name);
-        }
-        let active = self.window_property(self.root, "_NET_ACTIVE_WINDOW")?;
-        self.wm_class(active)
+        // Never the focused window's: a copy made by another machine's user (Synergy), or by a
+        // tool in the background, would be credited to whatever happens to be focused here.
+        // With X-Resource, a client it gives no process (one over TCP) is not asked to name one.
+        if self.resources { self.client_process(owner.0) } else { self.pid_name(owner.0) }
     }
 
     fn convert_selection(

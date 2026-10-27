@@ -94,8 +94,12 @@ whatever entry it was showing.
 
 1. **Attribute the source.** The owner window is usually a hidden helper window with no `WM_CLASS`
    (Qt's, GTK's, Chromium's). Try its `WM_CLASS`, then the `WM_CLASS` of its
-   `WM_CLIENT_LEADER`, then `_NET_WM_PID` (to a process name), then the `WM_CLASS` of
-   `_NET_ACTIVE_WINDOW`.
+   `WM_CLIENT_LEADER`, then the name of the process that made it, as the server knows it
+   (X-Resource 1.2's `LocalClientPID`, from the socket; a client cannot set it, and a remote
+   client has none), or, only if the server lacks X-Resource, `_NET_WM_PID` (and only for
+   `WM_CLIENT_MACHINE` equal to this host). Otherwise no source. Never `_NET_ACTIVE_WINDOW`:
+   Synergy's owner window has no name, and its copies, made on another machine, were credited to
+   whatever was focused here (dogfood, 2026-10-27).
 2. **Convert `TARGETS`** with the notification's selection timestamp, never `CurrentTime`. Qt
    checks that time (qxcbclipboard.cpp:530). Accept a reply of type `ATOM` or `TARGETS`, format 32.
    Drop `None` and duplicate atoms.

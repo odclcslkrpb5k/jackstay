@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 
 use jackstay_clip::Content;
 use jackstay_selection::{Config, Engine, Millis, Report, Window};
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::errors::{ConnectError, ConnectionError, ReplyError, ReplyOrIdError};
+use x11rb::protocol::res::{self, ConnectionExt as _};
 use x11rb::protocol::xfixes::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
     self, ConnectionExt as _, CreateWindowAux, EventMask, PropMode, WindowClass,
@@ -117,7 +118,14 @@ impl Clipboard {
             | xfixes::SelectionEventMask::SELECTION_WINDOW_DESTROY
             | xfixes::SelectionEventMask::SELECTION_CLIENT_CLOSE;
         conn.xfixes_select_selection_input(window, clipboard, mask)?.check()?;
-        let mut port = X11Port::new(conn, root, window, time_property);
+        // X-Resource 1.2 names a client's process (attribution); without it, no request of it is
+        // sent, since x11rb fails the connection for an absent extension.
+        let resources = conn.extension_information(res::X11_EXTENSION_NAME)?.is_some()
+            && conn
+                .res_query_version(1, 2)?
+                .reply()
+                .is_ok_and(|v| (v.server_major, v.server_minor) >= (1, 2));
+        let mut port = X11Port::new(conn, root, window, time_property, resources);
         let started = Instant::now();
         let (engine, reports) = Engine::new(&mut port, Window(window), config, Millis(0));
         let mut clipboard = Clipboard { port, engine, started };

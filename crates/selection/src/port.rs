@@ -62,8 +62,8 @@ pub trait Port {
     /// A current server timestamp (a zero-length append to a property on our window, and the
     /// time of its `PropertyNotify`).
     fn server_time(&mut self) -> Timestamp;
-    /// Who an owner window belongs to (its `WM_CLASS`, its client leader's, the process, or the
-    /// active window's), for an entry's source.
+    /// Who an owner window belongs to (its `WM_CLASS`, its client leader's, or its process's
+    /// name), for an entry's source and for who holds `CLIPBOARD_MANAGER`.
     fn source_of(&mut self, owner: Window) -> Option<String>;
 
     fn convert_selection(&mut self, selection: Atom, target: Atom, property: Atom, time: Timestamp);

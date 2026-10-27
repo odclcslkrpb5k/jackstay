@@ -24,8 +24,9 @@ fn start_claims_clipboard_manager_and_announces_it() {
 fn another_manager_is_reported_and_left_alone() {
     let mut x = FakeX::new();
     x.claim("CLIPBOARD_MANAGER", Window(42), 10);
+    x.sources.insert(Window(42), "xfsettingsd".to_owned());
     let (_, reports) = engine(&mut x);
-    assert_eq!(reports, vec![Report::ManagerConflict]);
+    assert_eq!(reports, vec![Report::ManagerConflict { holder: Some("xfsettingsd".to_owned()) }]);
     assert!(!x.calls.contains(&Call::Announce));
 }
 

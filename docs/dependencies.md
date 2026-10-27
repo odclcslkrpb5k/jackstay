@@ -6,7 +6,7 @@ and `Cargo.lock` is committed; builds run `--locked`.
 | Crate | Version | Used by | Why | Alternatives rejected |
 |---|---|---|---|---|
 | `libfuzzer-sys` | 0.4.13 | the fuzz crates only (`crates/*/fuzz`) | libFuzzer for cargo-fuzz (TS-16); its bundled libFuzzer is NCSA, allowed for this crate alone in `deny.toml` | `afl` (needs an instrumenting toolchain outside cargo); `honggfuzz` (less maintained bindings) |
-| `x11rb` | 0.14.0 | `jackstay-x11-clip` | The X protocol in pure Rust (`RustConnection`, no libxcb): the clipboard path has no C (plan §4.3) | `xcb` crate (FFI to libxcb); `x11` (Xlib FFI) |
+| `x11rb` | 0.14.0 | `jackstay-x11-clip`; `jackstayd` (tests: who owns a selection) | The X protocol in pure Rust (`RustConnection`, no libxcb): the clipboard path has no C (plan §4.3). Features `xfixes` and `res` (X-Resource, for an owner's process): code generated into the same crate, no new ones | `xcb` crate (FFI to libxcb); `x11` (Xlib FFI) |
 | `rustix` | 1.1.5 | `jackstay-x11-clip`, `jackstayd` | `poll` for the daemon's loop, `flock` for the instance lock, `SO_PEERCRED` on the control socket, `O_NOFOLLOW`, `getuid`; already in the tree through `x11rb`, at the same version | `libc` (unsafe FFI in our code); `mio` (more than a poll) |
 | `sha2` | 0.11.1 | `jackstay-store` | Names each history blob by the SHA-256 of its bytes, so equal content is stored once and a blob can be checked against its name (docs/daemon.md, "Storage"). RustCrypto, pure Rust, no default features; brings `digest`, `block-buffer`, `crypto-common`, `hybrid-array`, `typenum`, `cpufeatures` (`cpuid` through `core::arch`, no libc on x86-64) and `cfg-if`, all RustCrypto's or long-standing | `ring` (C and assembly); a hand-written SHA-256 (unreviewed crypto); a non-cryptographic hash (a chosen collision would let one copy's blob stand for another's) |
 | `toml` | 1.1.8 | `jackstayd` | Reads `config.toml` into a table; features `std`, `parse`, `serde` (for `serde_core`'s traits, no derive macros); brings `toml_parser`, `winnow`, `toml_datetime`, `serde_spanned`, `serde_core` | `serde` with derive (proc macros in the build for five keys); a hand-written parser (a second TOML dialect for users to learn) |
@@ -39,3 +39,4 @@ in CI and not published.
 | VS Code | 1.137.0 | Microsoft's tarball, checksum-pinned: the Electron application the owner uses | Microsoft's product license (use, not redistribution) |
 | LibreOffice Writer | 26.2.6.3 | the apt snapshot, with its GTK 3 plugin and `python3-uno` | MPL-2.0 |
 | xfce4-terminal | 1.1.5 | the apt snapshot | GPL-2.0-or-later |
+| xfsettingsd (xfce4-settings) | 4.20.1, with libxfce4ui 4.20.2 | the apt snapshot: its clipboard manager, which jackstayd cannot run beside (`tests/xfsettingsd.rs`) | GPL-2.0-or-later |

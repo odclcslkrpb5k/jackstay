@@ -31,6 +31,11 @@ static SOCKET_DIR: std::sync::Once = std::sync::Once::new();
 
 impl Xvfb {
     pub fn start() -> Self {
+        Self::start_with("")
+    }
+
+    /// One started with these extra server options (`-extension X-Resource` turns it off).
+    pub fn start_with(options: &str) -> Self {
         SOCKET_DIR.call_once(|| {
             let dir = std::path::Path::new("/tmp/.X11-unix");
             let _ = std::fs::create_dir(dir);
@@ -41,7 +46,7 @@ impl Xvfb {
         let number = base + NEXT_DISPLAY.fetch_add(1, Ordering::Relaxed) % 256;
         // `-displayfd` still tells us when the server is ready to accept connections.
         let script = format!(
-            "exec setpriv --pdeathsig KILL Xvfb :{number} -displayfd 3 -nolisten tcp -screen 0 640x480x24 3>&1 1>/dev/null 2>/dev/null"
+            "exec setpriv --pdeathsig KILL Xvfb :{number} -displayfd 3 -nolisten tcp -screen 0 640x480x24 {options} 3>&1 1>/dev/null 2>/dev/null"
         );
         let mut child = Command::new("sh")
             .args(["-c", &script])

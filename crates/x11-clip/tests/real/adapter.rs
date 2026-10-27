@@ -7,7 +7,8 @@ use jackstay_clip::{NotKept, TargetData};
 use jackstay_selection::{Config, Limits, Report};
 
 use crate::client::{
-    Identity, Owner, class_of, cut_buffer, owner_of, properties_of, set_cut_buffer,
+    Identity, Owner, class_of, cut_buffer, focus_window, hostname, owner_of, properties_of,
+    set_cut_buffer,
 };
 use crate::harness::{Session, Xvfb, kill, xclip_copy, xclip_paste};
 
@@ -29,18 +30,57 @@ fn without_wm_class_the_client_leaders_class_names_the_source() {
     assert_eq!(s.next_capture_with_source().1.as_deref(), Some("LeaderApp"));
 }
 
+/// This test process's name, which owners started on a thread of it have.
+fn our_name() -> String {
+    std::fs::read_to_string("/proc/self/comm").unwrap_or_default().trim().to_owned()
+}
+
 #[test]
-fn without_either_the_process_name_names_the_source() {
+fn without_either_the_server_names_the_owners_process() {
+    // Synergy's owner window, and xfsettingsd's manager window, carry no name at all; nor does
+    // xclip's, in a process of its own (so the session's own client is not the one named).
     let x = Xvfb::start();
+    let s = Session::start(&x);
+    let owner = xclip_copy(&x, "UTF8_STRING", b"t");
+    assert_eq!(s.next_capture_with_source().1.as_deref(), Some("xclip"));
+    kill(owner);
+}
+
+#[test]
+fn a_pid_the_owner_claims_is_not_believed_over_the_servers() {
+    let x = Xvfb::start();
+    let s = Session::start(&x);
+    let id = Identity { pid: Some(1), machine: Some(hostname()), ..Identity::default() };
+    let _owner = Owner::start(&x.display, "t", id, true);
+    assert_eq!(s.next_capture_with_source().1, Some(our_name()));
+}
+
+#[test]
+fn the_focused_window_never_names_the_source() {
+    // A copy from another machine (Synergy) is made while anything at all is focused here.
+    for options in ["", "-extension X-Resource"] {
+        let x = Xvfb::start_with(options);
+        let s = Session::start(&x);
+        let _focused = focus_window(&x.display, "Focused");
+        let owner = xclip_copy(&x, "UTF8_STRING", b"t");
+        let source = s.next_capture_with_source().1;
+        kill(owner);
+        assert_ne!(source.as_deref(), Some("Focused"), "{options:?}");
+        assert_eq!(source.as_deref(), options.is_empty().then_some("xclip"), "{options:?}");
+    }
+}
+
+#[test]
+fn without_x_resource_the_owners_pid_names_the_source() {
+    let x = Xvfb::start_with("-extension X-Resource");
     let s = Session::start(&x);
     let id = Identity {
         pid: Some(std::process::id()),
-        machine: Some(crate::client::hostname()),
+        machine: Some(hostname()),
         ..Identity::default()
     };
     let _owner = Owner::start(&x.display, "t", id, true);
-    let comm = std::fs::read_to_string("/proc/self/comm").unwrap_or_default();
-    assert_eq!(s.next_capture_with_source().1.as_deref(), Some(comm.trim()));
+    assert_eq!(s.next_capture_with_source().1, Some(our_name()));
 }
 
 #[test]
@@ -211,8 +251,8 @@ fn the_clipboard_manager_is_announced_to_the_root_window() {
 }
 
 #[test]
-fn a_pid_from_another_machine_names_nothing() {
-    let x = Xvfb::start();
+fn without_x_resource_a_pid_from_another_machine_names_nothing() {
+    let x = Xvfb::start_with("-extension X-Resource");
     let s = Session::start(&x);
     let id = Identity {
         pid: Some(std::process::id()),

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Installs Jackstay for this user (README, "Install"): builds in the dev container, then copies the
-# binaries to ~/.local/bin, the systemd user units and an XDG autostart entry to ~/.config, and the
-# tray's icon to ~/.local/share/icons. Nothing
+# binaries to ~/.local/bin, the systemd user units and an XDG autostart entry to ~/.config, the
+# tray's icon to ~/.local/share/icons, and to ~/.xsessionrc the switch that keeps Xfce's settings
+# daemon from running a clipboard manager of its own. Nothing
 # outside the home directory is touched, and the history in ~/.local/state/jackstay is kept by
 # --uninstall.
 set -euo pipefail
@@ -17,6 +18,9 @@ usage: tools/install [--replace-clipman] [--hotkey KEYS] [--start]
   --start            start jackstayd and jackstay-ui now, in this graphical session
   --uninstall        stop both and remove what this installed (and a --hotkey binding); the
                      history stays
+Xfce's settings daemon, xfsettingsd, runs a clipboard manager of its own, which jackstayd cannot
+run beside, unless XFSETTINGSD_NO_CLIPBOARD is set; this sets it in ~/.xsessionrc, for every
+login from the next.
 EOF
 }
 
@@ -75,6 +79,27 @@ write_file() {
   mv -f "$tmp" "$dest"
 }
 
+# ~/.xsessionrc, which the X session sources at login (Xsession.d's 40x11-common_xsessionrc), so
+# its exports reach xfce4-session and every program it starts or restores: xfsettingsd among them.
+# A symbolic link (dotfiles kept in a repository) is followed: the file it names is edited, and
+# the link stays.
+xsessionrc=$HOME/.xsessionrc
+[[ -L "$xsessionrc" ]] && xsessionrc=$(readlink -f "$xsessionrc")
+begin='# jackstay begin: no clipboard manager in xfsettingsd (tools/install)'
+end='# jackstay end'
+
+# ~/.xsessionrc without Jackstay's block, on stdout. A block whose end line was lost is refused,
+# not taken to run to the end of the file.
+without_block() {
+  [[ -f "$xsessionrc" ]] || return 0
+  # A line is compared without a carriage return, which an editor may have added.
+  awk -v b="$begin" -v e="$end" '{ l = $0; sub(/\r$/, "", l) } l == b { skip = 1 } !skip { print }
+    l == e { skip = 0 } END { exit skip }' "$xsessionrc" || {
+    printf '%s: "%s" has no "%s" after it; fix it by hand\n' "$xsessionrc" "$begin" "$end" >&2
+    return 1
+  }
+}
+
 # Xfce's keyboard shortcuts bound to the popup, one a line.
 popup_bindings() {
   command -v xfconf-query >/dev/null || return 0
@@ -83,10 +108,19 @@ popup_bindings() {
 }
 
 if ((uninstall)); then
+  without_block >/dev/null
   user_systemctl stop "${units[@]}" || true
   while IFS= read -r binding; do
     [[ -n "$binding" ]] && xfconf-query -c xfce4-keyboard-shortcuts -p "$binding" -r
   done < <(popup_bindings)
+  if [[ -f "$xsessionrc" ]]; then
+    rest=$(without_block)
+    if [[ -n "$rest" ]]; then
+      printf '%s\n' "$rest" | write_file "$xsessionrc" "$(stat -c %a "$xsessionrc")"
+    elif grep -qF "$begin" "$xsessionrc"; then
+      rm -f "$xsessionrc" # it held only the block
+    fi
+  fi
   rm -f "$autostart_dir/jackstay.desktop" "${units[@]/#/$unit_dir/}" \
     "$bin/jackstay-session" "${programs[@]/#/$bin/}" "${icons[@]/#/$icon_dir/}"
   user_systemctl daemon-reload
@@ -100,6 +134,9 @@ if [[ "$bin" =~ [^A-Za-z0-9_./-] ]]; then
   printf '%s: a home directory with spaces or quotes is not supported\n' "$bin" >&2
   exit 1
 fi
+
+# Before anything is built or written: a broken block refuses the whole install.
+without_block >/dev/null
 
 if [[ -z "$from" ]]; then
   ./dev env CARGO_TARGET_DIR=/work/.cache/target \
@@ -133,6 +170,14 @@ grep -qx "Exec=$bin/jackstay-session" "$autostart_dir/jackstay.desktop" || {
   printf 'autostart entry: Exec not set to %s/jackstay-session\n' "$bin" >&2
   exit 1
 }
+# Written again on every install, so it is there once, last.
+mode=644
+[[ -f "$xsessionrc" ]] && mode=$(stat -c %a "$xsessionrc")
+rest=$(without_block)
+{
+  [[ -n "$rest" ]] && printf '%s\n' "$rest"
+  printf '%s\nexport XFSETTINGSD_NO_CLIPBOARD=1\n%s\n' "$begin" "$end"
+} | write_file "$xsessionrc" "$mode"
 user_systemctl daemon-reload
 # A running daemon is restarted on the new binary; its history is saved on the way down.
 user_systemctl try-restart "${units[@]}"
@@ -172,6 +217,15 @@ if ((replace_clipman)); then
   fi
   printf 'if clipman is also in the panel as a plugin, remove it there (Panel > Panel Preferences > Items)\n'
 fi
+
+# This session's xfsettingsd started before the switch was set, if it runs without it.
+for pid in $(pgrep -x -u "$(id -u)" xfsettingsd || true); do
+  if ! grep -qzx 'XFSETTINGSD_NO_CLIPBOARD=.*' "/proc/$pid/environ" 2>/dev/null; then
+    printf 'xfsettingsd is running with its clipboard manager until the next login; to restart it\n'
+    printf 'without one now: XFSETTINGSD_NO_CLIPBOARD=1 xfsettingsd --replace --daemon\n'
+    break
+  fi
+done
 
 if ((start)); then
   [[ -n "${DISPLAY:-}" ]] || { printf 'DISPLAY is not set: not in a graphical session\n' >&2; exit 1; }

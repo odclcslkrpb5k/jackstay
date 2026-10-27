@@ -80,6 +80,12 @@ RUN apt-get update --error-on=any --snapshot "${APT_SNAPSHOT}" \
  && cd /opt/apps && tar xJf /tmp/apps/firefox.tar.xz && unzip -q /tmp/apps/chrome.zip \
  && tar xzf /tmp/apps/vscode.tar.gz && rm -rf /tmp/apps && chmod -R a+rX /opt/apps
 
+# Xfce's settings daemon, whose own clipboard manager Jackstay cannot run beside
+# (crates/jackstayd/tests/xfsettingsd.rs). Appended for the same reason.
+RUN apt-get update --error-on=any --snapshot "${APT_SNAPSHOT}" \
+ && apt-get install -y --no-install-recommends --snapshot "${APT_SNAPSHOT}" xfce4-settings \
+ && rm -rf /var/lib/apt/lists/*
+
 # Per-run caches live in the bind-mounted tree (gitignored), so the container runs as the host user.
 ENV JACKSTAY_DEV_CONTAINER=1 CARGO_HOME=/work/.cache/cargo \
     RUSTUP_TOOLCHAIN=1.99.1 \
