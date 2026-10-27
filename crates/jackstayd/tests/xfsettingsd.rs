@@ -72,16 +72,20 @@ fn xfsettingsd(x: &Xvfb, bus: &Bus, home: &Home, clipboard: bool) -> Child {
         .env("XDG_CONFIG_HOME", home.root.join("xdg-config"))
         .env_remove("SESSION_MANAGER")
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(ok(std::fs::File::create(home.root.join("xfsettingsd.log"))));
     if clipboard {
         c.env_remove("XFSETTINGSD_NO_CLIPBOARD");
     } else {
         c.env("XFSETTINGSD_NO_CLIPBOARD", "1");
     }
-    let child = ok(c.spawn());
+    let mut child = ok(c.spawn());
     let deadline = Instant::now() + Duration::from_secs(20);
     while owner_of(x, "_XSETTINGS_S0") == 0 {
-        assert!(Instant::now() < deadline, "xfsettingsd did not start");
+        let exited = ok(child.try_wait());
+        if exited.is_some() || Instant::now() >= deadline {
+            let log = std::fs::read_to_string(home.root.join("xfsettingsd.log"));
+            panic!("xfsettingsd did not start (exited: {exited:?}); its log: {log:?}");
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
     child
