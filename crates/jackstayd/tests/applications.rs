@@ -194,6 +194,20 @@ fn find(r: &Rig, by: &str, pattern: &str, seconds: u32) -> Option<String> {
     found.lines().last().map(str::to_owned)
 }
 
+/// The name of every window with one, visible or not, for a failure message.
+fn window_names(r: &Rig) -> Vec<String> {
+    let out = r.x.command("xdotool").args(["search", "--name", "."]).stderr(Stdio::null()).output();
+    let ids = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    ids.lines()
+        .take(30)
+        .filter_map(|id| {
+            let o =
+                r.x.command("xdotool").args(["getwindowname", id]).stderr(Stdio::null()).output();
+            o.ok().map(|o| format!("{id} {}", String::from_utf8_lossy(&o.stdout).trim()))
+        })
+        .collect()
+}
+
 /// Waits for a visible window matching `pattern`, and returns it.
 fn window(r: &Rig, what: &str, by: &str, pattern: &str) -> String {
     let id = find(r, by, pattern, 60);
@@ -684,6 +698,7 @@ fn vscode(r: &Rig, file: &Path) -> (App, String) {
         ],
     );
     let name = file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let asked = Instant::now();
     let Some(w) = find(r, "--name", &format!("^{name} - Visual Studio Code"), 60) else {
         let log = std::fs::read_to_string(r.home.root.join("applications.log"));
         let starved =
@@ -698,7 +713,15 @@ fn vscode(r: &Rig, file: &Path) -> (App, String) {
         let log = log.unwrap_or_default();
         let tail: Vec<&str> = log.lines().rev().take(40).collect();
         let tail: Vec<&str> = tail.into_iter().rev().collect();
-        panic!("VS Code: no window for {name}; the end of its log:\n{}", tail.join("\n"));
+        let mut app = app;
+        let alive = matches!(app.child.try_wait(), Ok(None));
+        panic!(
+            "VS Code: no window for {name} after {:?}; still running: {alive}; windows: {:?}; \
+             the end of its log:\n{}",
+            asked.elapsed(),
+            window_names(r),
+            tail.join("\n")
+        );
     };
     (app, w)
 }
