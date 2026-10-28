@@ -3,6 +3,7 @@
 //! window gets no focus from the window manager.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
@@ -10,7 +11,7 @@ use std::time::Duration;
 use gtk::gdk::keys::constants as k;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
-use jackstay_proto::control::Summary;
+use jackstay_proto::control::{self, Summary, Thumb, Thumbnail};
 
 use crate::model::{self, Row};
 use crate::worker::{Done, Job};
@@ -28,6 +29,30 @@ pub const CLEAR_HISTORY_TITLE: &str = "Clear history";
 
 const HINT: &str = "Enter: paste   Ctrl+P: pin   Ctrl+D: delete   Esc: close";
 
+/// How long before a thumbnail still being made is asked for again, while the popup is open: this
+/// times the tries so far, at most [`THUMBNAIL_MAX_WAIT`]; and the most tries per opening.
+const THUMBNAIL_EVERY: Duration = Duration::from_millis(200);
+const THUMBNAIL_MAX_WAIT: Duration = Duration::from_secs(1);
+const THUMBNAIL_TRIES: u32 = 60;
+
+/// What the popup has of an entry's thumbnail.
+#[derive(Debug)]
+struct Known {
+    /// The entry's size when asked: a different size is different content, asked again.
+    size: u64,
+    thumb: Thumb,
+    tries: u32,
+    /// Asked and not yet answered, or to be asked again: never two at once.
+    asking: bool,
+}
+
+/// The widgets of an image entry's row, to fill in when its thumbnail arrives.
+#[derive(Debug)]
+struct Shown {
+    image: gtk::Image,
+    title: gtk::Label,
+}
+
 #[derive(Debug, Default)]
 struct State {
     entries: Vec<Summary>,
@@ -39,6 +64,10 @@ struct State {
     open: bool,
     /// Clear history pressed once, waiting for the second press.
     confirm_clear: bool,
+    /// Thumbnails of the listed entries with images, by id.
+    thumbnails: HashMap<u64, Known>,
+    /// The rows shown now that hold an image, by id.
+    images: HashMap<u64, Shown>,
 }
 
 #[derive(Debug)]
@@ -49,12 +78,14 @@ pub struct Popup {
     status: gtk::Label,
     clear_history: gtk::Button,
     jobs: Sender<Job>,
+    /// Thumbnails go through a connection of their own, so a paste never waits behind them.
+    thumbnail_jobs: Sender<Job>,
     state: RefCell<State>,
 }
 
 impl Popup {
     #[must_use]
-    pub fn new(jobs: Sender<Job>) -> Rc<Self> {
+    pub fn new(jobs: Sender<Job>, thumbnail_jobs: Sender<Job>) -> Rc<Self> {
         let window = gtk::Window::new(gtk::WindowType::Popup);
         window.set_title(TITLE);
         window.set_default_size(520, -1);
@@ -97,6 +128,7 @@ impl Popup {
             status,
             clear_history,
             jobs,
+            thumbnail_jobs,
             state: RefCell::new(State::default()),
         });
         let p = Rc::clone(&popup);
@@ -144,6 +176,7 @@ impl Popup {
                     s.entries = entries;
                     s.total = total;
                 }
+                self.ask_thumbnails();
                 self.status.set_text("");
                 let show = std::mem::take(&mut self.state.borrow_mut().pending);
                 if show {
@@ -153,12 +186,28 @@ impl Popup {
                 }
             }
             // A change made from the popup while it stays open: list again.
-            Done::Did(Job::Delete(_) | Job::Pin(..)) => {
+            Done::Did(job @ (Job::Delete(_) | Job::Pin(..))) => {
+                if let Job::Delete(id) = job {
+                    self.forget(Some(id));
+                }
                 if self.state.borrow().open {
                     self.send(Job::List);
                 }
             }
+            Done::Thumbnail(id, thumb) => self.thumbnail(id, thumb),
+            // What was cleared is not kept here either: its pixels are forgotten.
+            Done::Did(Job::ClearHistory) => self.forget(None),
+            Done::Did(Job::Clear) => {
+                let current = self.state.borrow().entries.iter().find(|e| e.current).map(|e| e.id);
+                if let Some(id) = current {
+                    self.forget(Some(id));
+                }
+            }
             Done::Did(_) => {}
+            // Not had this time (the daemon restarting, say): asked again when next listed.
+            Done::Failed(Job::Thumbnail(id), _) => {
+                self.state.borrow_mut().thumbnails.remove(&id);
+            }
             Done::Failed(job, why) => {
                 self.status.set_text(&why);
                 let pending = std::mem::take(&mut self.state.borrow_mut().pending);
@@ -173,6 +222,84 @@ impl Popup {
                     self.open();
                 }
             }
+        }
+    }
+
+    /// Asks for the thumbnail of each listed image entry not known, or known as other content, top
+    /// first; forgets those of entries no longer listed.
+    fn ask_thumbnails(&self) {
+        let mut ask = Vec::new();
+        {
+            let mut s = self.state.borrow_mut();
+            let s = &mut *s;
+            let listed: Vec<(u64, u64)> =
+                s.entries.iter().filter(|e| model::has_image(e)).map(|e| (e.id, e.size)).collect();
+            s.thumbnails.retain(|id, k| listed.contains(&(*id, k.size)));
+            for &(id, size) in &listed {
+                let known = s.thumbnails.entry(id).or_insert(Known {
+                    size,
+                    thumb: Thumb::Pending,
+                    tries: 0,
+                    asking: false,
+                });
+                if known.thumb == Thumb::Pending && !known.asking {
+                    known.tries = 0;
+                    known.asking = true;
+                    ask.push(id);
+                }
+            }
+        }
+        for id in ask {
+            let _ = self.thumbnail_jobs.send(Job::Thumbnail(id));
+        }
+    }
+
+    /// Forgets entry `id`'s thumbnail, or every one.
+    fn forget(&self, id: Option<u64>) {
+        let mut s = self.state.borrow_mut();
+        match id {
+            Some(id) => drop(s.thumbnails.remove(&id)),
+            None => s.thumbnails.clear(),
+        }
+    }
+
+    /// A thumbnail asked for: shown if its row is, or asked again soon if still being made and the
+    /// popup open. One given up on stays pending, asked again at the next listing.
+    fn thumbnail(&self, id: u64, thumb: Thumb) {
+        let open = self.state.borrow().open;
+        let wait = {
+            let mut s = self.state.borrow_mut();
+            let Some(known) = s.thumbnails.get_mut(&id) else { return };
+            known.tries = known.tries.saturating_add(1);
+            known.thumb = thumb;
+            let again = known.thumb == Thumb::Pending && open && known.tries < THUMBNAIL_TRIES;
+            known.asking = again;
+            again.then(|| THUMBNAIL_EVERY.saturating_mul(known.tries).min(THUMBNAIL_MAX_WAIT))
+        };
+        if let Some(wait) = wait {
+            let jobs = self.thumbnail_jobs.clone();
+            glib::timeout_add_local_once(wait, move || {
+                let _ = jobs.send(Job::Thumbnail(id));
+            });
+            return;
+        }
+        self.show_thumbnail(id);
+    }
+
+    /// Fills in entry `id`'s row with its thumbnail, if both are there.
+    fn show_thumbnail(&self, id: u64) {
+        let s = self.state.borrow();
+        let (Some(shown), Some(Known { thumb: Thumb::Ready(t), .. })) =
+            (s.images.get(&id), s.thumbnails.get(&id))
+        else {
+            return;
+        };
+        if let Some(entry) = s.entries.iter().find(|e| e.id == id) {
+            let row = model::row(entry, Some((t.image_width(), t.image_height())));
+            set_title(&shown.title, &row);
+        }
+        if let Some(pixbuf) = pixbuf(t) {
+            shown.image.set_from_pixbuf(Some(&pixbuf));
         }
     }
 
@@ -240,10 +367,16 @@ impl Popup {
                 .map(|(i, _)| i)
                 .collect()
         };
+        let mut images = HashMap::new();
         for &i in &shown {
-            let row = self.state.borrow().entries.get(i).map(model::row);
-            if let Some(row) = row {
-                self.list.add(&row_widget(&row));
+            let entry = self.state.borrow().entries.get(i).cloned();
+            if let Some(entry) = entry {
+                let (widget, image) =
+                    row_widget(&model::row(&entry, None), model::has_image(&entry));
+                if let Some(image) = image {
+                    images.insert(entry.id, image);
+                }
+                self.list.add(&widget);
             }
         }
         if shown.is_empty() && self.status.text().is_empty() {
@@ -252,8 +385,16 @@ impl Popup {
             self.list.add(&gtk::Label::new(Some(none)));
         }
         let first = !shown.is_empty();
-        self.state.borrow_mut().shown = shown;
+        let ids: Vec<u64> = images.keys().copied().collect();
+        {
+            let mut s = self.state.borrow_mut();
+            s.shown = shown;
+            s.images = images;
+        }
         self.list.show_all();
+        for id in ids {
+            self.show_thumbnail(id);
+        }
         if first {
             self.list.select_row(self.list.row_at_index(0).as_ref());
         }
@@ -365,21 +506,53 @@ impl Popup {
     }
 }
 
-fn row_widget(row: &Row) -> gtk::ListBoxRow {
+/// A row, and if it holds an image, the widgets its thumbnail fills in once it arrives.
+fn row_widget(row: &Row, image: bool) -> (gtk::ListBoxRow, Option<Shown>) {
     let widget = gtk::ListBoxRow::new();
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     line.set_border_width(3);
     let title = gtk::Label::new(None);
-    let escaped = glib::markup_escape_text(&row.title);
-    title.set_markup(&if row.current { format!("<b>{escaped}</b>") } else { escaped.to_string() });
+    set_title(&title, row);
     title.set_xalign(0.0);
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
     let detail = gtk::Label::new(Some(&row.detail));
     detail.style_context().add_class("dim-label");
+    let shown = image.then(|| {
+        // A theme's icon until the thumbnail comes, in the space it will take, so no row moves
+        // under the pointer when it does.
+        let image = gtk::Image::from_icon_name(Some("image-x-generic"), gtk::IconSize::Dialog);
+        image.set_size_request(
+            i32::from(control::MAX_THUMBNAIL_WIDTH),
+            i32::from(control::MAX_THUMBNAIL_HEIGHT),
+        );
+        line.pack_start(&image, false, false, 0);
+        Shown { image, title: title.clone() }
+    });
     line.pack_start(&title, true, true, 0);
     line.pack_end(&detail, false, false, 0);
     widget.add(&line);
-    widget
+    (widget, shown)
+}
+
+fn set_title(label: &gtk::Label, row: &Row) {
+    let escaped = glib::markup_escape_text(&row.title);
+    label.set_markup(&if row.current { format!("<b>{escaped}</b>") } else { escaped.to_string() });
+}
+
+/// The thumbnail's pixels as a pixbuf. Only wrapped, never decoded: gdk-pixbuf's loaders never
+/// see clipboard bytes (docs/ui.md, "Thumbnails").
+fn pixbuf(t: &Thumbnail) -> Option<gtk::gdk_pixbuf::Pixbuf> {
+    let (width, height) = (i32::from(t.width()), i32::from(t.height()));
+    let stride = width.checked_mul(4)?;
+    Some(gtk::gdk_pixbuf::Pixbuf::from_bytes(
+        &glib::Bytes::from(t.rgba()),
+        gtk::gdk_pixbuf::Colorspace::Rgb,
+        true,
+        8,
+        width,
+        height,
+        stride,
+    ))
 }
 
 /// Takes the keyboard and pointer for `window`, trying again for up to `within`.

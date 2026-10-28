@@ -1,0 +1,23 @@
+# Fuzz targets for jackstay-thumbnail (TS-16). Built only by cargo-fuzz, on the pinned nightly; kept
+# out of the workspace so the stable gate never needs nightly.
+[package]
+name = "jackstay-thumbnail-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+jackstay-thumbnail = { path = "..", version = "=0.0.0" }
+
+[[bin]]
+name = "thumbnail"
+path = "fuzz_targets/thumbnail.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

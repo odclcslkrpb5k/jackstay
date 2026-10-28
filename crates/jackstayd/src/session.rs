@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use jackstay_clip::EntryId;
 use jackstay_proto::control::{
-    Error, MAX_LIST, MAX_SOURCE_LEN, Request, Response, Status, printable,
+    Error, MAX_LIST, MAX_SOURCE_LEN, Request, Response, Status, Thumb, printable,
 };
 use jackstay_selection::Report;
 use jackstay_x11_clip::Clipboard;
@@ -24,6 +24,7 @@ use crate::import;
 use crate::notify::Notifier;
 use crate::store::{Reply, Request as StoreRequest, Snapshot};
 use crate::summary::{summary, truncate};
+use crate::thumbnails::Thumbnails;
 use crate::tracker::{PinError, Tracker};
 
 /// The longest the loop sleeps, so it always turns (and feeds the watchdog).
@@ -70,6 +71,8 @@ pub struct Parts {
     pub clipman_dir: PathBuf,
     pub per_target: u64,
     pub clipman_check: ClipmanCheck,
+    /// `None` when its thread could not start: no entry has a thumbnail.
+    pub thumbnails: Option<Thumbnails>,
 }
 
 impl std::fmt::Debug for Parts {
@@ -90,6 +93,7 @@ pub struct Session {
     pub clipman_dir: PathBuf,
     pub per_target: u64,
     pub clipman_check: ClipmanCheck,
+    pub thumbnails: Option<Thumbnails>,
     /// Clients waiting for the store to confirm, by acknowledgement number, with the error to give
     /// them even if it does (a clear whose claim failed).
     waiting: HashMap<u64, (ClientId, Option<Error>)>,
@@ -170,6 +174,7 @@ enum Slot {
     Listener,
     Store,
     Signals,
+    Thumbnails,
     Client(ClientId),
 }
 
@@ -185,9 +190,13 @@ impl Session {
             clipman_dir,
             per_target,
             clipman_check,
+            mut thumbnails,
         } = parts;
         if let Some(store) = &store {
             let _ = store.wake.set_nonblocking(true);
+        }
+        if let Some(t) = &mut thumbnails {
+            t.sync(tracker.history());
         }
         Session {
             clipboard,
@@ -199,6 +208,7 @@ impl Session {
             clipman_dir,
             per_target,
             clipman_check,
+            thumbnails,
             waiting: HashMap::new(),
             next_ack: 0,
             store_failing: false,
@@ -222,9 +232,17 @@ impl Session {
         Ok(changed)
     }
 
+    /// After any change to the history: its thumbnails brought up to date, and subscribers told.
+    fn changed(&mut self) {
+        if let Some(t) = &mut self.thumbnails {
+            t.sync(self.tracker.history());
+        }
+        self.clients.changed();
+    }
+
     /// Saves the history, and tells subscribers it changed.
     fn save(&mut self) {
-        self.clients.changed();
+        self.changed();
         if let Some(store) = &self.store {
             let snapshot = Snapshot::of(self.tracker.history(), self.tracker.cleared());
             let _ = store.requests.send(StoreRequest::Save { snapshot, urgent: false, ack: None });
@@ -233,7 +251,7 @@ impl Session {
 
     /// Saves urgently, answering `client` once the store confirms; without a store, at once.
     fn save_urgently(&mut self, client: ClientId, clear_history: bool, failure: Option<Error>) {
-        self.clients.changed();
+        self.changed();
         let Some(store) = &self.store else {
             self.clients.respond(client, &Response::Error(Error::StoreFailed));
             return;
@@ -269,19 +287,23 @@ impl Session {
         }
     }
 
+    fn status(&self) -> Status {
+        let history = self.tracker.history();
+        Status {
+            entries: u32::try_from(history.entries().len()).unwrap_or(u32::MAX),
+            pinned: u32::try_from(history.entries().filter(|e| e.pinned()).count())
+                .unwrap_or(u32::MAX),
+            current: self.tracker.current().map(EntryId::get),
+            owns_clipboard: self.clipboard.owns_clipboard(),
+            store_failing: self.store_failing || self.store.is_none(),
+        }
+    }
+
     fn request(&mut self, client: ClientId, request: Request) -> Result<(), Exit> {
         let respond = |s: &mut Self, r: Response| s.clients.respond(client, &r);
         match request {
             Request::Status => {
-                let history = self.tracker.history();
-                let status = Status {
-                    entries: u32::try_from(history.entries().len()).unwrap_or(u32::MAX),
-                    pinned: u32::try_from(history.entries().filter(|e| e.pinned()).count())
-                        .unwrap_or(u32::MAX),
-                    current: self.tracker.current().map(EntryId::get),
-                    owns_clipboard: self.clipboard.owns_clipboard(),
-                    store_failing: self.store_failing || self.store.is_none(),
-                };
+                let status = self.status();
                 respond(self, Response::Status(status));
             }
             Request::List { offset, limit } => {
@@ -362,6 +384,11 @@ impl Session {
                     }
                     Err(_) => respond(self, Response::Error(Error::ImportFailed)),
                 }
+            }
+            Request::Thumbnail { id } => {
+                let thumbnail =
+                    self.thumbnails.as_ref().map_or(Thumb::Absent, |t| t.get(EntryId::new(id)));
+                respond(self, Response::Thumbnail { id, thumbnail });
             }
             // Answered by the control module.
             Request::Hello { .. } | Request::Subscribe => {}
@@ -452,6 +479,10 @@ impl Session {
             slots.push(Slot::Store);
             fds.push((store.wake.as_fd(), PollFlags::IN));
         }
+        if let Some(t) = &self.thumbnails {
+            slots.push(Slot::Thumbnails);
+            fds.push((t.wake.as_fd(), PollFlags::IN));
+        }
         for (id, fd, reading, writing) in self.clients.client_fds() {
             let mut flags = PollFlags::empty();
             if reading {
@@ -486,8 +517,18 @@ impl Session {
                     }
                 }
                 Slot::Store if fired => self.store_replies()?,
+                Slot::Thumbnails if fired => {
+                    if let Some(t) = &mut self.thumbnails {
+                        t.receive();
+                    }
+                }
                 Slot::Client(id) if fired => readable.push(id),
-                Slot::X | Slot::Listener | Slot::Store | Slot::Signals | Slot::Client(_) => {}
+                Slot::X
+                | Slot::Listener
+                | Slot::Store
+                | Slot::Signals
+                | Slot::Thumbnails
+                | Slot::Client(_) => {}
             }
         }
         for &id in &readable {

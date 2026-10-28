@@ -21,12 +21,17 @@ pub struct Row {
     pub pinned: bool,
 }
 
-/// `entry` as a row.
+/// `entry` as a row; `image` is its image's size, once its thumbnail is known.
 #[must_use]
-pub fn row(entry: &Summary) -> Row {
+pub fn row(entry: &Summary, image: Option<(u32, u32)>) -> Row {
     let text = one_line(&printable(&entry.preview));
     let title = if text.is_empty() {
-        what(entry.kinds).to_owned()
+        match image {
+            Some((width, height)) if has_image(entry) => {
+                format!("Image {width}×{height}")
+            }
+            _ => what(entry.kinds).to_owned(),
+        }
     } else if text.chars().count() > ROW_CHARS {
         let cut: String = text.chars().take(ROW_CHARS.saturating_sub(1)).collect();
         format!("{}…", cut.trim_end())
@@ -86,6 +91,12 @@ pub fn matches(entry: &Summary, query: &str) -> bool {
     let haystack =
         format!("{} {}", entry.preview, entry.source.as_deref().unwrap_or_default()).to_lowercase();
     query.split_whitespace().all(|word| haystack.contains(&word.to_lowercase()))
+}
+
+/// Whether the popup asks for `entry`'s thumbnail: it holds an image.
+#[must_use]
+pub fn has_image(entry: &Summary) -> bool {
+    entry.kinds.0 & Kinds::IMAGE != 0
 }
 
 /// The selection after moving `by` rows from `from` among `len`, kept within them.

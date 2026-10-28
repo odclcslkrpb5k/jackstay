@@ -21,6 +21,7 @@ use crate::import;
 use crate::paths::{self, Dirs, Overrides};
 use crate::session::{Exit, Parts, Session, StoreLink, manager_conflict};
 use crate::store::{self, Loaded, Paths, Reply, Snapshot, Store};
+use crate::thumbnails::Thumbnails;
 use crate::tracker::Tracker;
 
 /// Exit statuses; systemd restarts only on 5 and 101 (`RestartPreventExitStatus=0 2 3 4`).
@@ -269,6 +270,15 @@ fn start(args: &[OsString]) -> Result<i32, Refusal> {
         Err(e) => log(&format!("store: {e}; retrying")),
     }
     let (link, store_thread) = start_store(store, to_verify, per_target)?;
+    // This program itself, by the kernel's link, so an upgrade that replaces the file meanwhile
+    // still runs the same helper.
+    let thumbnails = match Thumbnails::start(PathBuf::from("/proc/self/exe")) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            log(&format!("thumbnails: {}; images will have none", e.kind()));
+            None
+        }
+    };
     let mut session = Session::new(Parts {
         clipboard,
         tracker,
@@ -278,6 +288,7 @@ fn start(args: &[OsString]) -> Result<i32, Refusal> {
         clipman_dir: import::clipman_dir(&setup.dirs.cache_home),
         per_target,
         clipman_check: Box::new(|| coexist::clipman_running(Path::new("/proc"))),
+        thumbnails,
     });
     let exit = session.run();
     let status = match &exit {

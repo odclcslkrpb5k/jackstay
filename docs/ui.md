@@ -12,7 +12,9 @@ way. The settings are the exception: they are files, and Xfce's own shortcuts (b
 - A popup window (override-redirect) of about 520 pixels wide, kept within the pointer's monitor's
   work area. It lists the newest 100 entries, newest first; the one on the clipboard is bold. A row
   is the start of the entry's text on one line (60 characters), or what it holds when it has no
-  text (Image, Files, Rich text), with its size, "pinned" and where it was copied from.
+  text (Image, Files, Rich text), with its size, "pinned" and where it was copied from. An image
+  entry also shows its thumbnail, left of the title; with no text, the title is its image's size
+  ("Image 1920×1080"). See "Thumbnails" below.
 - The window manager gives a popup window no focus, so it grabs the keyboard and pointer itself.
   A hotkey's own grab can still be held for a moment after it fires, so a refused grab is tried
   again every 25 ms for a second.
@@ -28,6 +30,25 @@ way. The settings are the exception: they are files, and Xfce's own shortcuts (b
 - Nothing is filtered or hidden (plan §3): a copied password shows like anything else, and
   clearing is how to get rid of it.
 - If the daemon cannot be reached, the popup opens anyway, empty, saying why.
+
+## Thumbnails
+
+The daemon decodes images, confined (docs/daemon.md, "Thumbnails"); the popup only shows the
+pixels it is sent, as a `GdkPixbuf` wrapped around them (`Pixbuf::from_bytes`, no loader), so
+gdk-pixbuf's decoders never see clipboard bytes (plan §4.3).
+
+- Once a list arrives, the popup asks for the thumbnail of each image entry it does not know yet,
+  top first, through a connection of its own (a second worker), so a paste never waits behind
+  them. One still being made is asked again while the popup is open, after 200 ms, then 400, up
+  to once a second, at most 60 times an opening, and never twice at once however often the list
+  is refreshed. A request that failed (the daemon restarting) is asked again at the next listing.
+- An image row has the room of a full thumbnail, 128 by 64 pixels, from the start, with the
+  theme's image icon until the thumbnail comes, or for good if there is none: nothing moves under
+  the pointer when it arrives. It fills in its row where it is: the list is not rebuilt, so the
+  selection and the search stay.
+- Thumbnails are kept by entry and size, so the next popup shows them at once; one whose entry
+  is no longer listed, or whose size changed, is forgotten, and so is one cleared or deleted from
+  the popup.
 
 ## The tray
 

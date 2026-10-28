@@ -7,11 +7,14 @@
 //! [`Error::UnsupportedVersion`]. Then each request gets exactly one response, in order, except
 //! that after [`Request::Subscribe`] the daemon also sends [`Response::Changed`] whenever the
 //! history changes.
+//!
+//! Version 2 added [`Request::Thumbnail`]: an image entry's picture, decoded by the daemon, so the
+//! UI never decodes clipboard bytes (docs/ui.md, "Thumbnails").
 
 use crate::{DecodeError, FRAME_HEADER_LEN, LimitError, MAX_PAYLOAD_LEN, Reader};
 
 /// The control protocol version this code speaks.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 /// The most entries one [`Response::List`] carries; ask again with an offset for more.
 pub const MAX_LIST: usize = 500;
 /// The longest preview, in characters.
@@ -20,6 +23,10 @@ pub const MAX_PREVIEW_CHARS: usize = 200;
 pub const MAX_REQUEST_PAYLOAD: u32 = 16;
 /// The longest source name, in bytes.
 pub const MAX_SOURCE_LEN: usize = 256;
+/// The widest thumbnail, in pixels.
+pub const MAX_THUMBNAIL_WIDTH: u16 = 128;
+/// The tallest thumbnail, in pixels.
+pub const MAX_THUMBNAIL_HEIGHT: u16 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
@@ -51,6 +58,10 @@ pub enum Request {
         remove: bool,
     },
     Subscribe,
+    /// The thumbnail of an entry's image.
+    Thumbnail {
+        id: u64,
+    },
 }
 
 /// Why a request failed. Clients branch on the code (ER-8).
@@ -149,6 +160,136 @@ pub enum Response {
     },
     /// The history changed (sent only after `Subscribe`).
     Changed,
+    Thumbnail {
+        id: u64,
+        thumbnail: Thumb,
+    },
+}
+
+/// What the daemon has of an entry's picture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Thumb {
+    /// None: no such entry, no image in it, or none of its images could be decoded.
+    Absent,
+    /// Still being made; ask again.
+    Pending,
+    Ready(Thumbnail),
+}
+
+/// An image scaled down to fit [`MAX_THUMBNAIL_WIDTH`] by [`MAX_THUMBNAIL_HEIGHT`], never up, as
+/// rows of 8-bit RGBA with straight alpha. Built only through [`Thumbnail::new`], so its size and
+/// its pixels always agree. Its `Debug` shows sizes, never pixels: they are clipboard contents.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Thumbnail {
+    width: u16,
+    height: u16,
+    image_width: u32,
+    image_height: u32,
+    rgba: Vec<u8>,
+}
+
+impl std::fmt::Debug for Thumbnail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Thumbnail({}x{} of {}x{})",
+            self.width, self.height, self.image_width, self.image_height
+        )
+    }
+}
+
+/// The bytes before a thumbnail's pixels: its size and its image's.
+const THUMBNAIL_HEADER_LEN: usize = 12;
+
+impl Thumbnail {
+    /// A `width` by `height` thumbnail of an `image_width` by `image_height` image.
+    ///
+    /// # Errors
+    /// [`LimitError::BadThumbnail`] if a side is 0 or past its limit, the thumbnail is larger than
+    /// its image, or `rgba` is not 4 bytes a pixel.
+    pub fn new(
+        width: u16,
+        height: u16,
+        image_width: u32,
+        image_height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<Self, LimitError> {
+        let fits = (1..=MAX_THUMBNAIL_WIDTH).contains(&width)
+            && (1..=MAX_THUMBNAIL_HEIGHT).contains(&height)
+            && image_width >= u32::from(width)
+            && image_height >= u32::from(height);
+        let len =
+            usize::from(width).checked_mul(usize::from(height)).and_then(|p| p.checked_mul(4));
+        if !fits || len != Some(rgba.len()) {
+            return Err(LimitError::BadThumbnail);
+        }
+        Ok(Thumbnail { width, height, image_width, image_height, rgba })
+    }
+
+    #[must_use]
+    pub fn width(&self) -> u16 {
+        self.width
+    }
+
+    #[must_use]
+    pub fn height(&self) -> u16 {
+        self.height
+    }
+
+    /// The width of the image it shows.
+    #[must_use]
+    pub fn image_width(&self) -> u32 {
+        self.image_width
+    }
+
+    /// The height of the image it shows.
+    #[must_use]
+    pub fn image_height(&self) -> u32 {
+        self.image_height
+    }
+
+    /// The pixels, row by row, 4 bytes each.
+    #[must_use]
+    pub fn rgba(&self) -> &[u8] {
+        &self.rgba
+    }
+
+    /// Appends its encoding: width and height (u16), the image's (u32), then the pixels.
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.width.to_be_bytes());
+        out.extend_from_slice(&self.height.to_be_bytes());
+        out.extend_from_slice(&self.image_width.to_be_bytes());
+        out.extend_from_slice(&self.image_height.to_be_bytes());
+        out.extend_from_slice(&self.rgba);
+    }
+
+    /// Decodes exactly one encoded thumbnail: every byte of `bytes`, no more, no fewer.
+    ///
+    /// # Errors
+    /// A [`DecodeError`] if it is truncated, followed by other bytes, or breaks a limit.
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(bytes);
+        let thumbnail = Self::read(&mut r)?;
+        r.finish()?;
+        Ok(thumbnail)
+    }
+
+    fn read(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let width = u16_be(r)?;
+        let height = u16_be(r)?;
+        let image_width = r.u32()?;
+        let image_height = r.u32()?;
+        // At most 128 x 64 x 4: checked before anything is taken.
+        let len = usize::from(width.min(MAX_THUMBNAIL_WIDTH))
+            .saturating_mul(usize::from(height.min(MAX_THUMBNAIL_HEIGHT)))
+            .saturating_mul(4);
+        let rgba = r.take(len)?.to_vec();
+        Ok(Thumbnail::new(width, height, image_width, image_height, rgba)?)
+    }
+
+    /// The longest encoding, in bytes.
+    pub const MAX_ENCODED_LEN: usize =
+        THUMBNAIL_HEADER_LEN + MAX_THUMBNAIL_WIDTH as usize * MAX_THUMBNAIL_HEIGHT as usize * 4;
 }
 
 const HELLO: u8 = 1;
@@ -161,6 +302,7 @@ const CLEAR: u8 = 7;
 const CLEAR_HISTORY: u8 = 8;
 const IMPORT_CLIPMAN: u8 = 9;
 const SUBSCRIBE: u8 = 10;
+const THUMBNAIL: u8 = 11;
 
 const WELCOME: u8 = 64;
 const OK: u8 = 65;
@@ -169,6 +311,11 @@ const STATUS_REPLY: u8 = 67;
 const LIST_REPLY: u8 = 68;
 const IMPORTED: u8 = 69;
 const CHANGED: u8 = 70;
+const THUMBNAIL_REPLY: u8 = 71;
+
+const ABSENT: u8 = 0;
+const PENDING: u8 = 1;
+const READY: u8 = 2;
 
 fn frame(kind: u8, payload: &[u8], out: &mut Vec<u8>) -> Result<(), LimitError> {
     let len = u32::try_from(payload.len())
@@ -248,6 +395,10 @@ pub fn encode_request(request: &Request, out: &mut Vec<u8>) {
             IMPORT_CLIPMAN
         }
         Request::Subscribe => SUBSCRIBE,
+        Request::Thumbnail { id } => {
+            p.extend_from_slice(&id.to_be_bytes());
+            THUMBNAIL
+        }
     };
     // At most 12 bytes of payload: always within the frame limit.
     let _ = frame(kind, &p, out);
@@ -279,6 +430,7 @@ pub fn decode_request(buf: &[u8]) -> Result<Option<(Request, usize)>, DecodeErro
         CLEAR_HISTORY => Request::ClearHistory,
         IMPORT_CLIPMAN => Request::ImportClipman { remove: flag(&mut r)? },
         SUBSCRIBE => Request::Subscribe,
+        THUMBNAIL => Request::Thumbnail { id: r.u64()? },
         other => return Err(DecodeError::UnknownKind(other)),
     };
     r.finish()?;
@@ -404,6 +556,18 @@ pub fn encode_response(response: &Response, out: &mut Vec<u8>) -> Result<(), Lim
             IMPORTED
         }
         Response::Changed => CHANGED,
+        Response::Thumbnail { id, thumbnail } => {
+            p.extend_from_slice(&id.to_be_bytes());
+            match thumbnail {
+                Thumb::Absent => p.push(ABSENT),
+                Thumb::Pending => p.push(PENDING),
+                Thumb::Ready(t) => {
+                    p.push(READY);
+                    t.encode(&mut p);
+                }
+            }
+            THUMBNAIL_REPLY
+        }
     };
     frame(kind, &p, out)
 }
@@ -468,6 +632,16 @@ pub fn decode_response(buf: &[u8]) -> Result<Option<(Response, usize)>, DecodeEr
         }
         IMPORTED => Response::Imported { added: r.u32()?, skipped: r.u32()? },
         CHANGED => Response::Changed,
+        THUMBNAIL_REPLY => {
+            let id = r.u64()?;
+            let thumbnail = match r.u8()? {
+                ABSENT => Thumb::Absent,
+                PENDING => Thumb::Pending,
+                READY => Thumb::Ready(Thumbnail::read(&mut r)?),
+                code => return Err(LimitError::UnknownCode { code }.into()),
+            };
+            Response::Thumbnail { id, thumbnail }
+        }
         other => return Err(DecodeError::UnknownKind(other)),
     };
     r.finish()?;

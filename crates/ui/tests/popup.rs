@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use jackstay_proto::control::{Request, Response};
+use jackstay_proto::control::{Kinds, Request, Response, Summary, Thumb, Thumbnail};
 use jackstayd::ui_socket;
 use support::*;
 
@@ -318,4 +318,111 @@ fn the_runtime_directory_defaults_to_xdgs_and_bad_arguments_are_refused() {
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(status.code(), Some(2));
+}
+
+const RED: [u8; 4] = [255, 0, 0, 255];
+const GREEN: [u8; 4] = [0, 255, 0, 255];
+
+/// A `width` by `height` thumbnail of one colour, of an image `image` times larger.
+fn solid(width: u16, height: u16, colour: [u8; 4], image: u32) -> Thumb {
+    let rgba = colour.repeat(usize::from(width) * usize::from(height));
+    Thumb::Ready(ok(Thumbnail::new(
+        width,
+        height,
+        u32::from(width) * image,
+        u32::from(height) * image,
+        rgba,
+    )))
+}
+
+fn image_entry(id: u64) -> Summary {
+    Summary {
+        kinds: Kinds(Kinds::IMAGE),
+        preview: String::new(),
+        size: 5000,
+        ..entry(id, "", false)
+    }
+}
+
+/// How many pixels on the screen are exactly `colour`.
+fn on_screen(x: &Xvfb, colour: [u8; 4]) -> usize {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
+    let (conn, screen) = ok(x11rb::rust_connection::RustConnection::connect(Some(&x.display)));
+    let root = conn.setup().roots[screen].root;
+    let image = ok(ok(conn.get_image(ImageFormat::Z_PIXMAP, root, 0, 0, 1024, 768, !0)).reply());
+    // Depth 24 at 32 bits a pixel, least significant byte first: blue, green, red, unused.
+    let want = [colour[2], colour[1], colour[0]];
+    image.data.as_chunks::<4>().0.iter().filter(|p| p[..3] == want).count()
+}
+
+#[test]
+fn image_rows_show_their_thumbnails_as_they_arrive() {
+    let ui = start("thumbs");
+    let entries =
+        vec![entry(14, "some text", true), image_entry(13), image_entry(12), image_entry(11)];
+    let daemon = Daemon::start(&ui.runtime, entries);
+    daemon.thumbnail(13, vec![Some(solid(40, 20, RED, 10))]);
+    // Still being made the first three times it is asked.
+    let pending = Some(Thumb::Pending);
+    let green = Some(solid(20, 20, GREEN, 1));
+    daemon.thumbnail(12, vec![pending.clone(), pending.clone(), pending, green]);
+    daemon.thumbnail(11, vec![Some(Thumb::Absent)]);
+    ui.popup();
+    ui.keys(&["Down", "Down"]);
+    eventually("the first thumbnail, unscaled", || on_screen(&ui.x, RED) == 40 * 20);
+    eventually("the second, once made", || on_screen(&ui.x, GREEN) == 20 * 20);
+    // Filled in where it was: the selection did not move.
+    ui.keys(&["Return"]);
+    ui.closed();
+    assert_eq!(daemon.changes(), [Request::Select { id: 12 }]);
+    let asked = daemon.thumbnails_asked();
+    let count = |id| asked.iter().filter(|&&a| a == id).count();
+    assert_eq!((count(14), count(13), count(11)), (0, 1, 1), "{asked:?}");
+    assert_eq!(count(12), 4, "{asked:?}");
+    // Known ones are not asked again.
+    ui.popup();
+    eventually("shown again", || {
+        on_screen(&ui.x, GREEN) == 20 * 20 && on_screen(&ui.x, RED) == 800
+    });
+    assert_eq!(daemon.thumbnails_asked().len(), asked.len());
+    ui.keys(&["Escape"]);
+    ui.closed();
+}
+
+#[test]
+fn a_thumbnail_that_failed_is_asked_again_next_time() {
+    let ui = start("th-fail");
+    let daemon = Daemon::start(&ui.runtime, vec![image_entry(13)]);
+    // The daemon restarting, say: an error the first time.
+    daemon.thumbnail(13, vec![None, Some(solid(40, 20, RED, 2))]);
+    ui.popup();
+    eventually("asked once", || daemon.thumbnails_asked().len() == 1);
+    ui.keys(&["Escape"]);
+    ui.closed();
+    ui.popup();
+    eventually("shown the second time", || on_screen(&ui.x, RED) == 40 * 20);
+    assert_eq!(daemon.thumbnails_asked(), [13, 13]);
+}
+
+#[test]
+fn listing_again_does_not_ask_more_often() {
+    let ui = start("th-list");
+    let daemon = Daemon::start(&ui.runtime, vec![image_entry(13), entry(12, "text", false)]);
+    daemon.thumbnail(13, vec![Some(Thumb::Pending)]);
+    ui.popup();
+    // Each pin lists again, while 13 is still being made.
+    for _ in 0..5 {
+        ui.keys(&["ctrl+p"]);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    ui.keys(&["Escape"]);
+    ui.closed();
+    // Asked at 0, then after 0.2, 0.4, 0.6, 0.8, 1 and 1 s: 7 in 3.5 s, however often listed.
+    let asked = daemon.thumbnails_asked().len();
+    assert!((5..=8).contains(&asked), "asked {asked} times");
+    // Closed: no longer asked.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(daemon.thumbnails_asked().len() <= asked + 1);
 }

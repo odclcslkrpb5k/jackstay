@@ -19,8 +19,12 @@ xfce4-clipman-plugin 1.6.6.
 - **Store thread.** Owns the files and their reference counts (below). Failures are reported back;
   a history that cannot be saved stays usable in memory and is reported (`jackstay status`, the
   journal). If the store thread dies, the daemon exits 101.
+- **Thumbnails thread.** Makes the thumbnails of the history's images, each in a confined helper
+  process (below); the clipboard thread polls its wake pipe. If it cannot start, images have no
+  thumbnails and nothing else changes; if it dies, entries stay pending.
 - **Main thread.** Parses configuration and flags, takes the instance lock, checks coexistence,
-  starts the two threads, and waits for either to end. A panic in either thread ends the process
+  starts the store and clipboard threads (and the thumbnails thread), and waits for the first
+  two to end. A panic in either thread ends the process
   with 101 (a thread's panic does not, by itself, under `panic = "unwind"`).
 
 ## Liveness
@@ -143,13 +147,51 @@ Frames as in `proto` (length, kind, payload) with the same no-panic decoding, fu
 namespace of its own with its own version (`control`), separate from the peer protocol. Requests:
 `Status`, `List { limit }` (ids, times, sources, kinds, sizes, a text preview of at most 200
 characters), `Select { id }`, `Delete { id }`, `Pin { id, pinned }`, `Clear`, `ClearHistory`,
-`Subscribe` (history changes, for the UI later). Responses carry a result or an error code (ER-8).
+`Subscribe` (history changes, for the UI later), and since version 2 `Thumbnail { id }` (below).
+Responses carry a result or an error code (ER-8).
 A clear answers `ClaimFailed` if another application held the clipboard, so it was not cleared.
 Sources and previews are cleaned of control, format and separator characters, in the daemon and
 again in the CLI, so nothing a client sets (its `WM_CLASS`) reaches a terminal as an escape.
 
 `jackstay` is the thin CLI over it: `status`, `list`, `select`, `delete`, `pin`, `unpin`, `clear`,
 `clear-history`, `import-clipman`.
+
+## Thumbnails
+
+The popup shows a thumbnail of each image entry (docs/ui.md, "Thumbnails"); the daemon makes them
+(plan §4.3: the UI's gdk-pixbuf never decodes clipboard bytes, and neither does the daemon).
+
+- **Which entries.** After every change to the history (`crates/jackstayd/src/thumbnails.rs`),
+  each entry holding a kept `image/*` target and no thumbnail of its current content is queued;
+  entries gone are dropped from the queue and forgotten. The thread takes them in the history's
+  order, the top first (a copy made again is on top with its old id). A result is kept only if
+  its entry still holds the content it was made from; one being made for an entry since deleted
+  or changed is stopped within 50 ms, its helper killed. Up to 3 of an entry's images are tried,
+  in the order offered; none decoding means no thumbnail.
+- **The helper.** `/proc/self/exe --thumbnail`: this program again, by the kernel's link, so an
+  upgrade that replaced the file still runs the matching helper. The image goes in as a memory file
+  (`memfd`) on its standard input, so handing it over cannot block; the encoded thumbnail comes
+  back on its standard output, read within 10 s, or the helper is killed. Its environment is empty
+  and its directory `/`. Before reading anything it confines itself (`crates/thumbnail`): limits of
+  1 GiB of address space and 5 s of processor time (or lower hard limits it was given), file size
+  0, no core dumps; not dumpable; `no_new_privs`; then a **seccomp filter** that kills it at any
+  system call but `read` of descriptor 0, `write` of 1 or 2, its own memory (`mmap`, `munmap`,
+  `mremap`, `mprotect`, `brk`, `madvise`), `futex`, `getrandom`, signal masks and returns, and
+  exiting. So a decoder bug made to run an attacker's code still cannot open, change or delete a
+  file, signal or start a process, use a socket, or touch a descriptor it inherited
+  (`crates/thumbnail/tests/confine.rs` tries each). Then pure-Rust decoders (the
+  `image` crate: PNG, JPEG, WebP, GIF, BMP; nothing else is looked at), allocating at most
+  256 MiB, scale it to fit 128 by 64 pixels, never up. Exit 0 with a thumbnail, 1 with none, 2
+  if it could not confine itself or do its I/O.
+- **What the daemon trusts.** Nothing of the helper's but a whole, valid encoding from a helper
+  that exited 0: it is read up to its largest size and decoded with the control protocol's own
+  decoder, which checks the sides against their limits and the pixels against the sides. Anything
+  else, a crash, a hang, too much output, is no thumbnail.
+- **Kept in memory only**, never on disk, and forgotten with their entry: a clear forgets them as
+  it deletes the entry, and stops one being made. At most 32 KiB each: 3.2 MiB for the default 100 entries, all images.
+- **`Thumbnail { id }`** answers `Ready` (its size, its image's size, the pixels as RGBA),
+  `Pending` (being made; ask again) or `Absent` (no such entry, no image, or none decoded), at
+  once: the clipboard thread only looks it up.
 
 ## clipman import
 
@@ -273,7 +315,8 @@ message can leak contents; `dbg!` is denied workspace wide (clippy `dbg_macro`, 
 ## Dependencies this adds
 
 Each to be justified in `docs/dependencies.md`: `sha2` (RustCrypto, pure Rust) for blob names;
-`toml` with `serde` for configuration; `signal-hook` for the signal pipe.
+`toml` with `serde` for configuration; `signal-hook` for the signal pipe; `image`, in
+`crates/thumbnail`, for thumbnails.
 
 ## Red team
 

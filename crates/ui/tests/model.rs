@@ -22,7 +22,7 @@ fn a_row_is_one_clean_line_with_its_size_and_source() {
     s.pinned = true;
     s.current = true;
     assert_eq!(
-        row(&s),
+        row(&s, None),
         Row {
             id: 9,
             title: "two lines x".to_owned(),
@@ -31,24 +31,24 @@ fn a_row_is_one_clean_line_with_its_size_and_source() {
             pinned: true,
         }
     );
-    assert_eq!(row(&summary("a", Kinds::TEXT, 1023, None)).detail, "1023 B");
-    assert_eq!(row(&summary("a", Kinds::TEXT, 3 << 20, None)).detail, "3 MiB");
-    assert_eq!(row(&summary("a", Kinds::TEXT, 1 << 20, None)).detail, "1 MiB");
-    assert_eq!(row(&summary("a", Kinds::TEXT, 1024, None)).detail, "1 KiB");
+    assert_eq!(row(&summary("a", Kinds::TEXT, 1023, None), None).detail, "1023 B");
+    assert_eq!(row(&summary("a", Kinds::TEXT, 3 << 20, None), None).detail, "3 MiB");
+    assert_eq!(row(&summary("a", Kinds::TEXT, 1 << 20, None), None).detail, "1 MiB");
+    assert_eq!(row(&summary("a", Kinds::TEXT, 1024, None), None).detail, "1 KiB");
 }
 
 #[test]
 fn a_long_preview_is_cut_and_one_without_text_says_what_it_holds() {
     let exact = "x".repeat(ROW_CHARS);
-    assert_eq!(row(&summary(&exact, Kinds::TEXT, 1, None)).title, exact);
+    assert_eq!(row(&summary(&exact, Kinds::TEXT, 1, None), None).title, exact);
     let long = format!("{}y", "é".repeat(ROW_CHARS));
-    let title = row(&summary(&long, Kinds::TEXT, 1, None)).title;
+    let title = row(&summary(&long, Kinds::TEXT, 1, None), None).title;
     assert_eq!(title.chars().count(), ROW_CHARS);
     assert!(title.ends_with('…'));
     // Trailing space before the cut is not kept.
     let spaced = format!("{} {}", "a".repeat(ROW_CHARS - 2), "b".repeat(10));
     assert_eq!(
-        row(&summary(&spaced, Kinds::TEXT, 1, None)).title,
+        row(&summary(&spaced, Kinds::TEXT, 1, None), None).title,
         format!("{}…", "a".repeat(ROW_CHARS - 2))
     );
     for (kinds, what) in [
@@ -58,7 +58,7 @@ fn a_long_preview_is_cut_and_one_without_text_says_what_it_holds() {
         (Kinds::OTHER, "Other data"),
         (0, "Empty"),
     ] {
-        assert_eq!(row(&summary(" \n", kinds, 1, None)).title, what);
+        assert_eq!(row(&summary(" \n", kinds, 1, None), None).title, what);
     }
 }
 
@@ -83,4 +83,18 @@ fn moving_stays_within_the_rows() {
     assert_eq!(step(Some(2), 1, 3), Some(2));
     assert_eq!(step(Some(1), -5, 3), Some(0));
     assert_eq!(step(Some(1), 10, 3), Some(2));
+}
+
+#[test]
+fn an_image_is_titled_with_its_size_once_known() {
+    let image = summary("", Kinds::IMAGE, 5000, None);
+    assert_eq!(row(&image, None).title, "Image");
+    assert_eq!(row(&image, Some((1920, 1080))).title, "Image 1920×1080");
+    // A caption is kept as the title.
+    let captioned = summary("a cat", Kinds::IMAGE | Kinds::TEXT, 5000, None);
+    assert_eq!(row(&captioned, Some((1920, 1080))).title, "a cat");
+    // Without an image, a size is not shown.
+    assert_eq!(row(&summary("", Kinds::FILES, 5, None), Some((1, 1))).title, "Files");
+    assert!(jackstay_ui::model::has_image(&image));
+    assert!(!jackstay_ui::model::has_image(&summary("a", Kinds::TEXT, 1, None)));
 }

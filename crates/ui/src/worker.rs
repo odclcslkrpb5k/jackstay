@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use jackstay_proto::control::{Request, Response, Summary};
+use jackstay_proto::control::{Request, Response, Summary, Thumb};
 use jackstayd::client::{Client, ClientError};
 
 use crate::model::SHOWN;
@@ -22,12 +22,15 @@ pub enum Job {
     Pin(u64, bool),
     Clear,
     ClearHistory,
+    /// An image entry's thumbnail.
+    Thumbnail(u64),
 }
 
 /// What came of a job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Done {
     Listed { total: u32, entries: Vec<Summary> },
+    Thumbnail(u64, Thumb),
     Did(Job),
     Failed(Job, String),
 }
@@ -41,6 +44,7 @@ impl Job {
             Job::Pin(id, pinned) => Request::Pin { id, pinned },
             Job::Clear => Request::Clear,
             Job::ClearHistory => Request::ClearHistory,
+            Job::Thumbnail(id) => Request::Thumbnail { id },
         }
     }
 }
@@ -89,8 +93,13 @@ fn run(socket: &Path, client: &mut Option<Client>, job: Job) -> Done {
 fn answer(job: Job, response: Response) -> Done {
     match (job, response) {
         (Job::List, Response::List { total, entries }) => Done::Listed { total, entries },
+        (Job::Thumbnail(asked), Response::Thumbnail { id, thumbnail }) if id == asked => {
+            Done::Thumbnail(id, thumbnail)
+        }
         (_, Response::Error(e)) => Done::Failed(job, e.explain().to_owned()),
-        (Job::List, _) => Done::Failed(job, "jackstayd sent an unexpected response".to_owned()),
+        (Job::List | Job::Thumbnail(_), _) => {
+            Done::Failed(job, "jackstayd sent an unexpected response".to_owned())
+        }
         (_, Response::Ok) => Done::Did(job),
         (_, _) => Done::Failed(job, "jackstayd sent an unexpected response".to_owned()),
     }

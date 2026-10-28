@@ -1,6 +1,7 @@
 use jackstay_proto::control::{
-    Error, Kinds, MAX_LIST, MAX_PREVIEW_CHARS, MAX_SOURCE_LEN, Request, Response, Status, Summary,
-    VERSION, decode_request, decode_response, encode_request, encode_response, preview, printable,
+    Error, Kinds, MAX_LIST, MAX_PREVIEW_CHARS, MAX_SOURCE_LEN, MAX_THUMBNAIL_HEIGHT,
+    MAX_THUMBNAIL_WIDTH, Request, Response, Status, Summary, Thumb, Thumbnail, VERSION,
+    decode_request, decode_response, encode_request, encode_response, preview, printable,
 };
 use jackstay_proto::{DecodeError, LimitError};
 use proptest::prelude::*;
@@ -40,13 +41,35 @@ fn summary(id: u64) -> Summary {
 
 #[test]
 fn the_layout_is_as_documented() {
-    assert_eq!(request_bytes(&Request::Hello { version: VERSION }), [0, 0, 0, 2, 1, 0, 1]);
+    assert_eq!(request_bytes(&Request::Hello { version: VERSION }), [0, 0, 0, 2, 1, 0, 2]);
     assert_eq!(request_bytes(&Request::Clear), [0, 0, 0, 0, 7]);
     assert_eq!(
         request_bytes(&Request::Pin { id: 258, pinned: true }),
         [0, 0, 0, 9, 6, 0, 0, 0, 0, 0, 0, 1, 2, 1]
     );
     assert_eq!(response_bytes(&Response::Error(Error::NoSuchEntry)), [0, 0, 0, 1, 66, 3]);
+    assert_eq!(
+        request_bytes(&Request::Thumbnail { id: 5 }),
+        [0, 0, 0, 8, 11, 0, 0, 0, 0, 0, 0, 0, 5]
+    );
+    let one = ok(Thumbnail::new(1, 1, 3, 2, vec![10, 20, 30, 40]));
+    assert_eq!(
+        response_bytes(&Response::Thumbnail { id: 5, thumbnail: Thumb::Ready(one) }),
+        [
+            0, 0, 0, 25, 71, 0, 0, 0, 0, 0, 0, 0, 5, 2, 0, 1, 0, 1, 0, 0, 0, 3, 0, 0, 0, 2, 10, 20,
+            30, 40
+        ]
+    );
+    assert_eq!(
+        response_bytes(&Response::Thumbnail { id: 1, thumbnail: Thumb::Pending }),
+        [0, 0, 0, 9, 71, 0, 0, 0, 0, 0, 0, 0, 1, 1]
+    );
+}
+
+fn thumbnail(width: u16, height: u16) -> Thumbnail {
+    let pixels = usize::from(width) * usize::from(height);
+    let rgba = (0..pixels * 4).map(|i| u8::try_from(i % 251).unwrap_or(0)).collect();
+    ok(Thumbnail::new(width, height, u32::from(width) * 3, u32::from(height) * 3, rgba))
 }
 
 #[test]
@@ -63,6 +86,8 @@ fn every_request_and_response_round_trips() {
         Request::ImportClipman { remove: true },
         Request::ImportClipman { remove: false },
         Request::Subscribe,
+        Request::Thumbnail { id: 0 },
+        Request::Thumbnail { id: u64::MAX },
     ];
     for r in requests {
         let bytes = request_bytes(&r);
@@ -105,6 +130,13 @@ fn every_request_and_response_round_trips() {
         Response::List { total: 0, entries: vec![] },
         Response::Imported { added: 3, skipped: 1 },
         Response::Changed,
+        Response::Thumbnail { id: 3, thumbnail: Thumb::Absent },
+        Response::Thumbnail { id: 3, thumbnail: Thumb::Pending },
+        Response::Thumbnail { id: 3, thumbnail: Thumb::Ready(thumbnail(7, 5)) },
+        Response::Thumbnail {
+            id: u64::MAX,
+            thumbnail: Thumb::Ready(thumbnail(MAX_THUMBNAIL_WIDTH, MAX_THUMBNAIL_HEIGHT)),
+        },
     ];
     responses.extend(errors.map(Response::Error));
     for r in responses {
@@ -340,4 +372,94 @@ fn every_error_has_its_own_explanation() {
     assert_eq!(said.len(), all.len());
     assert!(said.iter().all(|s| !s.is_empty()));
     assert_eq!(Error::BadSequence.explain(), Error::UnsupportedVersion.explain());
+}
+
+#[test]
+fn a_thumbnails_size_and_pixels_must_agree() {
+    let new =
+        |w: u16, h: u16, iw: u32, ih: u32, len: usize| Thumbnail::new(w, h, iw, ih, vec![0; len]);
+    assert!(new(1, 1, 1, 1, 4).is_ok());
+    assert!(new(MAX_THUMBNAIL_WIDTH, MAX_THUMBNAIL_HEIGHT, 128, 64, 128 * 64 * 4).is_ok());
+    assert!(new(2, 3, u32::MAX, u32::MAX, 24).is_ok());
+    for (w, h, iw, ih, len) in [
+        (0, 1, 1, 1, 0),
+        (1, 0, 1, 1, 0),
+        (MAX_THUMBNAIL_WIDTH + 1, 1, 1000, 1, 129 * 4),
+        (1, MAX_THUMBNAIL_HEIGHT + 1, 1, 1000, 65 * 4),
+        (2, 1, 1, 1, 8),
+        (1, 2, 1, 1, 8),
+        (1, 1, 1, 1, 3),
+        (1, 1, 1, 1, 5),
+        (2, 2, 2, 2, 4),
+    ] {
+        assert_eq!(
+            new(w, h, iw, ih, len),
+            Err(LimitError::BadThumbnail),
+            "{w}x{h} of {iw}x{ih}, {len} bytes"
+        );
+    }
+    let t = thumbnail(2, 1);
+    assert_eq!(format!("{t:?}"), "Thumbnail(2x1 of 6x3)", "no pixels in Debug");
+    let mut bytes = Vec::new();
+    t.encode(&mut bytes);
+    assert_eq!(bytes.len(), 12 + 8);
+    assert_eq!(Thumbnail::decode(&bytes), Ok(t.clone()));
+    assert_eq!(Thumbnail::decode(&bytes[..bytes.len() - 1]), Err(DecodeError::Truncated));
+    bytes.push(0);
+    assert_eq!(Thumbnail::decode(&bytes), Err(DecodeError::TrailingBytes));
+    assert_eq!(Thumbnail::MAX_ENCODED_LEN, 12 + 128 * 64 * 4);
+}
+
+#[test]
+fn a_thumbnail_reply_is_refused_when_it_breaks_a_limit() {
+    let base =
+        response_bytes(&Response::Thumbnail { id: 1, thumbnail: Thumb::Ready(thumbnail(2, 1)) });
+    let state_at = 5 + 8;
+    let mut bad = base.clone();
+    bad[state_at] = 3;
+    assert_eq!(decode_response(&bad), Err(DecodeError::Limit(LimitError::UnknownCode { code: 3 })));
+    // Wider than the limit, with the pixels to match: refused all the same.
+    let mut wide = base[..=state_at].to_vec();
+    wide.extend_from_slice(&(MAX_THUMBNAIL_WIDTH + 1).to_be_bytes());
+    wide.extend_from_slice(&1u16.to_be_bytes());
+    wide.extend_from_slice(&1000u32.to_be_bytes());
+    wide.extend_from_slice(&1u32.to_be_bytes());
+    wide.extend(std::iter::repeat_n(0, usize::from(MAX_THUMBNAIL_WIDTH + 1) * 4));
+    let len = u32::try_from(wide.len() - 5).unwrap_or(0);
+    wide[..4].copy_from_slice(&len.to_be_bytes());
+    assert!(decode_response(&wide).is_err());
+    // An image smaller than its thumbnail.
+    let mut small = base.clone();
+    small[state_at + 1 + 4..state_at + 1 + 8].copy_from_slice(&1u32.to_be_bytes());
+    assert_eq!(decode_response(&small), Err(DecodeError::Limit(LimitError::BadThumbnail)));
+    // One pixel byte short, or one over.
+    let mut short = base.clone();
+    short.pop();
+    let len = u32::try_from(short.len() - 5).unwrap_or(0);
+    short[..4].copy_from_slice(&len.to_be_bytes());
+    assert_eq!(decode_response(&short), Err(DecodeError::Truncated));
+    let mut long = base.clone();
+    long.push(0);
+    let len = u32::try_from(long.len() - 5).unwrap_or(0);
+    long[..4].copy_from_slice(&len.to_be_bytes());
+    assert_eq!(decode_response(&long), Err(DecodeError::TrailingBytes));
+}
+
+fn arb_thumbnail() -> impl Strategy<Value = Thumbnail> {
+    (1..=MAX_THUMBNAIL_WIDTH, 1..=MAX_THUMBNAIL_HEIGHT, 1u32..4, 1u32..4, any::<u8>()).prop_map(
+        |(w, h, sx, sy, seed)| {
+            let len = usize::from(w) * usize::from(h) * 4;
+            let rgba = (0..len).map(|i| u8::try_from(i % 256).unwrap_or(0) ^ seed).collect();
+            ok(Thumbnail::new(w, h, u32::from(w) * sx, u32::from(h) * sy, rgba))
+        },
+    )
+}
+
+proptest! {
+    #[test]
+    fn thumbnails_round_trip(id in any::<u64>(), t in arb_thumbnail()) {
+        let r = Response::Thumbnail { id, thumbnail: Thumb::Ready(t) };
+        let bytes = response_bytes(&r);
+        prop_assert_eq!(decode_response(&bytes), Ok(Some((r, bytes.len()))));
+    }
 }

@@ -54,6 +54,8 @@ pub enum LimitError {
     UnknownCode {
         code: u8,
     },
+    /// A thumbnail's sides out of range, larger than its image, or its pixels the wrong length.
+    BadThumbnail,
 }
 
 impl From<LimitError> for DecodeError {
@@ -93,6 +95,7 @@ impl fmt::Display for LimitError {
             LimitError::TextNotUtf8 => write!(f, "text not UTF-8"),
             LimitError::TooManyEntries { count } => write!(f, "{count} entries"),
             LimitError::UnknownCode { code } => write!(f, "unknown code {code}"),
+            LimitError::BadThumbnail => write!(f, "thumbnail size and pixels disagree"),
         }
     }
 }

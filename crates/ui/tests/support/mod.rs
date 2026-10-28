@@ -3,6 +3,7 @@
 // Each test binary uses part of this.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -11,7 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use jackstay_proto::control::{self, Kinds, Request, Response, Summary, VERSION};
+use jackstay_proto::control::{self, Kinds, Request, Response, Summary, Thumb, VERSION};
 use jackstayd::ui_socket;
 
 #[track_caller]
@@ -94,6 +95,9 @@ pub fn entry(id: u64, preview: &str, current: bool) -> Summary {
 #[derive(Clone)]
 pub struct Daemon {
     asked: Arc<Mutex<Vec<Request>>>,
+    /// What each thumbnail request is answered, in turn (`None`: an error); the last one again
+    /// once the rest are used, and `Absent` for an entry not here.
+    thumbnails: Arc<Mutex<HashMap<u64, Vec<Option<Thumb>>>>>,
 }
 
 impl Daemon {
@@ -115,22 +119,48 @@ impl Daemon {
     pub fn with(runtime: &Path, entries: Vec<Summary>, select: Response, delete: Response) -> Self {
         let listener = ok(UnixListener::bind(runtime.join("control")));
         let asked = Arc::new(Mutex::new(Vec::new()));
+        let thumbnails = Arc::new(Mutex::new(HashMap::new()));
         let entries = Arc::new(Mutex::new(entries));
-        let log = Arc::clone(&asked);
+        let (log, thumbs) = (Arc::clone(&asked), Arc::clone(&thumbnails));
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let (log, entries) = (Arc::clone(&log), Arc::clone(&entries));
+                let (log, entries, thumbs) =
+                    (Arc::clone(&log), Arc::clone(&entries), Arc::clone(&thumbs));
                 let (select, delete) = (select.clone(), delete.clone());
-                std::thread::spawn(move || serve(stream, &log, &entries, &select, &delete));
+                std::thread::spawn(move || {
+                    serve(stream, &log, &entries, &thumbs, &select, &delete);
+                });
             }
         });
-        Daemon { asked }
+        Daemon { asked, thumbnails }
     }
 
-    /// The requests so far, other than listing.
+    /// Answers entry `id`'s thumbnail requests with `answers`, in turn.
+    pub fn thumbnail(&self, id: u64, answers: Vec<Option<Thumb>>) {
+        if let Ok(mut t) = self.thumbnails.lock() {
+            t.insert(id, answers);
+        }
+    }
+
+    /// The requests so far, other than listing and thumbnails.
     pub fn changes(&self) -> Vec<Request> {
         let asked = self.asked.lock().map(|a| a.clone()).unwrap_or_default();
-        asked.into_iter().filter(|r| !matches!(r, Request::List { .. })).collect()
+        asked
+            .into_iter()
+            .filter(|r| !matches!(r, Request::List { .. } | Request::Thumbnail { .. }))
+            .collect()
+    }
+
+    /// The thumbnail requests so far, by entry.
+    pub fn thumbnails_asked(&self) -> Vec<u64> {
+        let asked = self.asked.lock().map(|a| a.clone()).unwrap_or_default();
+        asked
+            .into_iter()
+            .filter_map(|r| match r {
+                Request::Thumbnail { id } => Some(id),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn lists(&self) -> usize {
@@ -143,6 +173,7 @@ pub fn serve(
     mut s: UnixStream,
     log: &Mutex<Vec<Request>>,
     entries: &Mutex<Vec<Summary>>,
+    thumbnails: &Mutex<HashMap<u64, Vec<Option<Thumb>>>>,
     select: &Response,
     delete: &Response,
 ) {
@@ -173,6 +204,19 @@ pub fn serve(
                 delete.clone()
             }
             Request::Select { .. } => select.clone(),
+            Request::Thumbnail { id } => {
+                let mut t = thumbnails.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let answers = t.entry(*id).or_default();
+                let answer = if answers.len() > 1 {
+                    answers.remove(0)
+                } else {
+                    answers.first().cloned().unwrap_or(Some(Thumb::Absent))
+                };
+                match answer {
+                    Some(thumbnail) => Response::Thumbnail { id: *id, thumbnail },
+                    None => Response::Error(control::Error::Internal),
+                }
+            }
             _ => Response::Ok,
         };
         if !matches!(request, Request::Hello { .. })

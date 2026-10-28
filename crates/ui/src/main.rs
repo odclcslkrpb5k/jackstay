@@ -108,6 +108,14 @@ fn main() {
             std::process::exit(BAD_SETUP);
         }
     };
+    let thumbnail_jobs =
+        match worker::spawn(runtime.join("control"), |done| on_popup(move |p| p.done(done))) {
+            Ok(j) => j,
+            Err(e) => {
+                log(&format!("worker: {e}"));
+                std::process::exit(BAD_SETUP);
+            }
+        };
     let places = match places() {
         Ok(p) => p,
         Err(why) => {
@@ -122,7 +130,7 @@ fn main() {
             std::process::exit(BAD_SETUP);
         }
     };
-    let popup = Popup::new(jobs);
+    let popup = Popup::new(jobs, thumbnail_jobs);
     let settings = Settings::new(places, tasks);
     let (tray_popup, tray_settings) = (Rc::clone(&popup), Rc::clone(&settings));
     POPUP.with(|p| *p.borrow_mut() = Some(popup));

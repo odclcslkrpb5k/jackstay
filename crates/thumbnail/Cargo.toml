@@ -1,0 +1,22 @@
+[package]
+name = "jackstay-thumbnail"
+description = "Clipboard images decoded and scaled down to thumbnails, in a confined helper process"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+jackstay-proto = { path = "../proto", version = "=0.0.0" }
+image = { version = "=0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+libc = { version = "=0.2.191", default-features = false }
+rustix = { version = "=1.1.5", default-features = false, features = ["std", "process", "thread"] }
+seccompiler = { version = "=0.5.0", default-features = false }
+
+[dev-dependencies]
+proptest.workspace = true
