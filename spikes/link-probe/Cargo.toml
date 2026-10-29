@@ -1,0 +1,11 @@
+[package]
+name = "link-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+ring = "=0.17.14"
+tokio = { version = "=1.54.1", features = ["rt", "macros", "time", "sync"] }

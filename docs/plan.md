@@ -415,11 +415,12 @@ Clipboard is symmetric: any machine may copy and any may paste.
   them for both sides, and otherwise self-signed certificates pinned by key. Either way, the custom
   verifier still checks the handshake signature.
 - **Pairing** is an explicit mode, entered with `jackstay pair` on both machines and lasting about
-  2 minutes. Only in that mode is a handshake with an unknown key accepted. Both machines show a
-  short code derived from the TLS session's exporter (RFC 5705), not from the keys, so an attacker
-  in the middle cannot grind a matching code. The user compares the codes and confirms on both
-  sides. Outside pairing mode, an unknown key is refused in the handshake, before any message is
-  parsed.
+  2 minutes. Only in that mode, and only on a separate pairing endpoint, is a handshake with an
+  unknown key accepted. Both machines show a short code derived from the TLS session's exporter
+  and from nonces each side commits to before seeing the other's, so an attacker in the middle
+  cannot grind a matching code, even offline as the TLS server (docs/link.md, "Pairing"). The user
+  compares the codes and confirms on both sides. Outside pairing mode, an unknown key is refused in
+  the handshake, before any message is parsed.
 - Peers are addressed by configured hostnames. Discovery (mDNS) is not in the first version.
 - One session per peer. Stream 0 carries control, input and pointer motion in order, so a click
   never overtakes the motion that put the pointer there (LAN loss is near zero, so head-of-line
@@ -466,8 +467,9 @@ wrote (the standard's "independent layers").
     through UNO), xfce4-terminal, and one named Electron app. Each application needs a driver
     (xdotool, Marionette, CDP, UNO), and that is sized as real work in M2.
   The owner's reported Synergy and clipman failures become cases in this matrix.
-- **Two-machine tests:** two Xvfb servers and two daemons in containers on one host, on a loopback
-  network with `tc netem` for loss and delay. Inject input on one and assert what the other
+- **Two-machine tests:** two Xvfb servers and two daemons in one container, on loopback, with a
+  UDP relay in the test process between them for delay, loss, reordering and black-holing (in
+  place of `tc netem` between containers: no privileges, exact faults; docs/link.md, "Testing"). Inject input on one and assert what the other
   receives, including links dropped mid-keypress, heartbeat loss, and held modifiers across a
   crossing. **Measured (M0 spike, Xvfb 21.1.22, XFixes 6.0, XInput 2.4):** *relative* XTest motion
   is stopped by a pointer barrier and delivers `XI_BarrierHit` events. *Absolute* XTest motion
@@ -519,9 +521,9 @@ usable on its own, and each target's main control exists before the owner depend
 | M0 | Skeleton and spikes | Workspace, Docker image, `./check`, CI, lint and deny configs, one planted bug per control watched failing; the standard session's measurement list (§5.8) answered; spikes: XTest motion triggers barriers on Xvfb, and whether XTest keys stay down after the injecting client dies. Spikes **done 2026-10-23** (`spikes/x11-probes`; results in §5.3 and §5.7) |
 | M1 | Headless clipboard manager | Capture, keep-alive, CLIPBOARD_MANAGER, history store, clearing (`jackstay clear`), clipman import, `jackstay popup` placeholder; core tier of the conformance matrix in `./check`. **Done 2026-10-24** (docs/daemon.md, docs/conformance.md; `tools/install`) |
 | M2 | Clipboard UI and application tier | Popup, tray, settings; application tier of the matrix (built 2026-10-25, with VS Code as the Electron application; docs/conformance.md). **Dogfood:** the owner disables clipman for two weeks; done when no lost or wrong entry is reported, and every report has become a matrix case |
-| M3 | Link | Pairing, QUIC session, reconnect, heartbeat, two-machine harness; `proto` adopts `clip`'s lossless Latin-1 `TargetName` (up to 4096 bytes, u16 length on the wire) in place of its ASCII-only one, and the fuzz corpus is regrown |
+| M3 | Link | Pairing, QUIC session, reconnect, heartbeat, two-machine harness (docs/link.md) |
 | M4 | Input sharing | §5.3 working; latency acceptance on the owner's LAN. **Dogfood:** the owner runs Jackstay instead of Synergy for input (Synergy stays installed as the fallback), with Synergy's clipboard sharing missed for the duration |
-| M5 | Clipboard sharing | §5.4 working; the owner uninstalls Synergy |
+| M5 | Clipboard sharing | §5.4 working; `proto` adopts `clip`'s lossless Latin-1 `TargetName` (up to 4096 bytes, u16 length on the wire) in place of its ASCII-only one, and the fuzz corpus is regrown (moved from M3: nothing sends an `Announce` before this); the owner uninstalls Synergy |
 | M6 | Hardening and packaging | Soak test passing, fuzzing in CI, a `.deb` |
 
 Input sharing comes before clipboard sharing because §5.4 takes ownership on Jackstay's own pointer
