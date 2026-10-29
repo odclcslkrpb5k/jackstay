@@ -157,7 +157,9 @@ X11 connection where it needs one, joined by channels:
   is used by every Wayland compositor and is heavily exercised, and hand-writing XKB keymap
   handling is where Synergy-likes get stuck keys. The `unsafe` is confined to one adapter crate
   (ER-3); data reaching it comes from the X server and from fixed-size input messages, not from
-  clipboard contents.
+  clipboard contents. **Superseded (M4 design, 2026-10-29):** no keyboard state machine is needed, so there is no
+  libxkbcommon, no libxcb and no `unsafe`; the input connection is a `RustConnection` too
+  (docs/input.md, "No C after all").
 - **Network** — [quinn](https://github.com/quinn-rs/quinn) (QUIC over rustls, on tokio): one
   mutually authenticated session per peer, with pinned certificates. Input travels on its own
   stream (or datagrams for pointer motion), and each clipboard transfer on its own stream, so a
@@ -227,7 +229,8 @@ messages, selection data, images):
 - **Crate supply chain** (TC-3, TC-4, TC-7): `Cargo.lock` committed, `--locked` builds,
   `cargo-deny` for advisories, licenses and sources, a minimal dependency list with each crate
   justified. quinn and tokio are the largest; they buy the transport above.
-- **C in the input path** (libxcb, libxkbcommon), in one adapter crate, as above.
+- ~~**C in the input path** (libxcb, libxkbcommon), in one adapter crate, as above.~~ Removed by
+  the M4 design (docs/input.md).
 - **A second local protocol** (the UI socket), which is a parser too: fuzzed like the others, and
   versioned from its first message.
 
@@ -235,8 +238,10 @@ messages, selection data, images):
 
 These shape the design (§5) more than the stack, but the stack has to reach them:
 
-- **Stuck keys.** Measured in M0: the X server releases XTest-held keys when the injecting client
-  disconnects (§5.3). A dropped network link is what remains, which the held-key heartbeat covers.
+- **Stuck keys.** Measured (corrected 2026-10-29, §5.3): the X server does **not** release
+  XTest-held keys when the injecting client disconnects, so the secondary clears the XTest
+  devices' held keys itself at start and on every entry, and the held-key heartbeat covers a
+  dropped link.
 - **Grab failure.** Active grabs fail with `AlreadyGrabbed` while a menu is open or the screensaver
   holds a grab. The pointer needs a defined behaviour when it cannot leave.
 - **Remote ownership.** While the user works on another machine, the local daemon must own the
@@ -261,7 +266,8 @@ These shape the design (§5) more than the stack, but the stack has to reach the
 
 ### 5.1 Workspace
 
-One Cargo workspace. Each crate has one job, and only `x11-input` may contain `unsafe`.
+One Cargo workspace. Each crate has one job, and none contains `unsafe` (`x11-input` was to, for
+libxkbcommon, until docs/input.md removed the need).
 
 | Crate | Job | `unsafe` |
 |---|---|---|
@@ -269,7 +275,7 @@ One Cargo workspace. Each crate has one job, and only `x11-input` may contain `u
 | `clip` | The clipboard model and history store; no I/O | forbidden |
 | `selection` | The ICCCM selection protocol as pure state machines: capture, INCR both ways, MULTIPLE, keep-alive, CLIPBOARD_MANAGER; talks to X only through a port trait | forbidden |
 | `x11-clip` | Implements that port over x11rb's `RustConnection`; the clipboard thread's event loop | forbidden |
-| `x11-input` | Barriers, grabs, XI2, XTest, libxkbcommon; the only FFI adapter (ER-3) | allowed, audited |
+| `x11-input` | Barriers, grabs, XI2, XTest, XKB locks, over x11rb's pure-Rust connection (docs/input.md: no libxkbcommon after all) | forbidden |
 | `net` | QUIC sessions, pairing, reconnect | forbidden |
 | `jackstayd` | Wires the above into threads and channels; config; supervision | forbidden |
 | `jackstay-ui` | gtk3-rs popup, settings, ksni tray | forbidden in our code |
@@ -364,7 +370,8 @@ removed or moved), and edges between a machine's own monitors are never barriers
   modifier and lock state, and the side losing it releases everything it holds. A Shift held
   across a crossing is therefore pressed on the far side and released on the near side.
 - **Keys.** Both ends are Xubuntu with evdev, so keys travel as keycodes plus the active XKB group
-  and are injected exactly. Groups and `MappingNotify` changes are tracked through libxkbcommon.
+  and are injected exactly. Groups and `MappingNotify` changes are tracked through libxkbcommon
+  (superseded: the core keymap and XKB's lock request suffice, docs/input.md).
   If a keycode's keysym differs on the secondary (detected per key, not by hashing whole keymaps,
   which differ across xkeyboard-config versions), the keysym is sent and resolved there, borrowing
   a spare keycode if needed. Borrowed keycodes are restored on exit and checked and restored at
@@ -376,10 +383,12 @@ removed or moved), and edges between a machine's own monitors are never barriers
   releases everything. That is before Xfce's default 500 ms repeat delay, so a lost release cannot
   turn into an endless repeat. A link is "dead" only after several seconds without traffic, which
   tolerates Wi-Fi power-save pauses. A held key with no messages is normal, so silence alone never
-  releases anything. Only a missing heartbeat does. **Measured (M0 spike, Xvfb 21.1.22):** the
-  server releases XTest-held keys when the injecting client's connection closes, whether it exits,
-  aborts or is killed. So a daemon crash cannot leave keys stuck on the secondary. A dropped network
-  link, with the daemon still connected, can, and that is what the heartbeat is for.
+  releases anything. Only a missing heartbeat does. **Measured (corrected 2026-10-29, Xvfb
+  21.1.22):** XTest-held keys stay down after the injecting client's connection closes, whether it
+  exits, aborts or is killed. The M0 spike had reported the opposite because its client was
+  Xvfb's only one, and Xvfb resets, clearing every key, when its last client leaves. So a daemon
+  crash *can* leave a key stuck on the secondary: the secondary releases whatever the XTest
+  devices hold at start and on every entry (docs/input.md, "Secondary").
 - **Returning.** The secondary reports the pointer reaching an edge, and the primary ungrabs and
   warps its pointer to the matching point.
 - **Hotkeys** (switch, lock to screen) are seen by the primary while it is grabbing, and are
@@ -494,7 +503,7 @@ wrote (the standard's "independent layers").
   conformance matrix. CI runs exactly `./check`.
 - `Cargo.lock` committed, builds `--locked`. Each dependency is justified in
   `docs/dependencies.md` (TC-7).
-- `[workspace.lints]` carries `unsafe_code = "forbid"` to every crate except `x11-input`.
+- `[workspace.lints]` carries `unsafe_code = "forbid"` to every crate.
   Release profile: `overflow-checks = true`. `panic = "unwind"` in `jackstayd`, so a panic in one
   connection's or transfer's handler can be caught at that task's boundary and costs that
   connection, not the daemon. To be measured in M0, not assumed, including: what a panic while
@@ -518,7 +527,7 @@ usable on its own, and each target's main control exists before the owner depend
 
 | | Milestone | Done when |
 |---|---|---|
-| M0 | Skeleton and spikes | Workspace, Docker image, `./check`, CI, lint and deny configs, one planted bug per control watched failing; the standard session's measurement list (§5.8) answered; spikes: XTest motion triggers barriers on Xvfb, and whether XTest keys stay down after the injecting client dies. Spikes **done 2026-10-23** (`spikes/x11-probes`; results in §5.3 and §5.7) |
+| M0 | Skeleton and spikes | Workspace, Docker image, `./check`, CI, lint and deny configs, one planted bug per control watched failing; the standard session's measurement list (§5.8) answered; spikes: XTest motion triggers barriers on Xvfb, and whether XTest keys stay down after the injecting client dies (they do: corrected 2026-10-29). Spikes **done 2026-10-23** (`spikes/x11-probes`; results in §5.3 and §5.7) |
 | M1 | Headless clipboard manager | Capture, keep-alive, CLIPBOARD_MANAGER, history store, clearing (`jackstay clear`), clipman import, `jackstay popup` placeholder; core tier of the conformance matrix in `./check`. **Done 2026-10-24** (docs/daemon.md, docs/conformance.md; `tools/install`) |
 | M2 | Clipboard UI and application tier | Popup, tray, settings; application tier of the matrix (built 2026-10-25, with VS Code as the Electron application; docs/conformance.md). **Dogfood:** the owner disables clipman for two weeks; done when no lost or wrong entry is reported, and every report has become a matrix case |
 | M3 | Link | Pairing, QUIC session, reconnect, heartbeat, two-machine harness (docs/link.md) |

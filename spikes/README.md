@@ -5,7 +5,12 @@ and not held to the gate; each records its question, how it was run, and its ans
 
 - `x11-probes`: M0 spikes. Do XFixes pointer barriers act on XTest motion under Xvfb (§5.7)? Do
   keys pressed through XTest stay down after the injecting client dies (§5.3)?
-  Run with `./spikes/x11-probes/run.sh` (inside the dev container, via `./dev`).
+  Run with `./spikes/x11-probes/run.sh` (inside the dev container, via `./dev`). Corrected
+  2026-10-29: XTest-held keys **stay down** after the injecting client exits, aborts or is killed.
+  The first version reported them released because the probe was Xvfb's only client, and Xvfb
+  resets when its last client leaves; `run.sh` now keeps a second client connected.
+  `run-input.sh` (M4, 2026-10-29) measures barriers on the screen's edges, grabs and their
+  refusals, raw motion while grabbed, and auto-repeat of XTest keys (docs/input.md).
 - `link-probe`: M3 spike (2026-10-29). Can quinn 0.11.12 with rustls 0.23.46 (ring) authenticate
   both ends by raw Ed25519 public keys (RFC 7250), refuse an unknown key in the handshake, and give
   both ends one exporter value for a pairing code? What does a small message's round trip cost?
