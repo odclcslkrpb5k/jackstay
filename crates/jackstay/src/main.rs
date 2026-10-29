@@ -188,12 +188,32 @@ fn text(arg: &OsString) -> Result<String, Failure> {
     arg.to_str().map(str::to_owned).ok_or_else(|| usage("arguments must be UTF-8"))
 }
 
+/// This machine's hostname, for the other machine's user to name it by.
+fn this_machine() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|h| printable(h.trim()))
+        .ok()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "THIS-MACHINE".to_owned())
+}
+
 /// Pairs: starts it, shows the code when it comes, asks, and waits for the end.
 fn pair(client: &mut Client, host: &str) -> Result<(), Failure> {
     client.set_timeout(PAIRING_WAIT).map_err(|e| failed(&e))?;
     client.send(&Request::Pair { host: host.to_owned() }).map_err(|e| failed(&e))?;
+    let mut started = false;
     loop {
         match client.receive().map_err(|e| failed(&e))? {
+            // The first Ok: pairing has started, and nothing comes until the other machine starts.
+            Response::Ok if !started => {
+                started = true;
+                println!(
+                    "Waiting for {} to start pairing too: run `jackstay pair {}` there within two \
+                     minutes…",
+                    printable(host),
+                    this_machine()
+                );
+            }
             Response::Ok => {}
             Response::PairCode { name, fingerprint, code } => {
                 // Every field cleaned, though the daemon made them: what reaches the terminal never

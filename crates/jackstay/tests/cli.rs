@@ -443,6 +443,31 @@ fn pair_shows_the_code_and_sends_the_answer() {
     assert!(out.contains("Paired with xiphos (fedcba9876543210)."), "{out}");
 }
 
+/// Reported: `jackstay pair` sat silent until the other machine started pairing too.
+#[test]
+fn pair_says_it_is_waiting_for_the_other_machine_before_the_code() {
+    let paired = Response::Paired { name: "xiphos".into(), fingerprint: "fedcba9876543210".into() };
+    let (_, out, _, _) = pairing("y\n", paired);
+    let first = out.lines().next().unwrap_or_default();
+    assert!(first.starts_with("Waiting for xiphos to start pairing too"), "{out}");
+    assert!(first.contains("jackstay pair "), "{out}");
+    assert_eq!(out.matches("start pairing too").count(), 1, "{out}");
+}
+
+#[test]
+fn pair_refused_at_once_does_not_say_it_is_waiting() {
+    let busy = Response::PairFailed { reason: PairReason::Busy, detail: String::new() };
+    let root = dir();
+    let server = scripted_batches(&root, vec![vec![busy]]);
+    let runtime = root.to_str().unwrap_or_default().to_owned();
+    let out =
+        jackstay_with_input(&["--runtime-dir", &runtime, "pair", "xiphos"], false, None, Some(""));
+    let _ = server.join();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!stdout.contains("Waiting"), "{stdout}");
+}
+
 #[test]
 fn pair_answers_no_unless_told_yes() {
     for input in ["n\n", "\n", "", "yes please\n"] {
