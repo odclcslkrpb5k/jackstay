@@ -183,15 +183,24 @@ fn xdotool(display: &str, args: &[&str]) {
 
 /// Waits up to `seconds` for a visible window matching `pattern` (`by` its `--name` or `--pid`).
 fn find(r: &Rig, by: &str, pattern: &str, seconds: u32) -> Option<String> {
-    let out = ok(r
-        .x
-        .command("timeout")
-        .arg(seconds.to_string())
-        .args(["xdotool", "search", "--sync", "--onlyvisible", by, pattern])
-        .stderr(Stdio::null())
-        .output());
-    let found = String::from_utf8_lossy(&out.stdout);
-    found.lines().last().map(str::to_owned)
+    // Polled, not `xdotool search --sync`: that gave up after half a second on CI, with nothing
+    // found, while VS Code's windows came and went at its start (run 40894283993).
+    let until = Instant::now() + Duration::from_secs(u64::from(seconds));
+    loop {
+        let out = ok(r
+            .x
+            .command("xdotool")
+            .args(["search", "--onlyvisible", by, pattern])
+            .stderr(Stdio::null())
+            .output());
+        if let Some(id) = String::from_utf8_lossy(&out.stdout).lines().last() {
+            return Some(id.to_owned());
+        }
+        if Instant::now() >= until {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// The name of every window with one, visible or not, for a failure message.
