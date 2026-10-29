@@ -437,8 +437,17 @@ fn an_active_peer_stopped_is_suspected_within_300_ms() {
     let mut la = a.start();
     let mut child = b.spawn_active();
     la.peer_in(b.key, PeerState::Connected, SOON);
-    // The child is active: it pings every 100 ms, so a expects to hear within 300 ms.
-    std::thread::sleep(Duration::from_millis(500));
+    // The first session may be replaced: when the larger key's deferred dial comes up first, the
+    // smaller key's dial replaces it as soon as its backoff (at most 2 s) and the dial (at most
+    // 1.5 s) allow. A child stopped then has sent no ping on the new session, which then expects
+    // the idle interval. So wait until no replacement can come, and then for a round trip on the
+    // session kept: the child is active, so a expects to hear within 300 ms.
+    let t = Timings::default();
+    std::thread::sleep(t.backoff_max + t.dial_deadline + Duration::from_millis(500));
+    la.wait(SOON, "a round trip", |e| match e {
+        Event::Status(s) => s.peers.iter().find(|p| p.key == b.key && p.rtt.is_some()).map(|_| ()),
+        _ => None,
+    });
     child.signal(rustix::process::Signal::STOP);
     let stopped = Instant::now();
     la.peer_in(b.key, PeerState::Suspect, Duration::from_secs(2));

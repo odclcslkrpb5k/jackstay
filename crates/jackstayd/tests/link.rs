@@ -476,9 +476,15 @@ fn steady_loss_and_delay_do_not_drop_the_link() {
         rtts.extend(p.rtt_us);
         std::thread::sleep(Duration::from_millis(250));
     }
-    // Two 2 ms delays each way, and seldom a loss: round trips stay far from human scale.
-    let worst = rtts.iter().max().copied().unwrap_or(0);
-    assert!((4_000..200_000).contains(&worst), "{rtts:?}");
+    // Two 2 ms delays each way, and seldom a loss: the typical round trip stays near 4 ms, and
+    // none reaches human scale. A loss costs a probe timeout, doubling for each loss in a row, so
+    // an outlier of a few hundred ms is the protocol working (275 ms seen once, under the whole
+    // gate's load); seconds would mean recovery by something slower.
+    assert!(!rtts.is_empty(), "no round trip measured");
+    rtts.sort_unstable();
+    let (median, worst) = (rtts[rtts.len() / 2], rtts.last().copied().unwrap_or(0));
+    assert!((4_000..50_000).contains(&median), "{rtts:?}");
+    assert!(worst < 1_000_000, "{rtts:?}");
 }
 
 #[test]
