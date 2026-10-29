@@ -3,7 +3,8 @@
 How two Jackstay daemons find, authenticate and talk to each other (milestone M3). Plan §5.5 says
 what the link must do; this says how. Input sharing (M4) and clipboard sharing (M5) ride on it.
 
-Status: **design, revised after red-team pass 1** (findings and their resolutions at the end).
+Status: **design, revised after red-team pass 1** (findings and their resolutions at the end);
+slice 1 (`proto::link`, `jackstay-net`) built.
 Facts marked *measured* come from `spikes/link-probe` (spikes/README.md); facts marked *source*
 were read in quinn 0.11.12, quinn-proto 0.11.19 and rustls 0.23.46, 2026-10-29.
 
@@ -31,6 +32,7 @@ were read in quinn 0.11.12, quinn-proto 0.11.19 and rustls 0.23.46, 2026-10-29.
 - A machine's **public key** is its SubjectPublicKeyInfo, 44 bytes (*measured*). It is the machine's
   only identity; hostnames are addresses, never trusted. Its **fingerprint**, for display, is the
   first 8 bytes of its SHA-256, in hex.
+- An existing identity file readable by anyone but its owner is made 0600 when read.
 - An identity file that cannot be read or parsed refuses to start the link (the daemon runs on,
   with the link off and the reason in `jackstay status`). It is never silently replaced: that would
   unpair every peer without saying so.
@@ -46,8 +48,10 @@ were read in quinn 0.11.12, quinn-proto 0.11.19 and rustls 0.23.46, 2026-10-29.
 `$XDG_STATE_HOME/jackstay/peers`, written only by the daemon (pairing, unpairing): one record per
 peer with its name, its public key, and its address (`host` or `host:port`, as the user gave it to
 `jackstay pair`). It is written whole (temporary file, sync, rename). A missing file means no
-peers. A corrupt one refuses to start the link, as above. There are at most 8 peers. Our own key
-is never a peer (a cloned disk image would otherwise pair with itself).
+peers. A corrupt one refuses to start the link, as above. There are at most 8 peers; pairing a
+peer already paired replaces its record and keeps its session. Our own key is never a peer: a
+peers file naming it refuses to start the link (a cloned disk image would otherwise pair with
+itself).
 
 ## Transport
 
@@ -62,15 +66,20 @@ is never a peer (a cloned disk image would otherwise pair with itself).
   handshake signature with `verify_tls13_signature_with_raw_key`. TLS 1.2 is refused.
 - **No resumption.** rustls by default keeps a 256-entry server session cache, sends 2 tickets per
   session, and on resumption takes the client's key from the ticket without calling the verifier
-  (*source*: server/builder.rs:113,123, server/tls13.rs:371). An unpaired peer could otherwise
-  resume a session its pairing had allowed. So the server has `NoServerSessionStorage` and
-  `send_tls13_tickets = 0`, and the client `Resumption::disabled()`. Independently, after every
-  handshake, the session's key (`peer_identity`) is checked against the peers file again before a
-  stream is accepted.
+  (*source*: server/builder.rs:113,123, server/tls13.rs:371; *measured*: with the defaults, three
+  reconnections were verified once). An unpaired peer could otherwise resume a session its pairing
+  had allowed. So the server has `NoServerSessionStorage` and `send_tls13_tickets = 0`, and the
+  client `Resumption::disabled()`. Two more things stand in the way, each enough alone: a change
+  of peers rebuilds the server's configuration, and with it an empty session cache; and after
+  every handshake the session's key (`peer_identity`) is checked against the peers again, before a
+  stream is accepted. A test keeps tickets as an attacker would and is refused after unpairing; no
+  single one of the three, removed, makes it fail.
 - An unknown key fails the handshake on both ends with alert 48 (*measured*, both directions),
   before any application byte is read. No message from an unpaired machine is ever decoded.
 - ALPN `jackstay/1`. A peer speaking another version fails the handshake with
-  `no_application_protocol`, which `jackstay status` names as "different Jackstay version".
+  `no_application_protocol`, which `jackstay status` names as "different Jackstay version". A dial
+  that fails in the handshake keeps its reason: a refused key or another version shows as refused,
+  and backs off to the refusal ceiling, not as an endless "dialing".
 - The server name sent is the constant `jackstay`; it means nothing and is not checked.
 
 ### Who dials
@@ -78,8 +87,13 @@ is never a peer (a cloned disk image would otherwise pair with itself).
 Both machines dial each other, and each answers. When both sessions come up, both machines keep
 the one dialed by the **smaller public key** (bytewise) and close the other. Both know both keys,
 so both choose the same session, and a machine that can reach its peer only one way still gets a
-link. A session from a peer that already has one, other than that duplicate, replaces it: the peer
-has restarted, or lost the old one first.
+link. While a session is connected, neither dials. Each daemon start picks a random 64-bit **run
+id**, sent in `Hello`. A new session whose run id differs from the existing session's replaces it
+at once: the peer has restarted, and the old session is dead though not yet reset. A new session
+with the same run id is the duplicate above, but only if the kept session is young (kept less
+than two dial deadlines ago): a peer dials only when it has no session, so a later one means it
+lost its side of ours, and the new session replaces it. After a session is lost, the machine with the larger
+key waits 500 ms before dialing, so the preferred session usually comes up alone.
 
 A session counts as connected only once the peer's `Hello` has arrived. A client whose key the
 server refuses completes its own side of the handshake first (*measured*: the spike had to wait to
@@ -87,28 +101,38 @@ see the refusal), so the dialer writes `Hello` at once, and the answerer replies
 
 ### Liveness
 
-- Every 1 s, stream 0 carries a `Ping`, which the peer answers with a `Pong`. The last round trip
-  shows in `jackstay status`. A session with no packet for **3 s** is **suspect**: the link thread
-  reports it, and in M4 the primary ungrabs and the secondary releases what it injected (below).
-  QUIC's idle timeout is 10 s. After it, the session is **dead** and closed. Ten seconds tolerates
-  a Wi-Fi power-save pause.
+- Status counts, per peer, the sessions kept since the link started (`connects`): a number that
+  keeps rising is a link that keeps dropping.
+- Each side sends a `Ping { seq, interval }` on stream 0 every `interval` milliseconds, which the
+  peer answers with `Pong { seq }`. The last round trip shows in `jackstay status`. Each ping
+  states the interval to the next, so the receiver knows when to worry: no message on stream 0
+  for **3 of the peer's intervals**, or our oldest ping since we last heard anything unanswered
+  for **3 of our own**, makes the session **suspect**. The second rule is what lets an active side
+  notice an idle peer's silence in 300 ms. The link thread reports it, and in M4 the
+  primary ungrabs and the secondary releases what it injected (below). The interval is 1 s when
+  idle, so suspect at 3 s. QUIC's idle timeout is 10 s; after it the session is **dead** and
+  closed. Ten seconds tolerates a Wi-Fi power-save pause.
 - **Input heartbeat (M3 builds it, M4 uses it).** While a session is *active* (M4: it is the
-  secondary the primary is grabbing for), the ping interval drops to 100 ms. A side that hears
-  nothing for 300 ms acts. The secondary releases every key and button it injected. The primary
+  secondary the primary is grabbing for), both sides' ping interval drops to 100 ms, and the first
+  such ping is sent at once. A side that hears nothing for 300 ms acts. The secondary releases every key and button it injected. The primary
   ungrabs and returns the pointer to its own screen. Silence is detected on both ends, so the
   user's keyboard is never feeding a dead session for longer than 300 ms. A session that closes or
   is replaced does the same at once, without waiting.
 - A restarted peer resets the old session at once (Identity, above).
-- **Dialing.** Each dial attempt has its own deadline of 1.5 s, independent of the 10 s idle
+- **Dialing.** Resolving the name is bounded by 1.5 s; if it stalls (DNS, mDNS), the last
+  addresses it resolved to are dialed. Each dial attempt has its own deadline of 1.5 s, independent of the 10 s idle
   timeout, which otherwise also bounds a handshake to a black-holed address (*source*:
   connection/mod.rs:323). After a failure the next attempt comes 100 ms later, doubling to at most
   2 s. A refused handshake (a key the peer does not know, another version) doubles to at most 60 s
-  instead. The name is resolved again before each attempt, on a blocking-pool thread
-  (getaddrinfo can stall), and each resolved address is tried in turn.
+  instead. The name is resolved again before each attempt, on a blocking-pool thread, and each
+  resolved address is tried in turn: an unreachable address listed first costs each attempt its
+  1.5 s.
 - **Resume from suspend** is seen as a jump between `CLOCK_BOOTTIME` and `CLOCK_MONOTONIC`, checked
   every second. It resets the backoff and redials at once. Network changes are not watched
   (netlink): with 1.5 s attempts and a 2 s ceiling, a link returns within about 4 s of the
-  network.
+  network, plus 1.5 s for each unreachable address the name resolves to first.
+- While the port cannot be bound, nothing is dialed, and the link waits for the bind retry
+  without waking for the dials it cannot make.
 
 ### Streams
 
@@ -121,17 +145,18 @@ see the refusal), so the dialer writes `Hello` at once, and the answerer replies
   targets up to 64 KiB). Each announcement and each transfer has its own stream, and the
   clipboard's unacknowledged bytes are kept well below the connection's send window, so stream 0
   always has room.
-- The first message on stream 0, both ways, is `Hello { version, name }`: the protocol version
-  (it must equal ours, beyond the ALPN check) and the machine's hostname. The name is for display
+- The first message on stream 0, both ways, is `Hello { version, run, name }`: the protocol
+  version (it must equal ours, beyond the ALPN check), the run id, and the machine's hostname. The name is for display
   only, and is shown with control and non-printing characters replaced, as sources are
   (docs/daemon.md, "Control socket").
 
 ### Unauthenticated packets
 
 Anyone on the LAN can start a handshake, and each costs a key exchange and a signature on the link
-thread that input will use. So: `max_incoming` is 16. Accepted `Incoming`s are limited by a token
-bucket (10 per second, burst 10), and beyond it they are `ignore()`d. An address not yet validated
-is sent a `retry()`, which costs a forged source address a round trip it cannot complete. The
+thread that input will use. So: `max_incoming` is 16. An address not yet validated is first sent
+a `retry()`, which costs a forged source address a round trip it cannot complete, and spends
+nothing. Only validated `Incoming`s are counted against a token bucket (10 per second, burst 10);
+beyond it they are `ignore()`d. So forged packets cannot use up the handshakes real peers need. The
 harness measures ping round trips while a stranger floods the port.
 
 ## Pairing
@@ -142,11 +167,16 @@ until it ends. The main endpoint and its verifier are never relaxed. Pairing has
 1. The daemon opens a **pairing endpoint** on `link.port + 1`, with ALPN `jackstay-pair/1`, whose
    verifier accepts any key but our own. It still checks the handshake signature. It has no
    resumption, as above.
-2. Each machine dials the other's pairing endpoint once, at HOST's addresses. Each accepts **one**
-   incoming handshake, and only from an address HOST resolves to. Any other handshake attempt
-   ends pairing with nothing recorded. That includes a second one, or one from another address,
-   whether or not it completes, counted at `Incoming`, before any work. When both sessions are up,
-   the one dialed by the smaller key is kept, as above.
+2. Each machine dials the other's pairing endpoint, at HOST's addresses, until a session is up.
+   Each accepts **one** incoming handshake, and only from an address HOST resolves to. Any other
+   handshake attempt ends pairing with nothing recorded: one from another address, or a second one
+   while the first is in progress or completed, counted at `Incoming`, before any work. One that
+   never completes frees its place: an abandoned dial's closing packet arrives as a handshake, and
+   would otherwise make the other machine's real one a "second attempt". This gains an attacker
+   nothing, since the code depends on nonces exchanged only after a completed handshake (step 3).
+   Of the sessions that come up, the smaller key keeps the first and commits on it; the larger key
+   follows: it keeps the session the smaller key's `Commit` arrives on. Any other first message
+   on a session before that choice breaks the protocol and ends pairing.
 3. **Commit, then reveal.** Each side picks a random 32-byte nonce and sends `Commit
    { SHA-256(nonce) }`. Each sends `Reveal { nonce }` only after it has received the peer's
    `Commit`, and checks that the peer's nonce matches its commitment. The code is the first 4 bytes
@@ -157,6 +187,7 @@ until it ends. The main endpoint and its verifier are never relaxed. Pairing has
    exporter's code matched its other session. With committed nonces, each code depends on a value
    the attacker learns only after it is bound to its own. So one attempt matches with probability
    10⁻⁶, and step 2 allows one attempt.
+   A reveal that does not match its commitment, or one before any commitment, ends pairing.
 4. Each CLI shows the peer's name, its fingerprint and the code, and asks `yes/no`. A "yes" sends
    `Confirm`. A machine records the peer when it has both its own "yes" and the peer's `Confirm`,
    then sends `Bye`, closes the pairing endpoint, and dials the normal session.
@@ -180,6 +211,8 @@ session.
   There is one pairing client at a time. `Unpair { peer }` is an ordinary request. `Status` gains
   the link: the port, our fingerprint, and per peer its name, fingerprint, state (connected,
   dialing, suspect, refused: unknown key or version) and last round trip.
+- **Status** goes out when anything but a round trip changes, and with the round trip once a
+  second: an active session measures ten a second.
 - **Configuration** gains `link.port` (1024–65534; pairing uses the next port) and `link.enabled`
   (default true). With no peers the endpoint is still bound, so a peer can be paired.
 - A failure to bind the port is reported in status and the journal and retried every 10 s. The
@@ -201,7 +234,21 @@ rustls-webpki) and BSD-3-Clause (subtle), both GPL-compatible. Each becomes a na
 
 ## Testing
 
-- **In-process, `jackstay-net`:**
+- **In-process, `jackstay-net`** (built; `crates/net/tests/link.rs`, `files.rs`). Each control
+  below was proven by planting its removal and watching its test fail: derived reset keys, the
+  duplicate rule (with neither machine deferring, four rounds), the second-handshake count (a
+  second handshake with the *same* key, from a copy of a machine's disk, since a different key is
+  caught by the same-machine check first), the three-interval suspicion, and the refusal kept from
+  a failed dial. One plant survives, accepted: without the run-id rule, a restarted peer is still
+  linked again within 2 s, because on loopback the old session is reset by the next packet before
+  the restarted peer's deferred dial arrives; the rule saves at most a second where no packet
+  draws a reset first. Nor does turning server resumption back on make the ticket test fail:
+  the configuration rebuilt on unpairing and the check after the handshake each refuse alone.
+  After the code review (pass 2 below), 13 more plants, each caught: the bind-wait spin, the
+  active side's own-ping suspicion, the peer-interval suspicion (against an active peer), a
+  reveal not checked against its commitment, an early reveal ignored, the pairing address check,
+  re-pairing replacing a slot, our own key as a peer, and status sent on every round trip.
+  The planned cases:
   - two endpoints on loopback, pinned both ways;
   - an unknown key either way, refused;
   - a resumption attempt after unpairing, refused;
@@ -270,3 +317,23 @@ those sources before being accepted.
 | 12 | A dial "connects" before the server's refusal arrives | Accepted. Connected only on the peer's `Hello`; the dialer writes first |
 | 13 | Harness misses loss, reordering, rebinding, MTU, suspend, MITM, flood | Accepted. All added; stronger pass conditions |
 | 14 | Refused peers redialed every 2 s; peer-chosen names; spike label mismatch; own key; watchdog blind to the link thread | Accepted. 60 s backoff for refusals; names sanitized, fingerprints shown, unpair by fingerprint; label fixed in this doc (the spike's label was a placeholder); own key refused; watchdog fed only while the link thread reports in. ACK frequency to be measured |
+
+### Pass 2 (code review of slice 1), 2026-10-29
+
+A separately briefed reviewer, read-only, on the code against this design.
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | The link thread spins while the port cannot be bound (dials due but impossible) | Fixed: no dial wake-ups while unbound; a skipped dial moves on. Test measures the child's CPU time |
+| 2 | An active side waits 3 of an idle peer's intervals (3 s) to suspect it | Fixed: also suspect after 3 of our own unanswered intervals. Mirror test |
+| 3 | The token bucket was charged before `retry()`, so forged sources starve real peers | Fixed: Retry first, only validated handshakes counted. Flood case in the two-daemon harness |
+| 4 | Pairing's commitment check, early reveal and address check untested | Fixed: a test peer that breaks the protocol (wrong reveal, early reveal, both key orders; another source address) |
+| 5 | A late same-run session from the "wrong" dialer was closed and a dead one kept | Fixed: the duplicate rule applies only while the kept session is young. One-way loss case in the harness |
+| 6 | Name resolution unbounded; unreachable addresses lengthen recovery | Fixed: 1.5 s bound with the last good answer kept; the recovery bound above corrected |
+| 7 | Child processes leak when a test fails | Fixed: a guard kills on drop; children exit when their standard input closes |
+| 8 | Dials while a session awaits `Hello`; re-pairing replaced the slot | Fixed: no dial with a session pending; re-pairing keeps the slot. Test |
+| 9 | An abandoned dial's closing packet could take pairing's one incoming place | Fixed: a handshake that never completes frees the place (step 2) |
+| 10 | Round trips longer than the ping interval never measured | Fixed: a ring of the last 16 pings |
+| 11 | Own key not refused on load; identity mode; doc's pairing choice; `TooManyPeers` on re-pair | Fixed: refused at start; mode made 0600; doc corrected; limit checked when the peer is recorded |
+| 12 | Status sent on every round trip (ten a second when active) | Fixed: round trips go out on the 1 s tick. Test counts events |
+| 13 | Ports by bind-then-release; tight bounds | Fixed: a per-process port range, never reused; bounds widened |

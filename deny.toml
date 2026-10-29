@@ -37,3 +37,22 @@ allow = ["Unicode-3.0"]
 [[licenses.exceptions]]
 crate = "target-lexicon"
 allow = ["Apache-2.0 WITH LLVM-exception"]
+
+# The link's TLS (docs/link.md, "Dependencies this adds"): ring and the crates around it are under
+# ISC, and subtle under BSD-3-Clause; both permissive and GPL-compatible. Named here, crate by
+# crate, rather than allowed for the whole graph.
+[[licenses.exceptions]]
+crate = "ring"
+allow = ["ISC"]
+
+[[licenses.exceptions]]
+crate = "untrusted"
+allow = ["ISC"]
+
+[[licenses.exceptions]]
+crate = "rustls-webpki"
+allow = ["ISC"]
+
+[[licenses.exceptions]]
+crate = "subtle"
+allow = ["BSD-3-Clause"]

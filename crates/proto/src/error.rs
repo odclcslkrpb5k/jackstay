@@ -56,6 +56,10 @@ pub enum LimitError {
     },
     /// A thumbnail's sides out of range, larger than its image, or its pixels the wrong length.
     BadThumbnail,
+    /// A ping interval outside the range the link allows.
+    BadInterval {
+        interval_ms: u16,
+    },
 }
 
 impl From<LimitError> for DecodeError {
@@ -96,6 +100,9 @@ impl fmt::Display for LimitError {
             LimitError::TooManyEntries { count } => write!(f, "{count} entries"),
             LimitError::UnknownCode { code } => write!(f, "unknown code {code}"),
             LimitError::BadThumbnail => write!(f, "thumbnail size and pixels disagree"),
+            LimitError::BadInterval { interval_ms } => {
+                write!(f, "ping interval of {interval_ms} ms")
+            }
         }
     }
 }

@@ -14,3 +14,7 @@ and not held to the gate; each records its question, how it was run, and its ans
   handshake with alert 48 on both ends. The exporter is equal on both ends and differs per session.
   A 16-byte message's round trip on one stream over loopback: p50 26 µs, p99 49 µs, max 93 µs
   (19,000 samples).
+  Resumption, measured 2026-10-29 with a variant of the same probe: with rustls's default server
+  session cache and tickets, a client reconnecting three times was checked by the server's
+  verifier once. Resumed sessions skip the verifier, as docs/link.md says; the link turns
+  resumption off.
