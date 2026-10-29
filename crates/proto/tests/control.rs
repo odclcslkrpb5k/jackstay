@@ -1,7 +1,8 @@
 use jackstay_proto::control::{
-    Error, Kinds, MAX_LIST, MAX_PREVIEW_CHARS, MAX_SOURCE_LEN, MAX_THUMBNAIL_HEIGHT,
-    MAX_THUMBNAIL_WIDTH, Request, Response, Status, Summary, Thumb, Thumbnail, VERSION,
-    decode_request, decode_response, encode_request, encode_response, preview, printable,
+    Error, Kinds, LinkStatus, MAX_LIST, MAX_NAME_FIELD, MAX_PEERS, MAX_PREVIEW_CHARS,
+    MAX_SOURCE_LEN, MAX_THUMBNAIL_HEIGHT, MAX_THUMBNAIL_WIDTH, PairReason, PeerState, PeerSummary,
+    Request, Response, Status, Summary, Thumb, Thumbnail, VERSION, decode_request, decode_response,
+    encode_request, encode_response, preview, printable,
 };
 use jackstay_proto::{DecodeError, LimitError};
 use proptest::prelude::*;
@@ -16,7 +17,7 @@ fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
 
 fn request_bytes(r: &Request) -> Vec<u8> {
     let mut out = Vec::new();
-    encode_request(r, &mut out);
+    encode_request(r, &mut out).unwrap_or_else(|e| panic!("{e}"));
     out
 }
 
@@ -41,7 +42,7 @@ fn summary(id: u64) -> Summary {
 
 #[test]
 fn the_layout_is_as_documented() {
-    assert_eq!(request_bytes(&Request::Hello { version: VERSION }), [0, 0, 0, 2, 1, 0, 2]);
+    assert_eq!(request_bytes(&Request::Hello { version: VERSION }), [0, 0, 0, 2, 1, 0, 3]);
     assert_eq!(request_bytes(&Request::Clear), [0, 0, 0, 0, 7]);
     assert_eq!(
         request_bytes(&Request::Pin { id: 258, pinned: true }),
@@ -91,7 +92,7 @@ fn every_request_and_response_round_trips() {
     ];
     for r in requests {
         let bytes = request_bytes(&r);
-        assert_eq!(decode_request(&bytes), Ok(Some((r, bytes.len()))), "{r:?}");
+        assert_eq!(decode_request(&bytes), Ok(Some((r.clone(), bytes.len()))), "{r:?}");
     }
     let errors = [
         Error::UnsupportedVersion,
@@ -138,6 +139,7 @@ fn every_request_and_response_round_trips() {
             thumbnail: Thumb::Ready(thumbnail(MAX_THUMBNAIL_WIDTH, MAX_THUMBNAIL_HEIGHT)),
         },
     ];
+
     responses.extend(errors.map(Response::Error));
     for r in responses {
         let bytes = response_bytes(&r);
@@ -166,8 +168,10 @@ fn a_partial_frame_waits_and_a_bad_one_is_refused() {
         decode_request(&[0, 16, 0, 1, 2]),
         Err(DecodeError::FrameTooLarge { len: 0x0010_0001 })
     );
-    assert_eq!(decode_request(&[0, 0, 0, 17]), Err(DecodeError::FrameTooLarge { len: 17 }));
-    assert_eq!(decode_request(&[0, 0, 0, 16, 2]), Ok(None), "16 bytes is waited for");
+    // The cap is a name and its length, 257 bytes: refused from the length alone, before the
+    // kind has arrived.
+    assert_eq!(decode_request(&[0, 0, 1, 2]), Err(DecodeError::FrameTooLarge { len: 258 }));
+    assert_eq!(decode_request(&[0, 0, 1, 1, 13]), Ok(None), "257 bytes is waited for");
     assert_eq!(
         decode_response(&[0, 16, 0, 1, 65]),
         Err(DecodeError::FrameTooLarge { len: 0x0010_0001 })
@@ -183,8 +187,8 @@ fn a_partial_frame_waits_and_a_bad_one_is_refused() {
         Err(DecodeError::Limit(LimitError::UnknownCode { code: 0 }))
     );
     assert_eq!(
-        decode_response(&[0, 0, 0, 1, 66, 9]),
-        Err(DecodeError::Limit(LimitError::UnknownCode { code: 9 }))
+        decode_response(&[0, 0, 0, 1, 66, 14]),
+        Err(DecodeError::Limit(LimitError::UnknownCode { code: 14 }))
     );
     // Two frames in one buffer: the first is decoded and its length reported.
     let mut two = request_bytes(&Request::Status);
@@ -367,6 +371,11 @@ fn every_error_has_its_own_explanation() {
         Error::ImportFailed,
         Error::UnsupportedVersion,
         Error::Internal,
+        Error::LinkOff,
+        Error::NoSuchPeer,
+        Error::AmbiguousPeer,
+        Error::NotPairing,
+        Error::SaveFailed,
     ];
     let said: std::collections::HashSet<&str> = all.iter().map(|e| e.explain()).collect();
     assert_eq!(said.len(), all.len());
@@ -461,5 +470,154 @@ proptest! {
         let r = Response::Thumbnail { id, thumbnail: Thumb::Ready(t) };
         let bytes = response_bytes(&r);
         prop_assert_eq!(decode_response(&bytes), Ok(Some((r, bytes.len()))));
+    }
+}
+
+#[test]
+fn link_limits_hold_both_ways() {
+    // A name one byte too long is not sent, and refused from the header if it is.
+    let mut out = Vec::new();
+    let long = Request::Pair { host: "h".repeat(MAX_NAME_FIELD + 1) };
+    assert_eq!(
+        encode_request(&long, &mut out),
+        Err(LimitError::TextTooLong { len: MAX_NAME_FIELD + 1 })
+    );
+    assert_eq!(out, Vec::<u8>::new());
+    let len = u32::try_from(2 + MAX_NAME_FIELD + 1).unwrap_or(0);
+    let mut header = len.to_be_bytes().to_vec();
+    header.push(13);
+    assert_eq!(decode_request(&header), Err(DecodeError::FrameTooLarge { len }));
+    // Too many peers.
+    let peer = PeerSummary {
+        name: String::new(),
+        fingerprint: String::new(),
+        address: String::new(),
+        state: PeerState::Dialing,
+        rtt_us: None,
+        connects: 0,
+    };
+    let many =
+        Response::Link(LinkStatus { peers: vec![peer; MAX_PEERS + 1], ..LinkStatus::default() });
+    let mut out = Vec::new();
+    assert_eq!(
+        encode_response(&many, &mut out),
+        Err(LimitError::TooManyEntries { count: MAX_PEERS + 1 })
+    );
+    // An unknown peer state or pairing reason.
+    let status = response_bytes(&Response::Link(LinkStatus {
+        peers: vec![peer_with(PeerState::RefusedVersion)],
+        ..LinkStatus::default()
+    }));
+    let at = status.iter().rposition(|&b| b == 4).unwrap_or(0);
+    let mut bad = status.clone();
+    bad[at] = 5;
+    assert_eq!(decode_response(&bad), Err(DecodeError::Limit(LimitError::UnknownCode { code: 5 })));
+    let failed = response_bytes(&Response::PairFailed {
+        reason: PairReason::LinkOff,
+        detail: String::new(),
+    });
+    let mut bad = failed.clone();
+    bad[5] = 13;
+    assert_eq!(
+        decode_response(&bad),
+        Err(DecodeError::Limit(LimitError::UnknownCode { code: 13 }))
+    );
+}
+
+fn peer_with(state: PeerState) -> PeerSummary {
+    PeerSummary {
+        name: String::new(),
+        fingerprint: String::new(),
+        address: String::new(),
+        state,
+        rtt_us: None,
+        connects: 0,
+    }
+}
+
+#[test]
+fn every_link_request_and_response_round_trips() {
+    let requests = [
+        Request::Link,
+        Request::Pair { host: "xiphos".into() },
+        Request::Pair { host: "h".repeat(MAX_NAME_FIELD) },
+        Request::PairAnswer { yes: true },
+        Request::PairAnswer { yes: false },
+        Request::Unpair { peer: "fedcba9876543210".into() },
+    ];
+    for r in requests {
+        let bytes = request_bytes(&r);
+        assert_eq!(decode_request(&bytes), Ok(Some((r.clone(), bytes.len()))), "{r:?}");
+    }
+    let mut responses: Vec<Response> = [
+        Error::LinkOff,
+        Error::NoSuchPeer,
+        Error::AmbiguousPeer,
+        Error::NotPairing,
+        Error::SaveFailed,
+    ]
+    .into_iter()
+    .map(Response::Error)
+    .collect();
+    responses.extend([
+        Response::Link(LinkStatus::default()),
+        Response::Link(LinkStatus {
+            off: None,
+            port: Some(24810),
+            bind_error: Some("in use".into()),
+            fingerprint: "0123456789abcdef".into(),
+            pairing: true,
+            peers: vec![
+                PeerSummary {
+                    name: "xiphos".into(),
+                    fingerprint: "fedcba9876543210".into(),
+                    address: "xiphos:24900".into(),
+                    state: PeerState::Connected,
+                    rtt_us: Some(u32::MAX),
+                    connects: 7,
+                };
+                MAX_PEERS
+            ],
+        }),
+        Response::PairCode { name: "x".into(), fingerprint: "f".into(), code: "000123".into() },
+        Response::Paired { name: "x".into(), fingerprint: "f".into() },
+    ]);
+    for state in [
+        PeerState::Connected,
+        PeerState::Suspect,
+        PeerState::Dialing,
+        PeerState::RefusedKey,
+        PeerState::RefusedVersion,
+    ] {
+        let peer = PeerSummary {
+            name: String::new(),
+            fingerprint: String::new(),
+            address: String::new(),
+            state,
+            rtt_us: None,
+            connects: 0,
+        };
+        responses.push(Response::Link(LinkStatus { peers: vec![peer], ..LinkStatus::default() }));
+    }
+    for reason in [
+        PairReason::Busy,
+        PairReason::NoAddress,
+        PairReason::Bind,
+        PairReason::Timeout,
+        PairReason::Declined,
+        PairReason::PeerEnded,
+        PairReason::SecondAttempt,
+        PairReason::BadReveal,
+        PairReason::TooManyPeers,
+        PairReason::Save,
+        PairReason::Cancelled,
+        PairReason::LinkOff,
+        PairReason::BadAddress,
+    ] {
+        responses.push(Response::PairFailed { reason, detail: "why".into() });
+    }
+    for r in responses {
+        let bytes = response_bytes(&r);
+        assert_eq!(decode_response(&bytes), Ok(Some((r.clone(), bytes.len()))), "{r:?}");
     }
 }

@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
-use jackstay_proto::control::{Error, Kinds, Request, Response, Summary, printable};
+use jackstay_proto::control::{
+    Error, Kinds, LinkStatus, PeerState, Request, Response, Summary, printable,
+};
 use jackstayd::client::{Client, ClientError};
 use jackstayd::ui_socket::{self, Ask};
 
@@ -22,7 +24,10 @@ commands:
   clear-history              delete every unpinned entry and clear the clipboard
   import-clipman [--remove]  import xfce4-clipman's history; --remove deletes its files after
   popup                      show the history popup at the pointer (for a hotkey; needs jackstay-ui)
-  settings                   open the settings window (needs jackstay-ui)";
+  settings                   open the settings window (needs jackstay-ui)
+  peers                      the link: this machine's fingerprint and each paired machine's state
+  pair HOST                  pair with the machine at HOST (run it there too, naming this one)
+  unpair NAME|FINGERPRINT    forget a paired machine";
 
 /// Exit statuses: 0 done, 1 refused by the daemon, 2 bad usage, 3 the daemon (or, for `popup` and
 /// `settings`, jackstay-ui) unreachable.
@@ -32,6 +37,8 @@ const UNREACHABLE: u8 = 3;
 
 /// How many entries one page of `list --all` asks for.
 const PAGE: u32 = 500;
+/// Pairing waits up to two minutes for the other machine and the user (docs/link.md).
+const PAIRING_WAIT: Duration = Duration::from_secs(150);
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -79,7 +86,10 @@ fn id(arg: Option<&OsString>) -> Result<u64, Failure> {
 fn exit_for(e: &ClientError) -> u8 {
     match e {
         ClientError::Connect(_) | ClientError::Io(_) | ClientError::Closed => UNREACHABLE,
-        ClientError::Protocol(_) | ClientError::Version | ClientError::Refused => REFUSED,
+        ClientError::Protocol(_)
+        | ClientError::Version
+        | ClientError::Refused
+        | ClientError::Request(_) => REFUSED,
     }
 }
 
@@ -125,6 +135,9 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
         ("clear-history", []) => Request::ClearHistory,
         ("import-clipman", []) => Request::ImportClipman { remove: false },
         ("import-clipman", [flag]) if flag == "--remove" => Request::ImportClipman { remove: true },
+        ("peers", []) => Request::Link,
+        ("pair", [host]) => Request::Pair { host: text(host)? },
+        ("unpair", [peer]) => Request::Unpair { peer: text(peer)? },
         ("help" | "--help" | "-h", []) => {
             println!("{USAGE}");
             return Ok(());
@@ -157,8 +170,108 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
     if all {
         return list_all(&mut client);
     }
+    if let Request::Pair { host } = &request {
+        return pair(&mut client, host);
+    }
     let response = client.ask(&request).map_err(|e| failed(&e))?;
-    show(&request, response)
+    show(&request, response)?;
+    if request == Request::Status {
+        // The link's line too, for a status that says everything.
+        if let Ok(Response::Link(l)) = client.ask(&Request::Link) {
+            print_link(&l, false);
+        }
+    }
+    Ok(())
+}
+
+fn text(arg: &OsString) -> Result<String, Failure> {
+    arg.to_str().map(str::to_owned).ok_or_else(|| usage("arguments must be UTF-8"))
+}
+
+/// Pairs: starts it, shows the code when it comes, asks, and waits for the end.
+fn pair(client: &mut Client, host: &str) -> Result<(), Failure> {
+    client.set_timeout(PAIRING_WAIT).map_err(|e| failed(&e))?;
+    client.send(&Request::Pair { host: host.to_owned() }).map_err(|e| failed(&e))?;
+    loop {
+        match client.receive().map_err(|e| failed(&e))? {
+            Response::Ok => {}
+            Response::PairCode { name, fingerprint, code } => {
+                // Every field cleaned, though the daemon made them: what reaches the terminal never
+                // depends on what was sent.
+                let (fingerprint, code) = (printable(&fingerprint), printable(&code));
+                println!(
+                    "{} (fingerprint {fingerprint}) shows the code {} {}.",
+                    printable(&name),
+                    code.get(..3).unwrap_or(&code),
+                    code.get(3..).unwrap_or_default()
+                );
+                print!("Does the other machine show the same code? [y/N] ");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                let mut answer = String::new();
+                // No terminal, or end of input: no.
+                let _ = std::io::stdin().read_line(&mut answer);
+                let yes = matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES");
+                client.send(&Request::PairAnswer { yes }).map_err(|e| failed(&e))?;
+                if yes {
+                    println!("Waiting for the other machine to answer…");
+                }
+            }
+            Response::Paired { name, fingerprint } => {
+                println!("Paired with {} ({}).", printable(&name), printable(&fingerprint));
+                return Ok(());
+            }
+            Response::PairFailed { reason, detail } => {
+                let detail = if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", printable(&detail))
+                };
+                return Err((REFUSED, format!("pairing failed: {}{detail}", reason.explain())));
+            }
+            Response::Error(e) => return Err(refused(e)),
+            _ => return Err((REFUSED, "jackstayd sent an unexpected response".to_owned())),
+        }
+    }
+}
+
+fn print_link(l: &LinkStatus, full: bool) {
+    if let Some(why) = &l.off {
+        println!("link: off ({})", printable(why));
+        return;
+    }
+    match (l.port, &l.bind_error) {
+        (Some(port), _) => {
+            println!("link: UDP port {port}, this machine {}", printable(&l.fingerprint));
+        }
+        (None, Some(why)) => println!("link: port not open ({}), retrying", printable(why)),
+        (None, None) => println!("link: starting"),
+    }
+    if l.pairing {
+        println!("  pairing is running");
+    }
+    if l.peers.is_empty() {
+        println!("  no paired machines (jackstay pair HOST)");
+    }
+    for p in &l.peers {
+        let state = match p.state {
+            PeerState::Connected => "connected",
+            PeerState::Suspect => "connected, silent",
+            PeerState::Dialing => "not connected",
+            PeerState::RefusedKey => "refused: it does not know this machine",
+            PeerState::RefusedVersion => "refused: it runs another version",
+        };
+        let rtt =
+            p.rtt_us.map_or_else(String::new, |us| format!(", {}.{:03} ms", us / 1000, us % 1000));
+        println!("  {} {state}{rtt}", printable(&p.name));
+        if full {
+            println!(
+                "    fingerprint {}, address {}, sessions {}",
+                printable(&p.fingerprint),
+                printable(&p.address),
+                p.connects
+            );
+        }
+    }
 }
 
 /// Entries are listed by offset, newest first: one copied or deleted while `--all` pages through
@@ -214,12 +327,17 @@ fn show(request: &Request, response: Response) -> Result<(), Failure> {
             }
             Ok(())
         }
+        (Request::Link, Response::Link(l)) => {
+            print_link(&l, true);
+            Ok(())
+        }
         (
             Request::Select { .. }
             | Request::Delete { .. }
             | Request::Pin { .. }
             | Request::Clear
-            | Request::ClearHistory,
+            | Request::ClearHistory
+            | Request::Unpair { .. },
             Response::Ok,
         ) => Ok(()),
         _ => Err((REFUSED, "jackstayd sent an unexpected response".to_owned())),

@@ -10,17 +10,33 @@
 //!
 //! Version 2 added [`Request::Thumbnail`]: an image entry's picture, decoded by the daemon, so the
 //! UI never decodes clipboard bytes (docs/ui.md, "Thumbnails").
+//!
+//! Version 3 added the link (docs/link.md, "In the daemon"): [`Request::Link`] for its state, and
+//! pairing as a flow. After [`Request::Pair`] is answered `Ok`, the daemon sends that client
+//! [`Response::PairCode`], then [`Response::Paired`] or [`Response::PairFailed`], whenever they
+//! happen; the client answers the code with [`Request::PairAnswer`], an ordinary request. Pairing
+//! ends if the client disconnects.
 
 use crate::{DecodeError, FRAME_HEADER_LEN, LimitError, MAX_PAYLOAD_LEN, Reader};
 
 /// The control protocol version this code speaks.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
+/// The oldest version the daemon still answers: each version adds to the last, so a client of an
+/// older one (a UI still running across an upgrade) keeps working.
+pub const OLDEST_VERSION: u16 = 2;
 /// The most entries one [`Response::List`] carries; ask again with an offset for more.
 pub const MAX_LIST: usize = 500;
 /// The longest preview, in characters.
 pub const MAX_PREVIEW_CHARS: usize = 200;
-/// The longest request payload; every request is far shorter.
-pub const MAX_REQUEST_PAYLOAD: u32 = 16;
+/// The longest request payload: a host or peer name ([`MAX_NAME_FIELD`]) and its length. Refused
+/// from the header.
+pub const MAX_REQUEST_PAYLOAD: u32 = 2 + 255;
+/// The longest host given to [`Request::Pair`], or peer to [`Request::Unpair`], in bytes.
+pub const MAX_NAME_FIELD: usize = 255;
+/// The most peers a [`LinkStatus`] lists.
+pub const MAX_PEERS: usize = 16;
+/// The longest text of a [`LinkStatus`] or [`Response::PairFailed`] field, in bytes.
+pub const MAX_LINK_TEXT: usize = 512;
 /// The longest source name, in bytes.
 pub const MAX_SOURCE_LEN: usize = 256;
 /// The widest thumbnail, in pixels.
@@ -28,7 +44,7 @@ pub const MAX_THUMBNAIL_WIDTH: u16 = 128;
 /// The tallest thumbnail, in pixels.
 pub const MAX_THUMBNAIL_HEIGHT: u16 = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     Hello {
         version: u16,
@@ -62,6 +78,20 @@ pub enum Request {
     Thumbnail {
         id: u64,
     },
+    /// The link's state ([`Response::Link`]).
+    Link,
+    /// Starts pairing with the machine at `host` (`host` or `host:port`).
+    Pair {
+        host: String,
+    },
+    /// The user's answer to [`Response::PairCode`].
+    PairAnswer {
+        yes: bool,
+    },
+    /// Forgets a paired machine, named by its name or its fingerprint.
+    Unpair {
+        peer: String,
+    },
 }
 
 /// Why a request failed. Clients branch on the code (ER-8).
@@ -80,6 +110,16 @@ pub enum Error {
     ImportFailed,
     /// A fault in the daemon; it is in the journal.
     Internal,
+    /// The link is off: disabled in the configuration, or it could not start.
+    LinkOff,
+    /// No paired machine has that name or fingerprint.
+    NoSuchPeer,
+    /// More than one paired machine has that name: use the fingerprint.
+    AmbiguousPeer,
+    /// Not pairing, or pairing from another client.
+    NotPairing,
+    /// The peers file could not be saved; nothing changed.
+    SaveFailed,
 }
 
 impl Error {
@@ -98,6 +138,13 @@ impl Error {
             Error::ImportFailed => "clipman's history could not be read or removed",
             Error::UnsupportedVersion | Error::BadSequence => "jackstayd refused the request",
             Error::Internal => "jackstayd failed (see the journal)",
+            Error::LinkOff => "the link is off (see `jackstay peers`)",
+            Error::NoSuchPeer => "no paired machine by that name or fingerprint",
+            Error::AmbiguousPeer => {
+                "more than one paired machine has that name; give its fingerprint"
+            }
+            Error::NotPairing => "not pairing",
+            Error::SaveFailed => "the peers file could not be saved; nothing changed",
         }
     }
 }
@@ -111,6 +158,87 @@ pub struct Status {
     pub owns_clipboard: bool,
     /// Whether the last save failed, so the history on disk is behind.
     pub store_failing: bool,
+}
+
+/// The link, as `jackstay peers` and `jackstay status` show it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LinkStatus {
+    /// Why the link is not running, if it is not.
+    pub off: Option<String>,
+    /// The UDP port it listens on, once bound.
+    pub port: Option<u16>,
+    /// Why the port could not be bound (retried).
+    pub bind_error: Option<String>,
+    /// This machine's fingerprint.
+    pub fingerprint: String,
+    pub pairing: bool,
+    pub peers: Vec<PeerSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerSummary {
+    pub name: String,
+    pub fingerprint: String,
+    pub address: String,
+    pub state: PeerState,
+    /// The last round trip, in microseconds.
+    pub rtt_us: Option<u32>,
+    /// Sessions kept since the link started.
+    pub connects: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerState {
+    Connected,
+    Suspect,
+    Dialing,
+    /// It does not know our key, or showed one we do not know.
+    RefusedKey,
+    /// It runs another version of Jackstay.
+    RefusedVersion,
+}
+
+/// Why pairing ended without recording a machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairReason {
+    Busy,
+    NoAddress,
+    Bind,
+    Timeout,
+    Declined,
+    PeerEnded,
+    SecondAttempt,
+    BadReveal,
+    TooManyPeers,
+    Save,
+    Cancelled,
+    LinkOff,
+    /// What was given is not a host, `host:port` or IP address.
+    BadAddress,
+}
+
+impl PairReason {
+    /// What the reason means to a person.
+    #[must_use]
+    pub fn explain(self) -> &'static str {
+        match self {
+            PairReason::Busy => "pairing is already running",
+            PairReason::NoAddress => "the address resolves to nothing",
+            PairReason::Bind => "the pairing port could not be opened",
+            PairReason::Timeout => "the other machine did not pair, or no answer came, in time",
+            PairReason::Declined => "declined here",
+            PairReason::PeerEnded => "the other machine ended pairing",
+            PairReason::SecondAttempt => {
+                "a second pairing attempt arrived; pairing stopped in case it is an attack"
+            }
+            PairReason::BadReveal => "the other machine broke the pairing protocol",
+            PairReason::TooManyPeers => "already paired with the most machines allowed",
+            PairReason::Save => "the peers file could not be saved",
+            PairReason::Cancelled => "cancelled",
+            PairReason::LinkOff => "the link is off",
+            PairReason::BadAddress => "that is not a host name, host:port or IP address",
+        }
+    }
 }
 
 /// What kinds of content an entry holds, as bits.
@@ -163,6 +291,22 @@ pub enum Response {
     Thumbnail {
         id: u64,
         thumbnail: Thumb,
+    },
+    Link(LinkStatus),
+    /// Pairing reached the other machine: show the code and its fingerprint, and ask.
+    PairCode {
+        name: String,
+        fingerprint: String,
+        code: String,
+    },
+    Paired {
+        name: String,
+        fingerprint: String,
+    },
+    PairFailed {
+        reason: PairReason,
+        /// More, for some reasons (the I/O error of a save or bind).
+        detail: String,
     },
 }
 
@@ -303,6 +447,10 @@ const CLEAR_HISTORY: u8 = 8;
 const IMPORT_CLIPMAN: u8 = 9;
 const SUBSCRIBE: u8 = 10;
 const THUMBNAIL: u8 = 11;
+const LINK: u8 = 12;
+const PAIR: u8 = 13;
+const PAIR_ANSWER: u8 = 14;
+const UNPAIR: u8 = 15;
 
 const WELCOME: u8 = 64;
 const OK: u8 = 65;
@@ -312,6 +460,10 @@ const LIST_REPLY: u8 = 68;
 const IMPORTED: u8 = 69;
 const CHANGED: u8 = 70;
 const THUMBNAIL_REPLY: u8 = 71;
+const LINK_REPLY: u8 = 72;
+const PAIR_CODE: u8 = 73;
+const PAIRED: u8 = 74;
+const PAIR_FAILED: u8 = 75;
 
 const ABSENT: u8 = 0;
 const PENDING: u8 = 1;
@@ -361,8 +513,12 @@ fn u16_be(r: &mut Reader<'_>) -> Result<u16, DecodeError> {
     Ok(u16::from_be_bytes(pair))
 }
 
-/// Appends one framed request to `out`. Requests are small, so this cannot fail.
-pub fn encode_request(request: &Request, out: &mut Vec<u8>) {
+/// Appends one framed request to `out`.
+///
+/// # Errors
+/// [`LimitError::TextTooLong`] if a host or peer name is longer than [`MAX_NAME_FIELD`]; nothing
+/// is appended then.
+pub fn encode_request(request: &Request, out: &mut Vec<u8>) -> Result<(), LimitError> {
     let mut p = Vec::new();
     let kind = match *request {
         Request::Hello { version } => {
@@ -399,9 +555,21 @@ pub fn encode_request(request: &Request, out: &mut Vec<u8>) {
             p.extend_from_slice(&id.to_be_bytes());
             THUMBNAIL
         }
+        Request::Link => LINK,
+        Request::Pair { ref host } => {
+            put_text(&mut p, host, MAX_NAME_FIELD)?;
+            PAIR
+        }
+        Request::PairAnswer { yes } => {
+            p.push(u8::from(yes));
+            PAIR_ANSWER
+        }
+        Request::Unpair { ref peer } => {
+            put_text(&mut p, peer, MAX_NAME_FIELD)?;
+            UNPAIR
+        }
     };
-    // At most 12 bytes of payload: always within the frame limit.
-    let _ = frame(kind, &p, out);
+    frame(kind, &p, out)
 }
 
 /// Decodes the first request in `buf`, as [`crate::decode`] does for peer messages.
@@ -409,8 +577,8 @@ pub fn encode_request(request: &Request, out: &mut Vec<u8>) {
 /// # Errors
 /// A [`DecodeError`] if the frame is malformed; the connection is then closed.
 pub fn decode_request(buf: &[u8]) -> Result<Option<(Request, usize)>, DecodeError> {
-    // No request carries more than 12 bytes: a longer one is refused from its header, before the
-    // daemon buffers any of it.
+    // No request carries more than a name and its length: a longer one is refused from its header,
+    // before the daemon buffers any of it.
     let mut header = Reader::new(buf);
     if let Ok(len) = header.u32()
         && len > MAX_REQUEST_PAYLOAD
@@ -431,6 +599,10 @@ pub fn decode_request(buf: &[u8]) -> Result<Option<(Request, usize)>, DecodeErro
         IMPORT_CLIPMAN => Request::ImportClipman { remove: flag(&mut r)? },
         SUBSCRIBE => Request::Subscribe,
         THUMBNAIL => Request::Thumbnail { id: r.u64()? },
+        LINK => Request::Link,
+        PAIR => Request::Pair { host: text(&mut r, MAX_NAME_FIELD)? },
+        PAIR_ANSWER => Request::PairAnswer { yes: flag(&mut r)? },
+        UNPAIR => Request::Unpair { peer: text(&mut r, MAX_NAME_FIELD)? },
         other => return Err(DecodeError::UnknownKind(other)),
     };
     r.finish()?;
@@ -447,6 +619,11 @@ fn error_code(e: Error) -> u8 {
         Error::ClaimFailed => 6,
         Error::ImportFailed => 7,
         Error::Internal => 8,
+        Error::LinkOff => 9,
+        Error::NoSuchPeer => 10,
+        Error::AmbiguousPeer => 11,
+        Error::NotPairing => 12,
+        Error::SaveFailed => 13,
     }
 }
 
@@ -460,6 +637,11 @@ fn error_of(code: u8) -> Result<Error, DecodeError> {
         6 => Error::ClaimFailed,
         7 => Error::ImportFailed,
         8 => Error::Internal,
+        9 => Error::LinkOff,
+        10 => Error::NoSuchPeer,
+        11 => Error::AmbiguousPeer,
+        12 => Error::NotPairing,
+        13 => Error::SaveFailed,
         other => return Err(DecodeError::Limit(LimitError::UnknownCode { code: other })),
     })
 }
@@ -482,6 +664,129 @@ fn text(r: &mut Reader<'_>, max: usize) -> Result<String, DecodeError> {
     }
     let bytes = r.take(len)?;
     String::from_utf8(bytes.to_vec()).map_err(|_| DecodeError::Limit(LimitError::TextNotUtf8))
+}
+
+fn put_option_text(p: &mut Vec<u8>, text: Option<&String>, max: usize) -> Result<(), LimitError> {
+    match text {
+        None => p.push(0),
+        Some(t) => {
+            p.push(1);
+            put_text(p, t, max)?;
+        }
+    }
+    Ok(())
+}
+
+fn option_text(r: &mut Reader<'_>, max: usize) -> Result<Option<String>, DecodeError> {
+    Ok(if flag(r)? { Some(text(r, max)?) } else { None })
+}
+
+fn peer_state_code(s: PeerState) -> u8 {
+    match s {
+        PeerState::Connected => 0,
+        PeerState::Suspect => 1,
+        PeerState::Dialing => 2,
+        PeerState::RefusedKey => 3,
+        PeerState::RefusedVersion => 4,
+    }
+}
+
+fn peer_state_of(code: u8) -> Result<PeerState, DecodeError> {
+    Ok(match code {
+        0 => PeerState::Connected,
+        1 => PeerState::Suspect,
+        2 => PeerState::Dialing,
+        3 => PeerState::RefusedKey,
+        4 => PeerState::RefusedVersion,
+        code => return Err(LimitError::UnknownCode { code }.into()),
+    })
+}
+
+const PAIR_REASONS: [PairReason; 13] = [
+    PairReason::Busy,
+    PairReason::NoAddress,
+    PairReason::Bind,
+    PairReason::Timeout,
+    PairReason::Declined,
+    PairReason::PeerEnded,
+    PairReason::SecondAttempt,
+    PairReason::BadReveal,
+    PairReason::TooManyPeers,
+    PairReason::Save,
+    PairReason::Cancelled,
+    PairReason::LinkOff,
+    PairReason::BadAddress,
+];
+
+fn pair_reason_code(reason: PairReason) -> u8 {
+    let index = PAIR_REASONS.iter().position(|r| *r == reason).unwrap_or_default();
+    u8::try_from(index).unwrap_or_default()
+}
+
+fn pair_reason_of(code: u8) -> Result<PairReason, DecodeError> {
+    PAIR_REASONS
+        .get(usize::from(code))
+        .copied()
+        .ok_or(DecodeError::Limit(LimitError::UnknownCode { code }))
+}
+
+fn put_link(p: &mut Vec<u8>, l: &LinkStatus) -> Result<(), LimitError> {
+    if l.peers.len() > MAX_PEERS {
+        return Err(LimitError::TooManyEntries { count: l.peers.len() });
+    }
+    put_option_text(p, l.off.as_ref(), MAX_LINK_TEXT)?;
+    match l.port {
+        None => p.push(0),
+        Some(port) => {
+            p.push(1);
+            p.extend_from_slice(&port.to_be_bytes());
+        }
+    }
+    put_option_text(p, l.bind_error.as_ref(), MAX_LINK_TEXT)?;
+    put_text(p, &l.fingerprint, MAX_LINK_TEXT)?;
+    p.push(u8::from(l.pairing));
+    p.push(
+        u8::try_from(l.peers.len())
+            .map_err(|_| LimitError::TooManyEntries { count: l.peers.len() })?,
+    );
+    for peer in &l.peers {
+        put_text(p, &peer.name, MAX_LINK_TEXT)?;
+        put_text(p, &peer.fingerprint, MAX_LINK_TEXT)?;
+        put_text(p, &peer.address, MAX_LINK_TEXT)?;
+        p.push(peer_state_code(peer.state));
+        match peer.rtt_us {
+            None => p.push(0),
+            Some(us) => {
+                p.push(1);
+                p.extend_from_slice(&us.to_be_bytes());
+            }
+        }
+        p.extend_from_slice(&peer.connects.to_be_bytes());
+    }
+    Ok(())
+}
+
+fn link(r: &mut Reader<'_>) -> Result<LinkStatus, DecodeError> {
+    let off = option_text(r, MAX_LINK_TEXT)?;
+    let port = if flag(r)? { Some(u16_be(r)?) } else { None };
+    let bind_error = option_text(r, MAX_LINK_TEXT)?;
+    let fingerprint = text(r, MAX_LINK_TEXT)?;
+    let pairing = flag(r)?;
+    let count = usize::from(r.u8()?);
+    if count > MAX_PEERS {
+        return Err(LimitError::TooManyEntries { count }.into());
+    }
+    let mut peers = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = text(r, MAX_LINK_TEXT)?;
+        let fingerprint = text(r, MAX_LINK_TEXT)?;
+        let address = text(r, MAX_LINK_TEXT)?;
+        let state = peer_state_of(r.u8()?)?;
+        let rtt_us = if flag(r)? { Some(r.u32()?) } else { None };
+        let connects = r.u32()?;
+        peers.push(PeerSummary { name, fingerprint, address, state, rtt_us, connects });
+    }
+    Ok(LinkStatus { off, port, bind_error, fingerprint, pairing, peers })
 }
 
 /// The longest preview in bytes: four per character.
@@ -568,6 +873,26 @@ pub fn encode_response(response: &Response, out: &mut Vec<u8>) -> Result<(), Lim
             }
             THUMBNAIL_REPLY
         }
+        Response::Link(l) => {
+            put_link(&mut p, l)?;
+            LINK_REPLY
+        }
+        Response::PairCode { name, fingerprint, code } => {
+            put_text(&mut p, name, MAX_LINK_TEXT)?;
+            put_text(&mut p, fingerprint, MAX_LINK_TEXT)?;
+            put_text(&mut p, code, MAX_LINK_TEXT)?;
+            PAIR_CODE
+        }
+        Response::Paired { name, fingerprint } => {
+            put_text(&mut p, name, MAX_LINK_TEXT)?;
+            put_text(&mut p, fingerprint, MAX_LINK_TEXT)?;
+            PAIRED
+        }
+        Response::PairFailed { reason, detail } => {
+            p.push(pair_reason_code(*reason));
+            put_text(&mut p, detail, MAX_LINK_TEXT)?;
+            PAIR_FAILED
+        }
     };
     frame(kind, &p, out)
 }
@@ -642,6 +967,20 @@ pub fn decode_response(buf: &[u8]) -> Result<Option<(Response, usize)>, DecodeEr
             };
             Response::Thumbnail { id, thumbnail }
         }
+        LINK_REPLY => Response::Link(link(&mut r)?),
+        PAIR_CODE => Response::PairCode {
+            name: text(&mut r, MAX_LINK_TEXT)?,
+            fingerprint: text(&mut r, MAX_LINK_TEXT)?,
+            code: text(&mut r, MAX_LINK_TEXT)?,
+        },
+        PAIRED => Response::Paired {
+            name: text(&mut r, MAX_LINK_TEXT)?,
+            fingerprint: text(&mut r, MAX_LINK_TEXT)?,
+        },
+        PAIR_FAILED => Response::PairFailed {
+            reason: pair_reason_of(r.u8()?)?,
+            detail: text(&mut r, MAX_LINK_TEXT)?,
+        },
         other => return Err(DecodeError::UnknownKind(other)),
     };
     r.finish()?;
@@ -691,7 +1030,7 @@ pub fn preview(text: &str) -> String {
 pub fn check_decoders(data: &[u8]) -> Result<(), String> {
     if let Ok(Some((request, used))) = decode_request(data) {
         let mut again = Vec::new();
-        encode_request(&request, &mut again);
+        encode_request(&request, &mut again).map_err(|e| format!("re-encoding refused: {e}"))?;
         if data.get(..used) != Some(again.as_slice()) {
             return Err("a request re-encodes differently".to_owned());
         }

@@ -6,7 +6,10 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use jackstay_proto::control::{self, Error, Kinds, Request, Response, Status, Summary, VERSION};
+use jackstay_proto::control::{
+    self, Error, Kinds, LinkStatus, PairReason, PeerState, PeerSummary, Request, Response, Status,
+    Summary, VERSION,
+};
 
 #[track_caller]
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
@@ -31,7 +34,20 @@ fn dir() -> PathBuf {
 
 /// `jackstay` with `args`, no display unless `display`, and `bin` first on its `PATH`.
 fn jackstay(args: &[&str], display: bool, bin: Option<&Path>) -> Output {
+    jackstay_with_input(args, display, bin, None)
+}
+
+/// As [`jackstay`], with `input` on its standard input (none: closed at once).
+fn jackstay_with_input(
+    args: &[&str],
+    display: bool,
+    bin: Option<&Path>,
+    input: Option<&str>,
+) -> Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_jackstay"));
+    c.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     c.args(args).env_remove("DISPLAY");
     if display {
         c.env("DISPLAY", ":99");
@@ -42,7 +58,11 @@ fn jackstay(args: &[&str], display: bool, bin: Option<&Path>) -> Output {
         path.push(std::env::var_os("PATH").unwrap_or_default());
         c.env("PATH", path);
     }
-    ok(c.output())
+    let mut child = ok(c.spawn());
+    if let Some(mut stdin) = child.stdin.take() {
+        ok(stdin.write_all(input.unwrap_or_default().as_bytes()));
+    }
+    ok(child.wait_with_output())
 }
 
 #[test]
@@ -112,21 +132,33 @@ fn popup_and_settings_ask_the_ui_and_say_so_where_a_user_sees_it_if_none_runs() 
 /// A daemon that greets one client, then answers each request it sends with the next of
 /// `answers`; returns the requests it got.
 fn scripted(runtime: &Path, answers: Vec<Response>) -> std::thread::JoinHandle<Vec<Request>> {
+    scripted_batches(runtime, answers.into_iter().map(|a| vec![a]).collect())
+}
+
+/// As [`scripted`], with each request answered by a batch: a flow's response and the events
+/// that follow it.
+fn scripted_batches(
+    runtime: &Path,
+    answers: Vec<Vec<Response>>,
+) -> std::thread::JoinHandle<Vec<Request>> {
     let listener = ok(UnixListener::bind(runtime.join("control")));
     std::thread::spawn(move || {
         let (mut s, _) = ok(listener.accept());
         let mut input = Vec::new();
         let mut got = Vec::new();
-        let mut answers = std::iter::once(Response::Welcome { version: VERSION }).chain(answers);
+        let mut answers =
+            std::iter::once(vec![Response::Welcome { version: VERSION }]).chain(answers);
         loop {
             if let Some((request, used)) = ok(control::decode_request(&input)) {
                 input.drain(..used);
                 if !matches!(request, Request::Hello { .. }) {
                     got.push(request);
                 }
-                let Some(answer) = answers.next() else { return got };
+                let Some(batch) = answers.next() else { return got };
                 let mut out = Vec::new();
-                ok(control::encode_response(&answer, &mut out));
+                for answer in &batch {
+                    ok(control::encode_response(answer, &mut out));
+                }
                 ok(s.write_all(&out));
             } else {
                 let mut buf = [0u8; 4096];
@@ -202,7 +234,8 @@ fn status_says_what_is_on_the_clipboard_and_warns_of_a_failing_store() {
         })
     };
     let (code, out, got) = exchange(&["status"], vec![status(Some(5), true, false)]);
-    assert_eq!((code, got), (Some(0), vec![Request::Status]));
+    // The link is asked about too; this stand-in does not answer, and status says no more.
+    assert_eq!((code, got), (Some(0), vec![Request::Status, Request::Link]));
     assert_eq!(out, "entries: 3 (1 pinned)\non the clipboard: entry 5\n");
     let (_, out, _) = exchange(&["status"], vec![status(None, true, true)]);
     assert_eq!(
@@ -317,4 +350,119 @@ fn import_reports_counts_and_where_clipmans_files_are() {
     assert_eq!(out.lines().count(), 1, "nothing added, nothing to remove");
     assert_eq!(jackstay(&["import-clipman", "--all"], false, None).status.code(), Some(2));
     assert_eq!(jackstay(&["list", "--remove"], false, None).status.code(), Some(2));
+}
+
+fn link(peers: Vec<PeerSummary>) -> LinkStatus {
+    LinkStatus {
+        port: Some(24810),
+        fingerprint: "0123456789abcdef".into(),
+        peers,
+        ..LinkStatus::default()
+    }
+}
+
+fn xiphos(state: PeerState, rtt_us: Option<u32>) -> PeerSummary {
+    PeerSummary {
+        name: "xiphos\u{1b}[2J".into(),
+        fingerprint: "fedcba9876543210".into(),
+        address: "xiphos".into(),
+        state,
+        rtt_us,
+        connects: 2,
+    }
+}
+
+#[test]
+fn status_and_peers_show_the_link() {
+    let answers = vec![
+        Response::Status(Status {
+            entries: 0,
+            pinned: 0,
+            current: None,
+            owns_clipboard: false,
+            store_failing: false,
+        }),
+        Response::Link(link(vec![xiphos(PeerState::Connected, Some(1234))])),
+    ];
+    let (code, out, _) = exchange(&["status"], answers);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("link: UDP port 24810, this machine 0123456789abcdef\n"), "{out}");
+    // The peer's name is cleaned of the escape it sent.
+    assert!(out.contains("  xiphos [2J connected, 1.234 ms\n"), "{out}");
+    let (code, out, got) = exchange(
+        &["peers"],
+        vec![Response::Link(link(vec![xiphos(PeerState::RefusedVersion, None)]))],
+    );
+    assert_eq!((code, got), (Some(0), vec![Request::Link]));
+    assert!(out.contains("refused: it runs another version\n"), "{out}");
+    assert!(out.contains("fingerprint fedcba9876543210, address xiphos, sessions 2"), "{out}");
+    let (_, out, _) = exchange(&["peers"], vec![Response::Link(link(Vec::new()))]);
+    assert!(out.contains("no paired machines (jackstay pair HOST)"), "{out}");
+    let off = LinkStatus { off: Some("disabled".into()), ..LinkStatus::default() };
+    let (_, out, _) = exchange(&["peers"], vec![Response::Link(off)]);
+    assert_eq!(out, "link: off (disabled)\n");
+}
+
+/// `jackstay pair HOST` answering `input`, against a daemon whose answer to the code is
+/// `outcome`: its status, stdout, stderr, and the requests the daemon got.
+fn pairing(input: &str, outcome: Response) -> (Option<i32>, String, String, Vec<Request>) {
+    let root = dir();
+    let code = Response::PairCode {
+        name: "xiphos".into(),
+        fingerprint: "fedcba9876543210".into(),
+        code: "123456".into(),
+    };
+    let server =
+        scripted_batches(&root, vec![vec![Response::Ok, code], vec![Response::Ok, outcome]]);
+    let runtime = root.to_str().unwrap_or_default().to_owned();
+    let out = jackstay_with_input(
+        &["--runtime-dir", &runtime, "pair", "xiphos"],
+        false,
+        None,
+        Some(input),
+    );
+    let got = server.join().unwrap_or_default();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        got,
+    )
+}
+
+#[test]
+fn pair_shows_the_code_and_sends_the_answer() {
+    let paired = Response::Paired { name: "xiphos".into(), fingerprint: "fedcba9876543210".into() };
+    let (code, out, _, got) = pairing("y\n", paired);
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        got,
+        vec![Request::Pair { host: "xiphos".into() }, Request::PairAnswer { yes: true }]
+    );
+    assert!(out.contains("xiphos (fingerprint fedcba9876543210) shows the code 123 456."), "{out}");
+    assert!(out.contains("Paired with xiphos (fedcba9876543210)."), "{out}");
+}
+
+#[test]
+fn pair_answers_no_unless_told_yes() {
+    for input in ["n\n", "\n", "", "yes please\n"] {
+        let declined = Response::PairFailed { reason: PairReason::Declined, detail: String::new() };
+        let (code, _, err, got) = pairing(input, declined);
+        assert_eq!(code, Some(1), "{input:?}");
+        assert_eq!(got.last(), Some(&Request::PairAnswer { yes: false }), "{input:?}");
+        assert!(err.contains("pairing failed: declined here"), "{err}");
+    }
+}
+
+#[test]
+fn unpair_names_the_machine_and_says_why_it_cannot() {
+    let (code, _, got) = exchange(&["unpair", "xiphos"], vec![Response::Ok]);
+    assert_eq!((code, got), (Some(0), vec![Request::Unpair { peer: "xiphos".into() }]));
+    let root = dir();
+    let server = scripted(&root, vec![Response::Error(Error::AmbiguousPeer)]);
+    let out =
+        jackstay(&["--runtime-dir", root.to_str().unwrap_or_default(), "unpair", "x"], false, None);
+    let _ = server.join();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("give its fingerprint"));
 }

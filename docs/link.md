@@ -4,7 +4,8 @@ How two Jackstay daemons find, authenticate and talk to each other (milestone M3
 what the link must do; this says how. Input sharing (M4) and clipboard sharing (M5) ride on it.
 
 Status: **design, revised after red-team pass 1** (findings and their resolutions at the end);
-slice 1 (`proto::link`, `jackstay-net`) built.
+slice 1 (`proto::link`, `jackstay-net`) and slice 2 (the daemon's link, the CLI, the two-daemon
+harness) built.
 Facts marked *measured* come from `spikes/link-probe` (spikes/README.md); facts marked *source*
 were read in quinn 0.11.12, quinn-proto 0.11.19 and rustls 0.23.46, 2026-10-29.
 
@@ -203,25 +204,41 @@ session.
 
 ## In the daemon
 
-- **Control protocol v3.** Each request kind has its own size limit (v2 capped every request at 16
-  bytes, too small for `Pair { host }`). Pairing is a flow, like `Subscribe`. `Pair { host }` is
-  answered as it proceeds (`PairCode { name, fingerprint, code }`, `Paired`, `PairFailed { why }`).
-  The client may send `Confirm { yes }` while the flow is open, which v2's "not read while waiting
-  for a deferred response" forbids for other requests. The flow ends if the client disconnects.
-  There is one pairing client at a time. `Unpair { peer }` is an ordinary request. `Status` gains
-  the link: the port, our fingerprint, and per peer its name, fingerprint, state (connected,
-  dialing, suspect, refused: unknown key or version) and last round trip.
+- **Control protocol v3** (docs/daemon.md, "Control socket"). v2 capped every request at 16
+  bytes, too small for a host. The cap is now 257 bytes, a name of 255 and its length, still
+  refused from the header; each field has its own limit inside it. `Link` asks for the link's
+  state: the port, our fingerprint, and per peer its name, fingerprint, address, state
+  (connected, silent, not connected, refused: unknown key or version), last round trip and
+  sessions kept. `jackstay status` shows it too. Pairing is a flow: `Pair { host }` is answered
+  `Ok`, and that client then gets `PairCode { name, fingerprint, code }`, then `Paired` or
+  `PairFailed { reason, detail }`. It answers with `PairAnswer { yes }`, an ordinary request, so
+  v2's rule that a client waiting for a deferred response is not read does not stand in the way.
+  There is one pairing client at a time; a second is answered `PairFailed { Busy }`. Pairing is
+  cancelled when its client disconnects. `Unpair { peer }` takes a name or a fingerprint, refuses
+  a name two peers share, and is answered once the peers file is saved.
 - **Status** goes out when anything but a round trip changes, and with the round trip once a
   second: an active session measures ten a second.
 - **Configuration** gains `link.port` (1024–65534; pairing uses the next port) and `link.enabled`
   (default true). With no peers the endpoint is still bound, so a peer can be paired.
 - A failure to bind the port is reported in status and the journal and retried every 10 s. The
   clipboard is unaffected.
-- The journal names peers and states, never message contents (DP-3).
-- **Supervision.** A panic in the link thread ends the daemon with 101, as for the other threads.
-  Whether a tokio task's panic is contained by its `JoinHandle` is measured in slice 1 (plan §5.8);
-  we do not rely on it. The link thread reports in to the clipboard loop every second, and the
-  systemd watchdog is fed only while it does, so a wedged link thread restarts the daemon too.
+- The journal says when the port opens or fails, each peer's change of state by fingerprint, and
+  pairings and unpairings, never message contents (DP-3).
+- **Supervision.** A panic in any of the link's tasks is not contained: it ends the link thread
+  (a tokio `JoinHandle` does report it, *measured* in slice 1; the engine re-raises it). The
+  clipboard loop checks every turn that the thread has not ended and has sent status within 10 s;
+  if not, the daemon exits 101 and systemd restarts it, so a wedged link thread restarts the
+  daemon too. Silence is counted only while the daemon runs: a gap of 3 s between the loop's
+  checks means the whole process was paused (suspend, a frozen VM, swapping), and the link's
+  silence then is forgiven. On the exit, a thread that stopped answering is left, not joined; the
+  runtime gives blocking work (a stalled name lookup) half a second. The failures are counted in
+  `$XDG_STATE_HOME/jackstay/link-failures`; after three in a row the next start runs with the
+  link off and says why, then forgets the count, and a link that runs a minute forgets it too. So
+  a fault that recurs costs the link, never the clipboard. The runtime is built before the thread
+  starts, so failing to build it turns the link off rather than ending the thread.
+- **Saving the peers file** happens on tokio's blocking pool, one change at a time, worked out
+  from the peers as they are when its save starts; a change takes effect only once it is on disk.
+  A slow disk never holds up pings.
 
 ## Dependencies this adds
 
@@ -261,8 +278,29 @@ rustls-webpki) and BSD-3-Clause (subtle), both GPL-compatible. Each becomes a na
   - **the answerer restarted on the same port: the dialer notices within 1 s** (reset);
   - a black-holed dial giving up at 1.5 s;
   - suspect at 3 s, and at 300 ms when active.
-- **Two daemons, one container:** each with its own Xvfb, home and ports, on 127.0.0.1, driven
-  through their control sockets and the CLI. Pairing with both `yes`, one `no`, a timeout, the CLI
+- **Two daemons, one container** (built; `crates/jackstayd/tests/link.rs`; the CLI's side of
+  pairing against a scripted daemon in `crates/jackstay/tests/cli.rs`): each with its own Xvfb,
+  home and ports, on 127.0.0.1, driven through their control sockets. The relay owns the address
+  each machine knows the other by, so every datagram passes it. The forged flood replays one real
+  handshake datagram from a fresh port each time, 500 a second, never answering the Retry; the
+  machine flooded cannot dial out (a wrong address in its peers file), so only its peer's dials can
+  link them. The machine in the middle answers one side's pairing dial and dials the other,
+  copying the stream unchanged, with its key between the two machines', so both order the nonces
+  alike and only the TLS exporter can tell the codes apart: the test asserts the two codes
+  differ (a user who compares them, as the CLI asks, then says no). A rebinding is survived only
+  at the machine that dialed the kept session, QUIC's client; at the answering machine (QUIC's
+  server, which may not move) quinn drops the client's packets from the new address, and the link
+  is recovered by dialing again. Each control below was proven by planting its removal: Retry
+  before the handshake limit, pairing cancelled when its client leaves, a second pairing client
+  refused, the exporter in the code, the failure count, and rebinding the dialing side (the
+  answering side, planted, fails). Two plants survive, accepted. Without the stale-duplicate rule
+  (pass 2, 5), one-way loss still recovers soon after it ends, because the stale side's next ping
+  draws a reset, as with the run-id rule. Without the pause forgiveness, the 30 s stop still
+  passes: on resume the link thread's overdue status usually reaches the clipboard loop in the
+  same turn, before its check; the forgiveness is for the turn where it does not. Not built: a
+  pairing that times out (two minutes; the in-process tests cover it), and a cancelled pairing's
+  last event arriving after a new one starts (a race; the session refuses the new one until it
+  has). Planned: Pairing with both `yes`, one `no`, a timeout, the CLI
   killed mid-pairing, and a mismatched pair of hosts. Plan §5.7 said `tc netem` between
   containers. Instead, a UDP relay in the test process sits between the two daemons. It needs no
   privileges and no second container, and its faults are exact. Cases:
@@ -337,3 +375,21 @@ A separately briefed reviewer, read-only, on the code against this design.
 | 11 | Own key not refused on load; identity mode; doc's pairing choice; `TooManyPeers` on re-pair | Fixed: refused at start; mode made 0600; doc corrected; limit checked when the peer is recorded |
 | 12 | Status sent on every round trip (ten a second when active) | Fixed: round trips go out on the 1 s tick. Test counts events |
 | 13 | Ports by bind-then-release; tight bounds | Fixed: a per-process port range, never reused; bounds widened |
+
+### Pass 3 (code review of slice 2), 2026-10-29
+
+A separately briefed reviewer, read-only.
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | A whole process paused 10 s or more is taken for a wedged link thread (101) | Fixed: a 3 s gap between checks forgives the silence; the suspend test stops for 30 s and checks the daemon still runs |
+| 2 | The rebind test depended on key order: only QUIC's client may move | Fixed: the dialing side rebinds; the answering side's limit documented above |
+| 3 | On a link failure, the exit joined a wedged thread; a stalled lookup held up shutdown | Fixed: the handle is abandoned; the runtime shuts down within 0.5 s |
+| 4 | Saving the peers file blocked the engine | Fixed: saved on the blocking pool, one change at a time |
+| 5 | A cancelled pairing's last event could be taken for a new one's | Fixed: the session refuses a new pairing until the cancelled one has ended |
+| 6 | A link fault that recurs restarts the daemon until systemd gives up | Fixed: the runtime built at start (failure: off); after three failures in a row, one start with the link off |
+| 7 | A version 2 client was refused after an upgrade | Fixed: versions 2 and 3 greeted, each in its own |
+| 8 | Unpairing what is not paired was reported as a failed save | Fixed: its own error, shown as no such peer |
+| 9 | Fingerprints and codes printed uncleaned; a host that does not parse called unresolvable | Fixed: all printed text cleaned; its own reason |
+| 10 | Docs ahead of the tests and code | Fixed: the 30 s stop, both kinds of restart, the flood measured while linked, the journal lines, and this list |
+| 11 | Port reuse under one-process-per-test runners; a marginal flood rate | Accepted for cargo test (one process per binary); the rate bound halved |

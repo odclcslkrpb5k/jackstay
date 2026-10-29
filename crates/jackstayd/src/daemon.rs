@@ -237,6 +237,44 @@ fn start_store(
     Ok((StoreLink { requests, replies, wake }, thread))
 }
 
+/// The link, started unless the configuration turns it off; off with the reason if it cannot
+/// start. The clipboard runs either way.
+fn start_link(setup: &Setup) -> Option<crate::link::Link> {
+    let failures = link_failures(setup);
+    let failed = crate::link::failures(&failures);
+    let config = if !setup.config.link_enabled {
+        Err("disabled in the configuration (link.enabled)".to_owned())
+    } else if failed >= crate::link::FAILURES_ALLOWED {
+        // Off for this run; the next start tries again.
+        let _ = std::fs::remove_file(&failures);
+        Err(format!("it failed {failed} times in a row; off until jackstayd restarts"))
+    } else {
+        Ok(jackstay_net::Config {
+            state_dir: setup.dirs.state.clone(),
+            port: setup.config.link_port,
+            name: rustix::system::uname().nodename().to_string_lossy().into_owned(),
+            timings: jackstay_net::Timings::default(),
+        })
+    };
+    match crate::link::Link::start(config, Some(failures)) {
+        Ok(link) => {
+            if let Some(why) = link.link_status().off.filter(|_| link.handle().is_none()) {
+                log(&format!("link off: {why}"));
+            }
+            Some(link)
+        }
+        Err(e) => {
+            log(&format!("link: {}; it is off", e.kind()));
+            None
+        }
+    }
+}
+
+/// Where the link's failures in a row are counted (docs/link.md, "Supervision").
+fn link_failures(setup: &Setup) -> PathBuf {
+    setup.dirs.state.join("link-failures")
+}
+
 /// Runs the daemon with `args` (without the program name) and returns its exit status.
 #[must_use]
 pub fn run(args: &[OsString]) -> i32 {
@@ -279,6 +317,8 @@ fn start(args: &[OsString]) -> Result<i32, Refusal> {
             None
         }
     };
+    let peer_link = start_link(&setup);
+    let failures = link_failures(&setup);
     let mut session = Session::new(Parts {
         clipboard,
         tracker,
@@ -289,6 +329,7 @@ fn start(args: &[OsString]) -> Result<i32, Refusal> {
         per_target,
         clipman_check: Box::new(|| coexist::clipman_running(Path::new("/proc"))),
         thumbnails,
+        link: peer_link,
     });
     let exit = session.run();
     let status = match &exit {
@@ -310,6 +351,21 @@ fn start(args: &[OsString]) -> Result<i32, Refusal> {
         }
         Exit::StoreGone => {
             log("the store thread ended");
+            status::PANIC
+        }
+        Exit::LinkGone(gone) => {
+            crate::link::failed(&failures);
+            // A wedged thread would never be joined: leave it, the process is ending.
+            if let Some(l) = session.link.take() {
+                l.abandon();
+            }
+            log(&format!(
+                "the link thread {}",
+                match gone {
+                    crate::link::Gone::Ended => "ended",
+                    crate::link::Gone::Silent => "stopped reporting",
+                }
+            ));
             status::PANIC
         }
     };

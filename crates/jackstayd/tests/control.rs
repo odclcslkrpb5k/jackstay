@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use jackstay_proto::control::{
-    self, Error, Kinds, MAX_LIST, MAX_PREVIEW_CHARS, Request, Response, Summary, VERSION,
+    self, Error, Kinds, MAX_LIST, MAX_PREVIEW_CHARS, OLDEST_VERSION, Request, Response, Summary,
+    VERSION,
 };
 use jackstayd::control::{ClientId, Clients, Dropped, MAX_CLIENTS, MAX_OUTPUT, REQUESTS_PER_TURN};
 
@@ -36,7 +37,7 @@ fn connect(path: &Path) -> UnixStream {
 fn send(s: &mut UnixStream, requests: &[Request]) {
     let mut out = Vec::new();
     for r in requests {
-        control::encode_request(r, &mut out);
+        control::encode_request(r, &mut out).unwrap_or_else(|e| panic!("{e}"));
     }
     ok(s.write_all(&out));
 }
@@ -105,6 +106,22 @@ fn one(name: &str) -> (Clients, UnixStream, ClientId) {
 }
 
 #[test]
+fn a_client_of_an_older_version_is_greeted_in_its_own() {
+    let (mut c, path) = bind("versions");
+    let (mut old, mut older) = (connect(&path), connect(&path));
+    assert_eq!(c.accept(), []);
+    send(&mut old, &[Request::Hello { version: OLDEST_VERSION }, Request::Status]);
+    send(&mut older, &[Request::Hello { version: OLDEST_VERSION - 1 }]);
+    let handed = requests(&mut c);
+    assert_eq!(handed.iter().map(|(_, r)| r).collect::<Vec<_>>(), [&Request::Status]);
+    let (id, _) = handed.first().cloned().unwrap_or_else(|| panic!("none"));
+    c.respond(id, &Response::Ok);
+    assert_eq!(c.flush(), []);
+    assert_eq!(read_n(&mut old, 2), [Response::Welcome { version: OLDEST_VERSION }, Response::Ok]);
+    assert_eq!(until_closed(&mut older), [Response::Error(Error::UnsupportedVersion)]);
+}
+
+#[test]
 fn the_greeting_is_checked_and_only_greeted_clients_stay() {
     let (mut c, path) = bind("greeting");
     let mut other_version = connect(&path);
@@ -120,7 +137,7 @@ fn the_greeting_is_checked_and_only_greeted_clients_stay() {
     send(&mut good, &[HELLO, Request::Subscribe, Request::Status]);
     let handed = requests(&mut c);
     assert_eq!(handed.iter().map(|(_, r)| r).collect::<Vec<_>>(), [&Request::Status]);
-    let (good_id, _) = handed.first().copied().unwrap_or_else(|| panic!("none"));
+    let (good_id, _) = handed.first().cloned().unwrap_or_else(|| panic!("none"));
     c.respond(good_id, &Response::Ok);
     c.changed();
     // Those that broke the protocol are closed once answered, and not reported as dropped.

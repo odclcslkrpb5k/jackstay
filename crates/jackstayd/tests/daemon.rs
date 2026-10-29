@@ -178,7 +178,8 @@ fn the_protocol_is_enforced_per_client() {
     // A request before Hello is refused and the connection closed.
     let mut raw = ok(std::os::unix::net::UnixStream::connect(home.socket()));
     let mut out = Vec::new();
-    jackstay_proto::control::encode_request(&Request::Status, &mut out);
+    jackstay_proto::control::encode_request(&Request::Status, &mut out)
+        .unwrap_or_else(|e| panic!("{e}"));
     ok(raw.write_all(&out));
     let mut buf = Vec::new();
     ok(std::io::Read::read_to_end(&mut raw, &mut buf));
@@ -222,7 +223,7 @@ fn raw(home: &Home) -> std::os::unix::net::UnixStream {
 fn frames(requests: &[Request]) -> Vec<u8> {
     let mut out = Vec::new();
     for r in requests {
-        jackstay_proto::control::encode_request(r, &mut out);
+        jackstay_proto::control::encode_request(r, &mut out).unwrap_or_else(|e| panic!("{e}"));
     }
     out
 }
@@ -315,7 +316,7 @@ fn at_most_sixteen_clients_and_pipelined_requests_keep_their_order() {
     eventually("the copy", || try_previews(&home).is_some_and(|p| p == ["secret"]));
     let mut s = raw(&home);
     let hello = Request::Hello { version: jackstay_proto::control::VERSION };
-    ok(s.write_all(&frames(&[hello, Request::Clear, Request::Status])));
+    ok(s.write_all(&frames(&[hello.clone(), Request::Clear, Request::Status])));
     let got = responses(&mut s, 3);
     assert!(
         matches!(got.as_slice(), [Response::Welcome { .. }, Response::Ok, Response::Status(_)]),

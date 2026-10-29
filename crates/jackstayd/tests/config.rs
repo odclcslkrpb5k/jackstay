@@ -1,8 +1,8 @@
 use std::num::NonZeroUsize;
 
 use jackstayd::config::{
-    Config, ConfigError, MAX_BYTES, MAX_ENTRIES, MAX_PER_ENTRY, MAX_PER_TARGET, MAX_PINNED, parse,
-    render,
+    Config, ConfigError, MAX_BYTES, MAX_ENTRIES, MAX_LINK_PORT, MAX_PER_ENTRY, MAX_PER_TARGET,
+    MAX_PINNED, MIN_LINK_PORT, parse, render,
 };
 use proptest::prelude::*;
 
@@ -78,6 +78,8 @@ proptest! {
         pinned in 0..=MAX_PINNED,
         target in 1..=MAX_PER_TARGET,
         extra in 0..=MAX_PER_ENTRY,
+        link_enabled in any::<bool>(),
+        port in MIN_LINK_PORT..=MAX_LINK_PORT,
     ) {
         let c = Config {
             max_entries: NonZeroUsize::new(usize::try_from(entries).unwrap_or(1)).unwrap_or(NonZeroUsize::MIN),
@@ -85,6 +87,8 @@ proptest! {
             max_pinned: usize::try_from(pinned).unwrap_or(0),
             per_target: target,
             per_entry: target.saturating_add(extra).min(MAX_PER_ENTRY),
+            link_enabled,
+            link_port: u16::try_from(port).unwrap_or(24810),
         };
         prop_assert_eq!(parse(&render(&c)), Ok(c));
     }

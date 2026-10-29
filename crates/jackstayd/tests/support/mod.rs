@@ -193,6 +193,7 @@ pub fn client(home: &Home) -> Client {
 }
 
 #[track_caller]
+#[allow(clippy::needless_pass_by_value)] // Callers build the request in the call.
 pub fn ask(home: &Home, r: Request) -> Response {
     ok(client(home).ask(&r))
 }

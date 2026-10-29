@@ -5,8 +5,8 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use jackstay_proto::DecodeError;
 use jackstay_proto::control::{self, Request, Response, VERSION};
+use jackstay_proto::{DecodeError, LimitError};
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -21,6 +21,8 @@ pub enum ClientError {
     Version,
     /// The daemon refused the greeting.
     Refused,
+    /// The request breaks a limit (a name too long), so it was not sent.
+    Request(LimitError),
 }
 
 impl std::fmt::Display for ClientError {
@@ -32,6 +34,7 @@ impl std::fmt::Display for ClientError {
             ClientError::Protocol(e) => write!(f, "jackstayd sent a bad response: {e}"),
             ClientError::Version => write!(f, "jackstayd speaks another protocol version"),
             ClientError::Refused => write!(f, "jackstayd refused the connection"),
+            ClientError::Request(e) => write!(f, "the request cannot be sent: {e}"),
         }
     }
 }
@@ -67,15 +70,33 @@ impl Client {
     /// # Errors
     /// A [`ClientError`] if the exchange fails.
     pub fn ask(&mut self, request: &Request) -> Result<Response, ClientError> {
-        let mut out = Vec::new();
-        control::encode_request(request, &mut out);
-        self.stream.write_all(&out).map_err(ClientError::Io)?;
+        self.send(request)?;
         loop {
             match self.receive()? {
                 Response::Changed => {}
                 response => return Ok(response),
             }
         }
+    }
+
+    /// Sends `request` without waiting: for a flow such as pairing, whose events and responses the
+    /// caller reads with [`Client::receive`].
+    ///
+    /// # Errors
+    /// A [`ClientError`] if the request breaks a limit or cannot be written.
+    pub fn send(&mut self, request: &Request) -> Result<(), ClientError> {
+        let mut out = Vec::new();
+        control::encode_request(request, &mut out).map_err(ClientError::Request)?;
+        self.stream.write_all(&out).map_err(ClientError::Io)
+    }
+
+    /// How long reads and writes may wait from now on (pairing waits for a person).
+    ///
+    /// # Errors
+    /// The socket refused the timeout.
+    pub fn set_timeout(&mut self, timeout: Duration) -> Result<(), ClientError> {
+        self.stream.set_read_timeout(Some(timeout)).map_err(ClientError::Io)?;
+        self.stream.set_write_timeout(Some(timeout)).map_err(ClientError::Io)
     }
 
     /// Waits for the next response (after `Subscribe`, the next `Changed`).

@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 
-/// The daemon's settings, all in entries or bytes.
+/// The daemon's settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
     /// Unpinned entries kept.
@@ -17,6 +17,10 @@ pub struct Config {
     pub per_target: u64,
     /// The most kept from one copy.
     pub per_entry: u64,
+    /// Whether the link to other machines runs (docs/link.md).
+    pub link_enabled: bool,
+    /// The link's UDP port; pairing uses the next one.
+    pub link_port: u16,
 }
 
 impl Default for Config {
@@ -27,6 +31,8 @@ impl Default for Config {
             max_pinned: 1000,
             per_target: 64 << 20,
             per_entry: 128 << 20,
+            link_enabled: true,
+            link_port: jackstay_net::DEFAULT_PORT,
         }
     }
 }
@@ -62,6 +68,10 @@ pub const MAX_PINNED: u64 = 0xFFFF_FFFF;
 /// The largest per-target limit: the engine holds a target in memory, and one beyond this is no
 /// copy anyone means to keep.
 pub const MAX_PER_TARGET: u64 = 1 << 30;
+/// The lowest `link.port`: below it, ports are the system's.
+pub const MIN_LINK_PORT: u64 = 1024;
+/// The highest `link.port`: pairing needs the next port too.
+pub const MAX_LINK_PORT: u64 = 65534;
 /// The largest `capture.per_entry`.
 pub const MAX_PER_ENTRY: u64 = MAX_PER_TARGET << 2;
 
@@ -108,6 +118,14 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 ("capture", "per_entry") => {
                     config.per_entry = number(value, &name, 1, MAX_PER_ENTRY)?;
                 }
+                ("link", "enabled") => {
+                    config.link_enabled =
+                        value.as_bool().ok_or_else(|| ConfigError::BadValue(name.clone()))?;
+                }
+                ("link", "port") => {
+                    let n = number(value, &name, MIN_LINK_PORT, MAX_LINK_PORT)?;
+                    config.link_port = u16::try_from(n).map_err(|_| ConfigError::BadValue(name))?;
+                }
                 _ => return Err(ConfigError::UnknownKey(name)),
             }
         }
@@ -131,7 +149,13 @@ pub fn render(config: &Config) -> String {
         ("history", "max_pinned", wide(config.max_pinned), wide(default.max_pinned)),
         ("capture", "per_target", config.per_target, default.per_target),
         ("capture", "per_entry", config.per_entry, default.per_entry),
+    ]
+    .map(|(section, key, value, default)| (section, key, value.to_string(), default.to_string()));
+    let link = [
+        ("link", "enabled", config.link_enabled.to_string(), default.link_enabled.to_string()),
+        ("link", "port", config.link_port.to_string(), default.link_port.to_string()),
     ];
+    let keys: Vec<_> = keys.into_iter().chain(link).collect();
     let mut text = String::from(
         "# Written by Jackstay's settings window; a key left out has its default (docs/daemon.md).\n",
     );

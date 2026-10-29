@@ -18,7 +18,10 @@ use crate::pairing::{self, PairCommand, PairOut};
 use crate::peers::{self, MAX_PEERS, Peer};
 use crate::session::{self, Ended, Report, ToSession, close, peer_key};
 use crate::tls::{self, ALPN, Accept, SERVER_NAME};
-use crate::{Command, Config, Event, PairFailure, PeerState, PeerStatus, Refusal, Status, Timings};
+use crate::{
+    Command, Config, Event, PairFailure, PeerState, PeerStatus, Refusal, Status, Timings,
+    UnpairError,
+};
 
 /// Accepted handshakes per second on the main endpoint, and the burst allowed.
 const HANDSHAKES_PER_SECOND: f64 = 10.0;
@@ -27,26 +30,20 @@ const TICK: Duration = Duration::from_secs(1);
 /// A jump this large between the boot clock and the monotonic one means the machine slept.
 const RESUMED: Duration = Duration::from_secs(1);
 
+/// How long the runtime waits, at the end, for blocking work (a name lookup that stalls) before
+/// leaving it.
+const SHUTDOWN_WAIT: Duration = Duration::from_millis(500);
+
 pub(crate) fn run(
+    runtime: tokio::runtime::Runtime,
     config: Config,
     identity: Identity,
     peers: Vec<Peer>,
     commands: mpsc::UnboundedReceiver<Command>,
-    mut events: Box<dyn FnMut(Event) + Send>,
+    events: Box<dyn FnMut(Event) + Send>,
 ) {
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(r) => r,
-        Err(e) => {
-            events(Event::Status(Status {
-                listening: Err(format!("no runtime: {e}")),
-                fingerprint: identity.public().fingerprint(),
-                peers: Vec::new(),
-                pairing: false,
-            }));
-            return;
-        }
-    };
     runtime.block_on(Engine::new(config, identity, peers, events).run(commands));
+    runtime.shutdown_timeout(SHUTDOWN_WAIT);
 }
 
 /// What tasks the engine spawned tell it.
@@ -62,6 +59,18 @@ enum Internal {
     /// A handshake on the main endpoint completed.
     Answered(Connection),
     Pairing(PairOut),
+    /// The peers file was saved with `change`, or not.
+    Saved {
+        change: Change,
+        result: Result<(), String>,
+    },
+}
+
+/// A change to the peers, saved one at a time, in order.
+#[derive(Debug, Clone)]
+enum Change {
+    Add(Peer),
+    Remove(PublicKey),
 }
 
 struct SessionEntry {
@@ -135,6 +144,9 @@ struct Engine {
     next_id: u64,
     active: HashSet<PublicKey>,
     pairing: Option<Pairing>,
+    /// Changes to the peers waiting to be saved, and whether one is being saved now.
+    changes: std::collections::VecDeque<Change>,
+    saving: bool,
     bucket: Bucket,
     events: Box<dyn FnMut(Event) + Send>,
     tasks: JoinSet<()>,
@@ -189,6 +201,8 @@ impl Engine {
             next_id: 0,
             active: HashSet::new(),
             pairing: None,
+            changes: std::collections::VecDeque::new(),
+            saving: false,
             bucket: Bucket { tokens: HANDSHAKES_PER_SECOND, at: now },
             events,
             tasks: JoinSet::new(),
@@ -467,6 +481,7 @@ impl Engine {
                 }
             }
             Internal::Pairing(out) => self.on_pairing(out),
+            Internal::Saved { change, result } => self.saved(change, result),
         }
     }
 
@@ -665,52 +680,99 @@ impl Engine {
             }
             PairOut::Done(result) => {
                 let Some(pairing) = self.pairing.take() else { return };
-                let event = match result {
-                    Err(f) => Event::PairFailed(f),
-                    // Checked here, not at the start: pairing a peer again replaces its record.
-                    Ok((key, _))
-                        if self.peers.len() >= MAX_PEERS && !self.slots.contains_key(&key) =>
-                    {
-                        Event::PairFailed(PairFailure::TooManyPeers)
-                    }
+                match result {
+                    Err(f) => (self.events)(Event::PairFailed(f)),
                     Ok((key, name)) => {
-                        let peer = Peer { key, address: pairing.address, name: name.clone() };
-                        let mut next: Vec<Peer> =
-                            self.peers.iter().filter(|p| p.key != key).cloned().collect();
-                        next.push(peer.clone());
-                        if let Err(e) = peers::save(&self.peers_path, &next) {
-                            Event::PairFailed(PairFailure::Save(e.to_string()))
-                        } else {
-                            self.add_peer(peer);
-                            self.refresh_server_config();
-                            Event::Paired { name, fingerprint: key.fingerprint() }
-                        }
+                        self.changes.push_back(Change::Add(Peer {
+                            key,
+                            address: pairing.address,
+                            name,
+                        }));
+                        self.save_next();
                     }
-                };
-                (self.events)(event);
+                }
             }
         }
     }
 
     fn unpair(&mut self, key: PublicKey) {
-        let fingerprint = key.fingerprint();
-        if !self.peers.iter().any(|p| p.key == key) {
-            (self.events)(Event::Unpaired { fingerprint, saved: Err("not paired".to_owned()) });
-            return;
+        self.changes.push_back(Change::Remove(key));
+        self.save_next();
+    }
+
+    /// Starts saving the next change, if none is being saved: on tokio's blocking pool, so a slow
+    /// disk never holds up pings. The change is worked out from the peers as they are then.
+    fn save_next(&mut self) {
+        while !self.saving {
+            let Some(change) = self.changes.pop_front() else { return };
+            let mut next = self.peers.clone();
+            match &change {
+                Change::Add(peer) => {
+                    // Checked here, not at the start: pairing a peer again replaces its record.
+                    if next.len() >= MAX_PEERS && !next.iter().any(|p| p.key == peer.key) {
+                        (self.events)(Event::PairFailed(PairFailure::TooManyPeers));
+                        continue;
+                    }
+                    next.retain(|p| p.key != peer.key);
+                    next.push(peer.clone());
+                }
+                Change::Remove(key) => {
+                    if !next.iter().any(|p| p.key == *key) {
+                        let fingerprint = key.fingerprint();
+                        (self.events)(Event::Unpaired {
+                            fingerprint,
+                            saved: Err(UnpairError::NotPaired),
+                        });
+                        continue;
+                    }
+                    next.retain(|p| p.key != *key);
+                }
+            }
+            self.saving = true;
+            let path = self.peers_path.clone();
+            let internal = self.internal.clone();
+            self.tasks.spawn(async move {
+                let result = tokio::task::spawn_blocking(move || peers::save(&path, &next))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()));
+                let _ = internal.send(Internal::Saved { change, result });
+            });
         }
-        let next: Vec<Peer> = self.peers.iter().filter(|p| p.key != key).cloned().collect();
-        if let Err(e) = peers::save(&self.peers_path, &next) {
-            (self.events)(Event::Unpaired { fingerprint, saved: Err(e.to_string()) });
-            return;
+    }
+
+    /// A change is on disk, or not: only now does it take effect.
+    fn saved(&mut self, change: Change, result: Result<(), String>) {
+        self.saving = false;
+        match (change, result) {
+            (Change::Add(peer), Err(e)) => {
+                let _ = peer;
+                (self.events)(Event::PairFailed(PairFailure::Save(e)));
+            }
+            (Change::Add(peer), Ok(())) => {
+                let (name, fingerprint) = (peer.name.clone(), peer.key.fingerprint());
+                self.add_peer(peer);
+                self.refresh_server_config();
+                (self.events)(Event::Paired { name, fingerprint });
+            }
+            (Change::Remove(key), Err(e)) => {
+                (self.events)(Event::Unpaired {
+                    fingerprint: key.fingerprint(),
+                    saved: Err(UnpairError::Save(e)),
+                });
+            }
+            (Change::Remove(key), Ok(())) => {
+                self.peers.retain(|p| p.key != key);
+                self.slots.remove(&key);
+                self.active.remove(&key);
+                for s in self.sessions.values().filter(|s| s.key == key) {
+                    s.conn.close(close::UNPAIRED, b"");
+                }
+                self.refresh_server_config();
+                (self.events)(Event::Unpaired { fingerprint: key.fingerprint(), saved: Ok(()) });
+            }
         }
-        self.peers = next;
-        self.slots.remove(&key);
-        self.active.remove(&key);
-        for s in self.sessions.values().filter(|s| s.key == key) {
-            s.conn.close(close::UNPAIRED, b"");
-        }
-        self.refresh_server_config();
-        (self.events)(Event::Unpaired { fingerprint, saved: Ok(()) });
+        self.save_next();
     }
 
     /// The soonest moment something is due: a dial, a bind retry, or the status tick.

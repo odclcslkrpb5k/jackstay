@@ -14,7 +14,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use jackstay_proto::control::{self, Error, Request, Response, VERSION};
+use jackstay_proto::control::{self, Error, OLDEST_VERSION, Request, Response, VERSION};
 
 /// The most clients connected at once.
 pub const MAX_CLIENTS: usize = 16;
@@ -285,6 +285,12 @@ impl Clients {
         dropped
     }
 
+    /// Whether `id` is still connected.
+    #[must_use]
+    pub fn contains(&self, id: ClientId) -> bool {
+        self.connected.contains_key(&id)
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.connected.len()
@@ -353,9 +359,12 @@ impl Client {
             self.handled_this_turn = self.handled_this_turn.saturating_add(1);
             let greeted = self.phase == Phase::Greeted;
             match (greeted, request) {
-                (false, Request::Hello { version }) if version == VERSION => {
+                (false, Request::Hello { version })
+                    if (OLDEST_VERSION..=VERSION).contains(&version) =>
+                {
                     self.phase = Phase::Greeted;
-                    queue(self, &Response::Welcome { version: VERSION });
+                    // Its own version back: the newer requests it does not know, it never sends.
+                    queue(self, &Response::Welcome { version });
                 }
                 (false, Request::Hello { .. }) => {
                     queue(self, &Response::Error(Error::UnsupportedVersion));

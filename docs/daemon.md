@@ -22,8 +22,16 @@ xfce4-clipman-plugin 1.6.6.
 - **Thumbnails thread.** Makes the thumbnails of the history's images, each in a confined helper
   process (below); the clipboard thread polls its wake pipe. If it cannot start, images have no
   thumbnails and nothing else changes; if it dies, entries stay pending.
+- **Link thread.** The link to other machines (docs/link.md): `jackstay-net` on a tokio runtime of
+  its own. Its events reach the clipboard thread on a channel with a wake pipe; status arrives at
+  least every second, and ten seconds without any while the daemon ran, or the thread's end,
+  stops the daemon with 101 for systemd to restart (a whole process paused, by suspend say, is
+  not held against it). Off when `link.enabled` is false; if it cannot start (an unusable identity
+  or peers file) it is off with the reason in `jackstay peers`, and the clipboard runs on. After
+  three failures in a row it starts off once, so a fault that recurs never stops the clipboard
+  manager for good.
 - **Main thread.** Parses configuration and flags, takes the instance lock, checks coexistence,
-  starts the store and clipboard threads (and the thumbnails thread), and waits for the first
+  starts the store and clipboard threads (and the thumbnails and link threads), and waits for the first
   two to end. A panic in either thread ends the process
   with 101 (a thread's panic does not, by itself, under `panic = "unwind"`).
 
@@ -134,8 +142,8 @@ lock.
 
 Each connection's peer is checked with `SO_PEERCRED`: another uid is refused before reading.
 Sockets are non-blocking, and what one client can cost the clipboard thread is bounded
-(`crates/jackstayd/src/control.rs`): at most 16 clients; a request frame of at most 16 bytes,
-refused from its header; a client is read only while it has under 64 KiB buffered and under 1 MiB of
+(`crates/jackstayd/src/control.rs`): at most 16 clients; a request frame of at most 257 bytes (a
+host or peer name of 255 and its length), refused from its header; a client is read only while it has under 64 KiB buffered and under 1 MiB of
 responses unread, and while it is not waiting for a deferred response; at most 64 of its requests
 per turn of the loop; one with 4 MiB unread is disconnected; one that has not said `Hello` within
 10 s is disconnected. A partial frame does not count as work, so a client that stalls mid-frame
@@ -153,8 +161,17 @@ A clear answers `ClaimFailed` if another application held the clipboard, so it w
 Sources and previews are cleaned of control, format and separator characters, in the daemon and
 again in the CLI, so nothing a client sets (its `WM_CLASS`) reaches a terminal as an escape.
 
+Version 3 adds the link (docs/link.md, "In the daemon"): `Link` (its port, this machine's
+fingerprint, each peer's name, fingerprint, address, state, last round trip and sessions kept),
+`Pair { host }`, `PairAnswer { yes }` and `Unpair { peer }` (a name or a fingerprint). Pairing is a
+flow: `Pair` is answered `Ok`, and that client then gets `PairCode`, then `Paired` or `PairFailed`
+as they happen; it answers the code with `PairAnswer`. One client pairs at a time; pairing ends if
+it disconnects, and a new one is refused until the old one's last event has come. An unpairing
+is answered once the peers file is saved. A client of version 2 is still greeted, in its own
+version: each version only adds requests.
+
 `jackstay` is the thin CLI over it: `status`, `list`, `select`, `delete`, `pin`, `unpin`, `clear`,
-`clear-history`, `import-clipman`.
+`clear-history`, `import-clipman`, `peers`, `pair`, `unpair`.
 
 ## Thumbnails
 
@@ -287,6 +304,8 @@ At start, after the lock:
 | `history.max_pinned` | 1000 | pinned entries; pinning beyond is refused |
 | `capture.per_target` | 64 MiB | above a raw 4K screenshot (33 MB) |
 | `capture.per_entry` | 128 MiB | |
+| `link.enabled` | true | the link to other machines (docs/link.md) |
+| `link.port` | 24810 | UDP, 1024–65534; pairing uses the next port |
 
 Parsed once at start into a typed config; an unknown key or a bad value refuses (exit 2) with the
 key named in the journal. The whole history is held in memory, within these limits. The settings
@@ -302,7 +321,7 @@ defaults, and restarts the daemon to read it; comments in a file written by hand
 | 3 | Another clipboard manager, or another jackstayd, is running | no |
 | 4 | X connection lost after running (logout) | no |
 | 5 | X not reachable at start (login race) | yes |
-| 101 | Panic | yes |
+| 101 | Panic, or a thread (store, link) ended or stopped reporting | yes |
 
 ## Logging
 

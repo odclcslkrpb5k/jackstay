@@ -3,7 +3,7 @@
 //! than a second, so the watchdog is fed and the loop always turns. Nothing here waits on the disk
 //! or on a client.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use jackstay_clip::EntryId;
 use jackstay_proto::control::{
-    Error, MAX_LIST, MAX_SOURCE_LEN, Request, Response, Status, Thumb, printable,
+    Error, MAX_LIST, MAX_SOURCE_LEN, PairReason, Request, Response, Status, Thumb, printable,
 };
 use jackstay_selection::Report;
 use jackstay_x11_clip::Clipboard;
@@ -21,6 +21,7 @@ use rustix::event::{PollFd, PollFlags, Timespec, poll};
 
 use crate::control::{ClientId, Clients};
 use crate::import;
+use crate::link::{self, Link};
 use crate::notify::Notifier;
 use crate::store::{Reply, Request as StoreRequest, Snapshot};
 use crate::summary::{summary, truncate};
@@ -43,6 +44,8 @@ pub enum Exit {
     XGone(jackstay_x11_clip::Error),
     /// The store thread ended (exit status 101).
     StoreGone,
+    /// The link thread ended or stopped reporting (exit status 101).
+    LinkGone(link::Gone),
 }
 
 /// The store thread, as the session talks to it.
@@ -73,12 +76,24 @@ pub struct Parts {
     pub clipman_check: ClipmanCheck,
     /// `None` when its thread could not start: no entry has a thumbnail.
     pub thumbnails: Option<Thumbnails>,
+    /// `None` when its wake pipe could not be made; otherwise running, or off with a reason.
+    pub link: Option<Link>,
 }
 
 impl std::fmt::Debug for Parts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Parts").field("tracker", &self.tracker).finish_non_exhaustive()
     }
+}
+
+/// The pairing running now, as far as the session knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    /// Started by this client, which gets its events.
+    Client(ClientId),
+    /// Its client left and it was cancelled; its last event has not arrived yet. Until it does, a
+    /// new pairing is refused, so that event is never taken for the new one's.
+    Cancelling,
 }
 
 pub struct Session {
@@ -94,6 +109,11 @@ pub struct Session {
     pub per_target: u64,
     pub clipman_check: ClipmanCheck,
     pub thumbnails: Option<Thumbnails>,
+    pub link: Option<Link>,
+    /// The client that started the pairing running now, which gets its events.
+    pairing: Option<Flow>,
+    /// Clients waiting for an unpairing to be saved, in the order asked.
+    unpairing: VecDeque<ClientId>,
     /// Clients waiting for the store to confirm, by acknowledgement number, with the error to give
     /// them even if it does (a clear whose claim failed).
     waiting: HashMap<u64, (ClientId, Option<Error>)>,
@@ -175,6 +195,7 @@ enum Slot {
     Store,
     Signals,
     Thumbnails,
+    Link,
     Client(ClientId),
 }
 
@@ -191,6 +212,7 @@ impl Session {
             per_target,
             clipman_check,
             mut thumbnails,
+            link,
         } = parts;
         if let Some(store) = &store {
             let _ = store.wake.set_nonblocking(true);
@@ -209,6 +231,9 @@ impl Session {
             per_target,
             clipman_check,
             thumbnails,
+            link,
+            pairing: None,
+            unpairing: VecDeque::new(),
             waiting: HashMap::new(),
             next_ack: 0,
             store_failing: false,
@@ -390,10 +415,141 @@ impl Session {
                     self.thumbnails.as_ref().map_or(Thumb::Absent, |t| t.get(EntryId::new(id)));
                 respond(self, Response::Thumbnail { id, thumbnail });
             }
+            Request::Link
+            | Request::Pair { .. }
+            | Request::PairAnswer { .. }
+            | Request::Unpair { .. } => {
+                self.link_request(client, request);
+            }
             // Answered by the control module.
             Request::Hello { .. } | Request::Subscribe => {}
         }
         Ok(())
+    }
+
+    /// The link's requests (docs/link.md, "In the daemon").
+    fn link_request(&mut self, client: ClientId, request: Request) {
+        match request {
+            Request::Link => {
+                let status = self.link.as_ref().map_or_else(
+                    || jackstay_proto::control::LinkStatus {
+                        off: Some("the link could not be set up".to_owned()),
+                        ..Default::default()
+                    },
+                    Link::link_status,
+                );
+                self.clients.respond(client, &Response::Link(status));
+            }
+            Request::Pair { host } => self.pair(client, &host),
+            Request::PairAnswer { yes } => {
+                match (self.pairing, self.link.as_ref().and_then(Link::handle)) {
+                    (Some(Flow::Client(c)), Some(handle)) if c == client => {
+                        handle.confirm(yes);
+                        self.clients.respond(client, &Response::Ok);
+                    }
+                    _ => self.clients.respond(client, &Response::Error(Error::NotPairing)),
+                }
+            }
+            Request::Unpair { peer } => {
+                let Some(link) = self.link.as_ref().filter(|l| l.handle().is_some()) else {
+                    self.clients.respond(client, &Response::Error(Error::LinkOff));
+                    return;
+                };
+                match link.find(&peer) {
+                    Err(e) => self.clients.respond(client, &Response::Error(e)),
+                    Ok(key) => {
+                        if let Some(handle) = link.handle() {
+                            handle.unpair(key);
+                        }
+                        self.unpairing.push_back(client);
+                        self.clients.defer(client);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Starts pairing for `client`, which then gets its events.
+    fn pair(&mut self, client: ClientId, host: &str) {
+        let failed = |reason| Response::PairFailed { reason, detail: String::new() };
+        let Some(handle) = self.link.as_ref().and_then(Link::handle) else {
+            self.clients.respond(client, &failed(PairReason::LinkOff));
+            return;
+        };
+        if self.pairing.is_some() {
+            self.clients.respond(client, &failed(PairReason::Busy));
+            return;
+        }
+        let Some(address) = jackstay_net::Address::parse(host) else {
+            self.clients.respond(client, &failed(PairReason::BadAddress));
+            return;
+        };
+        handle.pair(address);
+        self.pairing = Some(Flow::Client(client));
+        log("pairing started");
+        self.clients.respond(client, &Response::Ok);
+    }
+
+    /// What the link thread said: status is kept; pairing's events go to the pairing client.
+    fn link_events(&mut self) {
+        let Some(link) = &mut self.link else { return };
+        for event in link.receive() {
+            match event {
+                jackstay_net::Event::PairCode { name, fingerprint, code } => {
+                    if let Some(Flow::Client(c)) = self.pairing {
+                        let name = truncate(&printable(&name), 64);
+                        self.clients.respond(c, &Response::PairCode { name, fingerprint, code });
+                    }
+                }
+                jackstay_net::Event::Paired { name, fingerprint } => {
+                    log(&format!("paired with {fingerprint}"));
+                    if let Some(Flow::Client(c)) = self.pairing.take() {
+                        let name = truncate(&printable(&name), 64);
+                        self.clients.respond(c, &Response::Paired { name, fingerprint });
+                    }
+                }
+                jackstay_net::Event::PairFailed(f) => {
+                    let (reason, detail) = link::pair_reason(&f);
+                    log(&format!("pairing ended: {}", reason.explain()));
+                    if let Some(Flow::Client(c)) = self.pairing.take() {
+                        self.clients.respond(c, &Response::PairFailed { reason, detail });
+                    }
+                }
+                jackstay_net::Event::Unpaired { fingerprint, saved } => {
+                    let response = match saved {
+                        Ok(()) => {
+                            log(&format!("unpaired {fingerprint}"));
+                            Response::Ok
+                        }
+                        Err(jackstay_net::UnpairError::NotPaired) => {
+                            Response::Error(Error::NoSuchPeer)
+                        }
+                        Err(jackstay_net::UnpairError::Save(_)) => {
+                            log(&format!("unpairing {fingerprint}: the peers file was not saved"));
+                            Response::Error(Error::SaveFailed)
+                        }
+                    };
+                    if let Some(c) = self.unpairing.pop_front() {
+                        self.clients.resolve(c, &response);
+                    }
+                }
+                jackstay_net::Event::Status(_) => {}
+            }
+        }
+    }
+
+    /// Ends pairing if the client that started it has gone.
+    fn pairing_client_gone(&mut self) {
+        if let Some(Flow::Client(c)) = self.pairing
+            && !self.clients.contains(c)
+        {
+            self.pairing = Some(Flow::Cancelling);
+            if let Some(handle) = self.link.as_ref().and_then(Link::handle) {
+                handle.cancel_pairing();
+            }
+            log("pairing cancelled: its client left");
+        }
     }
 
     fn store_replies(&mut self) -> Result<(), Exit> {
@@ -460,14 +616,8 @@ impl Session {
         }
     }
 
-    fn turn(&mut self) -> Result<(), Exit> {
-        self.clients.begin_turn();
-        let ready = self.clients.ready();
-        let sleep = if ready.is_empty() {
-            self.clipboard.timeout().map_or(MAX_SLEEP, |t| t.min(MAX_SLEEP))
-        } else {
-            Duration::ZERO
-        };
+    /// Waits up to `sleep` for any descriptor, and says which fired.
+    fn poll(&self, sleep: Duration) -> Vec<(Slot, bool)> {
         let mut slots = vec![Slot::X, Slot::Signals];
         let mut fds: Vec<(BorrowedFd<'_>, PollFlags)> =
             vec![(self.clipboard.fd(), PollFlags::IN), (self.signals.as_fd(), PollFlags::IN)];
@@ -482,6 +632,10 @@ impl Session {
         if let Some(t) = &self.thumbnails {
             slots.push(Slot::Thumbnails);
             fds.push((t.wake.as_fd(), PollFlags::IN));
+        }
+        if let Some(l) = &self.link {
+            slots.push(Slot::Link);
+            fds.push((l.wake.as_fd(), PollFlags::IN));
         }
         for (id, fd, reading, writing) in self.clients.client_fds() {
             let mut flags = PollFlags::empty();
@@ -502,6 +656,18 @@ impl Session {
             slots.iter().zip(&polled).map(|(slot, p)| (*slot, !p.revents().is_empty())).collect();
         drop(polled);
         drop(fds);
+        fired
+    }
+
+    fn turn(&mut self) -> Result<(), Exit> {
+        self.clients.begin_turn();
+        let ready = self.clients.ready();
+        let sleep = if ready.is_empty() {
+            self.clipboard.timeout().map_or(MAX_SLEEP, |t| t.min(MAX_SLEEP))
+        } else {
+            Duration::ZERO
+        };
+        let fired = self.poll(sleep);
 
         let reports = self.clipboard.process().map_err(Exit::XGone)?;
         if self.reports(&reports)? {
@@ -522,12 +688,14 @@ impl Session {
                         t.receive();
                     }
                 }
+                Slot::Link if fired => self.link_events(),
                 Slot::Client(id) if fired => readable.push(id),
                 Slot::X
                 | Slot::Listener
                 | Slot::Store
                 | Slot::Signals
                 | Slot::Thumbnails
+                | Slot::Link
                 | Slot::Client(_) => {}
             }
         }
@@ -552,6 +720,10 @@ impl Session {
         }
         for why in self.clients.flush() {
             log(&format!("control client dropped: {why:?}"));
+        }
+        self.pairing_client_gone();
+        if let Some(l) = &mut self.link {
+            l.check().map_err(Exit::LinkGone)?;
         }
         if self.last_clipman_check.elapsed() >= CLIPMAN_CHECK_EVERY {
             self.last_clipman_check = Instant::now();

@@ -18,11 +18,17 @@ jackstay-store = { path = "../store", version = "=0.0.0" }
 jackstay-x11-clip = { path = "../x11-clip", version = "=0.0.0" }
 jackstay-proto = { path = "../proto", version = "=0.0.0" }
 jackstay-thumbnail = { path = "../thumbnail", version = "=0.0.0" }
+jackstay-net = { path = "../net", version = "=0.0.0" }
 signal-hook = { version = "=0.4.5", default-features = false }
 toml = { version = "=1.1.8", default-features = false, features = ["std", "parse", "serde"] }
-rustix = { version = "=1.1.5", default-features = false, features = ["std", "event", "fs", "net", "process"] }
+rustix = { version = "=1.1.5", default-features = false, features = ["std", "event", "fs", "net", "process", "system"] }
 
 [dev-dependencies]
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
 proptest.workspace = true
 x11rb = { version = "=0.14.0", default-features = false }
+# The link tests' stand-ins: a flood of handshakes, and a machine in the middle of pairing.
+quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+ring = { version = "=0.17.14", default-features = false, features = ["alloc"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+tokio = { version = "=1.54.1", default-features = false, features = ["rt", "net", "time", "sync", "macros"] }

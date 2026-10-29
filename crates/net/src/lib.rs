@@ -207,8 +207,17 @@ pub enum Event {
     /// The answer to [`Handle::unpair`]: whether the peer was removed and the file saved.
     Unpaired {
         fingerprint: String,
-        saved: Result<(), String>,
+        saved: Result<(), UnpairError>,
     },
+}
+
+/// Why a peer was not unpaired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnpairError {
+    /// It was not paired (already unpaired, say).
+    NotPaired,
+    /// The peers file could not be saved; the peer is still paired.
+    Save(String),
 }
 
 #[derive(Debug)]
@@ -287,6 +296,14 @@ impl Handle {
     }
 }
 
+impl Handle {
+    /// Leaves the link thread without waiting for it: for one that stopped answering, which
+    /// joining would wait on for ever. The process is about to exit.
+    pub fn abandon(mut self) {
+        drop(self.thread.take());
+    }
+}
+
 impl Drop for Handle {
     fn drop(&mut self) {
         let _ = self.commands.send(Command::Shutdown);
@@ -317,9 +334,14 @@ pub fn start(
         return Err(StartError::Peers(PeersError::OwnKey));
     }
     let (commands, receiver) = mpsc::unbounded_channel();
+    // Made here, so a failure is the start's, and the link is off, rather than the thread's end.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(StartError::Thread)?;
     let thread = std::thread::Builder::new()
         .name("link".to_owned())
-        .spawn(move || engine::run(config, identity, peers, receiver, Box::new(events)))
+        .spawn(move || engine::run(runtime, config, identity, peers, receiver, Box::new(events)))
         .map_err(StartError::Thread)?;
     Ok(Handle { commands, thread: Some(thread), public })
 }

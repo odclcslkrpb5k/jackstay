@@ -67,6 +67,8 @@ jackstay clear-history   # delete every unpinned entry and clear the clipboard
 jackstay status
 jackstay popup           # the history at the pointer: type to search, Enter to paste
 jackstay settings        # limits, the popup's hotkey, starting at login (also in the tray's menu)
+jackstay pair HOST       # pair with another machine (run it there too, naming this one)
+jackstay peers           # paired machines and the link's state; jackstay unpair NAME to forget one
 ```
 
 Nothing copied is filtered or hidden: a copied password is kept like anything else, and
