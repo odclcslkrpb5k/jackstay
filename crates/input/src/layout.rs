@@ -94,6 +94,17 @@ impl Layout {
         &self.monitors
     }
 
+    /// The monitors as a `Layout` message carries them. Each came from a [`Monitor`] that passed
+    /// [`Monitor::check`], so each fits.
+    #[must_use]
+    pub fn wire(&self) -> Vec<Monitor> {
+        let c = |v: i32| u16::try_from(v).unwrap_or(0);
+        self.monitors
+            .iter()
+            .map(|m| Monitor { x: c(m.x), y: c(m.y), width: c(m.width), height: c(m.height) })
+            .collect()
+    }
+
     #[must_use]
     pub fn bounds(&self) -> Rect {
         self.bounds

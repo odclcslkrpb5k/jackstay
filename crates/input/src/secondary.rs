@@ -117,6 +117,20 @@ impl Secondary {
         }
     }
 
+    /// The sides whose neighbour is this primary changed.
+    pub fn exits(&mut self, exits: Sides) {
+        self.exits = exits;
+    }
+
+    /// This machine's own mouse moved the pointer to (`x`, `y`): the primary's motion goes on
+    /// from there.
+    pub fn moved(&mut self, x: i32, y: i32) {
+        let layout = &self.layout;
+        if let Some(s) = self.span.as_mut().filter(|s| !s.left) {
+            s.pointer = Pointer::at(layout, x, y);
+        }
+    }
+
     /// `Enter`: any span still open ends first; the pointer appears on `side` at `fraction`, the
     /// held modifiers are pressed and the locks set.
     pub fn enter(

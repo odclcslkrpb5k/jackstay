@@ -441,3 +441,14 @@ fn a_long_move_leaves_through_the_monitor_it_reaches() {
         Step::Left { side: Side::Right, fraction }
     );
 }
+
+#[test]
+fn the_secondarys_own_mouse_moves_the_pointer_the_primary_drives() {
+    let mut s = xiphos_secondary();
+    s.enter(1, Side::Right, 0, &[0; 32], 0);
+    s.moved(100, 1300);
+    assert_eq!(s.motion(1, 256, 0), vec![Action::MoveTo { x: 101, y: 1300 }]);
+    // Off every monitor (the dead zone above-left): the nearest pixel on one, HDMI-2's.
+    s.moved(10, 10);
+    assert_eq!(s.motion(1, 0, 256), vec![Action::MoveTo { x: 939, y: 11 }]);
+}
