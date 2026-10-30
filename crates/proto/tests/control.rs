@@ -1,5 +1,5 @@
 use jackstay_proto::control::{
-    Error, Kinds, LinkStatus, MAX_LIST, MAX_NAME_FIELD, MAX_PEERS, MAX_PREVIEW_CHARS,
+    Dialer, Error, Kinds, LinkStatus, MAX_LIST, MAX_NAME_FIELD, MAX_PEERS, MAX_PREVIEW_CHARS,
     MAX_SOURCE_LEN, MAX_THUMBNAIL_HEIGHT, MAX_THUMBNAIL_WIDTH, PairReason, PeerState, PeerSummary,
     Request, Response, Status, Summary, Thumb, Thumbnail, VERSION, decode_request, decode_response,
     encode_request, encode_response, preview, printable,
@@ -42,7 +42,7 @@ fn summary(id: u64) -> Summary {
 
 #[test]
 fn the_layout_is_as_documented() {
-    assert_eq!(request_bytes(&Request::Hello { version: VERSION }), [0, 0, 0, 2, 1, 0, 3]);
+    assert_eq!(request_bytes(&Request::Hello { version: VERSION }), [0, 0, 0, 2, 1, 0, 4]);
     assert_eq!(request_bytes(&Request::Clear), [0, 0, 0, 0, 7]);
     assert_eq!(
         request_bytes(&Request::Pin { id: 258, pinned: true }),
@@ -495,6 +495,7 @@ fn link_limits_hold_both_ways() {
         state: PeerState::Dialing,
         rtt_us: None,
         connects: 0,
+        dialed: None,
     };
     let many =
         Response::Link(LinkStatus { peers: vec![peer; MAX_PEERS + 1], ..LinkStatus::default() });
@@ -524,6 +525,28 @@ fn link_limits_hold_both_ways() {
     );
 }
 
+#[test]
+fn a_version_3_link_reply_leaves_out_who_dialed() {
+    // Byte for byte the reply a version 3 client decodes: no field it does not know.
+    let with = |dialed| {
+        response_bytes(&Response::Link(LinkStatus {
+            peers: vec![PeerSummary { dialed, ..peer_with(PeerState::Connected) }],
+            ..LinkStatus::default()
+        }))
+    };
+    assert_eq!(with(Some(Dialer::Us)), with(None));
+    // And who dialed, in a version 4 reply, is the peer's last byte; an unknown one is refused.
+    let mut bad = response_bytes(&Response::Peers(LinkStatus {
+        peers: vec![PeerSummary { dialed: Some(Dialer::Peer), ..peer_with(PeerState::Connected) }],
+        ..LinkStatus::default()
+    }));
+    assert_eq!(bad.last(), Some(&2));
+    if let Some(last) = bad.last_mut() {
+        *last = 3;
+    }
+    assert_eq!(decode_response(&bad), Err(DecodeError::Limit(LimitError::UnknownCode { code: 3 })));
+}
+
 fn peer_with(state: PeerState) -> PeerSummary {
     PeerSummary {
         name: String::new(),
@@ -532,6 +555,7 @@ fn peer_with(state: PeerState) -> PeerSummary {
         state,
         rtt_us: None,
         connects: 0,
+        dialed: None,
     }
 }
 
@@ -539,6 +563,7 @@ fn peer_with(state: PeerState) -> PeerSummary {
 fn every_link_request_and_response_round_trips() {
     let requests = [
         Request::Link,
+        Request::Peers,
         Request::Pair { host: "xiphos".into() },
         Request::Pair { host: "h".repeat(MAX_NAME_FIELD) },
         Request::PairAnswer { yes: true },
@@ -561,7 +586,8 @@ fn every_link_request_and_response_round_trips() {
     .collect();
     responses.extend([
         Response::Link(LinkStatus::default()),
-        Response::Link(LinkStatus {
+        Response::Peers(LinkStatus::default()),
+        Response::Peers(LinkStatus {
             off: None,
             port: Some(24810),
             bind_error: Some("in use".into()),
@@ -575,6 +601,7 @@ fn every_link_request_and_response_round_trips() {
                     state: PeerState::Connected,
                     rtt_us: Some(u32::MAX),
                     connects: 7,
+                    dialed: Some(Dialer::Us),
                 };
                 MAX_PEERS
             ],
@@ -596,8 +623,17 @@ fn every_link_request_and_response_round_trips() {
             state,
             rtt_us: None,
             connects: 0,
+            dialed: None,
         };
-        responses.push(Response::Link(LinkStatus { peers: vec![peer], ..LinkStatus::default() }));
+        responses.push(Response::Link(LinkStatus {
+            peers: vec![peer.clone()],
+            ..LinkStatus::default()
+        }));
+        for dialed in [None, Some(Dialer::Us), Some(Dialer::Peer)] {
+            let peer = PeerSummary { dialed, ..peer.clone() };
+            responses
+                .push(Response::Peers(LinkStatus { peers: vec![peer], ..LinkStatus::default() }));
+        }
     }
     for reason in [
         PairReason::Busy,

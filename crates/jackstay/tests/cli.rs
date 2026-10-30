@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use jackstay_proto::control::{
-    self, Error, Kinds, LinkStatus, PairReason, PeerState, PeerSummary, Request, Response, Status,
-    Summary, VERSION,
+    self, Dialer, Error, Kinds, LinkStatus, PairReason, PeerState, PeerSummary, Request, Response,
+    Status, Summary, VERSION,
 };
 
 #[track_caller]
@@ -235,7 +235,7 @@ fn status_says_what_is_on_the_clipboard_and_warns_of_a_failing_store() {
     };
     let (code, out, got) = exchange(&["status"], vec![status(Some(5), true, false)]);
     // The link is asked about too; this stand-in does not answer, and status says no more.
-    assert_eq!((code, got), (Some(0), vec![Request::Status, Request::Link]));
+    assert_eq!((code, got), (Some(0), vec![Request::Status, Request::Peers]));
     assert_eq!(out, "entries: 3 (1 pinned)\non the clipboard: entry 5\n");
     let (_, out, _) = exchange(&["status"], vec![status(None, true, true)]);
     assert_eq!(
@@ -369,6 +369,7 @@ fn xiphos(state: PeerState, rtt_us: Option<u32>) -> PeerSummary {
         state,
         rtt_us,
         connects: 2,
+        dialed: None,
     }
 }
 
@@ -382,7 +383,7 @@ fn status_and_peers_show_the_link() {
             owns_clipboard: false,
             store_failing: false,
         }),
-        Response::Link(link(vec![xiphos(PeerState::Connected, Some(1234))])),
+        Response::Peers(link(vec![xiphos(PeerState::Connected, Some(1234))])),
     ];
     let (code, out, _) = exchange(&["status"], answers);
     assert_eq!(code, Some(0));
@@ -391,15 +392,24 @@ fn status_and_peers_show_the_link() {
     assert!(out.contains("  xiphos [2J connected, 1.234 ms\n"), "{out}");
     let (code, out, got) = exchange(
         &["peers"],
-        vec![Response::Link(link(vec![xiphos(PeerState::RefusedVersion, None)]))],
+        vec![Response::Peers(link(vec![xiphos(PeerState::RefusedVersion, None)]))],
     );
-    assert_eq!((code, got), (Some(0), vec![Request::Link]));
+    assert_eq!((code, got), (Some(0), vec![Request::Peers]));
     assert!(out.contains("refused: it runs another version\n"), "{out}");
     assert!(out.contains("fingerprint fedcba9876543210, address xiphos, sessions 2"), "{out}");
-    let (_, out, _) = exchange(&["peers"], vec![Response::Link(link(Vec::new()))]);
+    assert!(!out.contains("dialed"), "{out}");
+    // Who dialed, once connected: only that machine may change its address.
+    for (dialed, says) in
+        [(Dialer::Us, "    dialed by this machine\n"), (Dialer::Peer, "    dialed by xiphos [2J\n")]
+    {
+        let peer = PeerSummary { dialed: Some(dialed), ..xiphos(PeerState::Connected, None) };
+        let (_, out, _) = exchange(&["peers"], vec![Response::Peers(link(vec![peer]))]);
+        assert!(out.contains(says), "{out}");
+    }
+    let (_, out, _) = exchange(&["peers"], vec![Response::Peers(link(Vec::new()))]);
     assert!(out.contains("no paired machines (jackstay pair HOST)"), "{out}");
     let off = LinkStatus { off: Some("disabled".into()), ..LinkStatus::default() };
-    let (_, out, _) = exchange(&["peers"], vec![Response::Link(off)]);
+    let (_, out, _) = exchange(&["peers"], vec![Response::Peers(off)]);
     assert_eq!(out, "link: off (disabled)\n");
 }
 

@@ -304,6 +304,10 @@ impl Engine {
                     state,
                     rtt: slot.and_then(|s| s.current.and(s.rtt)),
                     connects: slot.map_or(0, |s| s.connects),
+                    dialed: slot
+                        .and_then(|s| s.current)
+                        .and_then(|c| self.sessions.get(&c))
+                        .map(|e| e.dialed),
                 }
             })
             .collect();

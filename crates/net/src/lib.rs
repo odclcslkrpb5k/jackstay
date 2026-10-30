@@ -120,6 +120,9 @@ pub struct PeerStatus {
     /// Sessions kept with this peer since the link started: a number that keeps rising means a
     /// link that keeps dropping.
     pub connects: u32,
+    /// Whether this machine dialed the kept session (QUIC's client, which may change its
+    /// address); `None` without one.
+    pub dialed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

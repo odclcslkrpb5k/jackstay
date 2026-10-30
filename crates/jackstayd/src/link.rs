@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use jackstay_net::{Event, Handle, PairFailure, PeerState, Status};
-use jackstay_proto::control::{self, LinkStatus, PairReason, PeerSummary, printable};
+use jackstay_proto::control::{self, Dialer, LinkStatus, PairReason, PeerSummary, printable};
 
 /// The link thread sends status at least every second; this long without any means it is wedged,
 /// and the daemon restarts (docs/link.md, "Supervision").
@@ -223,6 +223,7 @@ impl Link {
                 },
                 rtt_us: p.rtt.map(|d| u32::try_from(d.as_micros()).unwrap_or(u32::MAX)),
                 connects: p.connects,
+                dialed: p.dialed.map(|us| if us { Dialer::Us } else { Dialer::Peer }),
             })
             .collect();
         LinkStatus {

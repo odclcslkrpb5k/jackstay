@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use jackstay_proto::control::{LinkStatus, PairReason, PeerState, Request, Response};
+use jackstay_proto::control::{Dialer, LinkStatus, PairReason, PeerState, Request, Response};
 use jackstayd::client::Client;
 use support::{Daemon, Home, Xvfb, ask, ok};
 
@@ -221,8 +221,8 @@ impl Machine {
     }
 
     fn link(&self) -> LinkStatus {
-        match ask(&self.home, Request::Link) {
-            Response::Link(l) => l,
+        match ask(&self.home, Request::Peers) {
+            Response::Peers(l) => l,
             other => panic!("{other:?}"),
         }
     }
@@ -353,6 +353,17 @@ fn two_daemons_pair_with_one_code_and_link() {
     assert!(b < 50_000, "{b} µs");
     // Each knows the other by its fingerprint, and lists itself by its own.
     let (la, lb) = (rig.a.link(), rig.b.link());
+    // Both name the same machine as the one that dialed; a version 3 reply names neither.
+    let dialed = (la.peers[0].dialed, lb.peers[0].dialed);
+    assert!(
+        matches!(
+            dialed,
+            (Some(Dialer::Us), Some(Dialer::Peer)) | (Some(Dialer::Peer), Some(Dialer::Us))
+        ),
+        "{dialed:?}"
+    );
+    let Response::Link(old) = ask(&rig.a.home, Request::Link) else { panic!("no link status") };
+    assert_eq!(old.peers[0].dialed, None);
     assert_eq!(la.peers[0].fingerprint, lb.fingerprint);
     assert_eq!(lb.peers[0].fingerprint, la.fingerprint);
     assert_eq!(la.port, Some(rig.a.port));
@@ -500,12 +511,16 @@ fn reordering_and_duplication_do_not_drop_the_link() {
 
 #[test]
 fn a_new_source_port_for_the_dialing_machine_does_not_drop_the_link() {
-    // The kept session is the one the smaller key dialed: that machine is QUIC's client, and a
-    // client may move (QUIC migration). A server may not, and quinn drops a client's packets from
-    // an address it does not know: a rebinding there is recovered only by dialing again
-    // (docs/link.md, "Testing").
+    // The machine that dialed the kept session is QUIC's client, and a client may move (QUIC
+    // migration). A server may not, and quinn drops a client's packets from an address it does not
+    // know: a rebinding there is recovered only by dialing again (docs/link.md, "Testing"). Asked,
+    // not taken from the keys: the smaller key's session usually comes up alone, but not always.
     let rig = Rig::linked();
-    let dialer = if public_key(&rig.a) < public_key(&rig.b) { Toward::A } else { Toward::B };
+    let dialer = match rig.a.link().peers[0].dialed {
+        Some(Dialer::Us) => Toward::A,
+        Some(Dialer::Peer) => Toward::B,
+        None => panic!("no kept session"),
+    };
     rig.relay.rebind(dialer);
     std::thread::sleep(Duration::from_secs(4));
     assert_eq!(rig.a.peer(), (PeerState::Connected, 1));

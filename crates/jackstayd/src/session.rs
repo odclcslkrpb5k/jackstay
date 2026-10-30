@@ -416,6 +416,7 @@ impl Session {
                 respond(self, Response::Thumbnail { id, thumbnail });
             }
             Request::Link
+            | Request::Peers
             | Request::Pair { .. }
             | Request::PairAnswer { .. }
             | Request::Unpair { .. } => {
@@ -430,7 +431,7 @@ impl Session {
     /// The link's requests (docs/link.md, "In the daemon").
     fn link_request(&mut self, client: ClientId, request: Request) {
         match request {
-            Request::Link => {
+            Request::Link | Request::Peers => {
                 let status = self.link.as_ref().map_or_else(
                     || jackstay_proto::control::LinkStatus {
                         off: Some("the link could not be set up".to_owned()),
@@ -438,7 +439,13 @@ impl Session {
                     },
                     Link::link_status,
                 );
-                self.clients.respond(client, &Response::Link(status));
+                // A version 3 client's reply leaves out who dialed.
+                let reply = if request == Request::Link {
+                    Response::Link(status)
+                } else {
+                    Response::Peers(status)
+                };
+                self.clients.respond(client, &reply);
             }
             Request::Pair { host } => self.pair(client, &host),
             Request::PairAnswer { yes } => {

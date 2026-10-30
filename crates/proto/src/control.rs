@@ -16,11 +16,15 @@
 //! [`Response::PairCode`], then [`Response::Paired`] or [`Response::PairFailed`], whenever they
 //! happen; the client answers the code with [`Request::PairAnswer`], an ordinary request. Pairing
 //! ends if the client disconnects.
+//!
+//! Version 4 added [`Request::Peers`]: the link's state as [`Request::Link`] gives it, with which
+//! machine dialed each kept session ([`PeerSummary::dialed`]). Only the machine that dialed may
+//! change its address without the link dropping (docs/link.md, "Testing").
 
 use crate::{DecodeError, FRAME_HEADER_LEN, LimitError, MAX_PAYLOAD_LEN, Reader};
 
 /// The control protocol version this code speaks.
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 /// The oldest version the daemon still answers: each version adds to the last, so a client of an
 /// older one (a UI still running across an upgrade) keeps working.
 pub const OLDEST_VERSION: u16 = 2;
@@ -78,8 +82,10 @@ pub enum Request {
     Thumbnail {
         id: u64,
     },
-    /// The link's state ([`Response::Link`]).
+    /// The link's state ([`Response::Link`]), without who dialed: a version 3 client's reply.
     Link,
+    /// The link's state with who dialed ([`Response::Peers`]).
+    Peers,
     /// Starts pairing with the machine at `host` (`host` or `host:port`).
     Pair {
         host: String,
@@ -185,6 +191,16 @@ pub struct PeerSummary {
     pub rtt_us: Option<u32>,
     /// Sessions kept since the link started.
     pub connects: u32,
+    /// Which machine dialed the kept session; `None` without one, and in [`Response::Link`].
+    pub dialed: Option<Dialer>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialer {
+    /// This machine: QUIC's client, which may change its address.
+    Us,
+    /// The peer.
+    Peer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,6 +309,7 @@ pub enum Response {
         thumbnail: Thumb,
     },
     Link(LinkStatus),
+    Peers(LinkStatus),
     /// Pairing reached the other machine: show the code and its fingerprint, and ask.
     PairCode {
         name: String,
@@ -451,6 +468,7 @@ const LINK: u8 = 12;
 const PAIR: u8 = 13;
 const PAIR_ANSWER: u8 = 14;
 const UNPAIR: u8 = 15;
+const PEERS: u8 = 16;
 
 const WELCOME: u8 = 64;
 const OK: u8 = 65;
@@ -464,6 +482,7 @@ const LINK_REPLY: u8 = 72;
 const PAIR_CODE: u8 = 73;
 const PAIRED: u8 = 74;
 const PAIR_FAILED: u8 = 75;
+const PEERS_REPLY: u8 = 76;
 
 const ABSENT: u8 = 0;
 const PENDING: u8 = 1;
@@ -556,6 +575,7 @@ pub fn encode_request(request: &Request, out: &mut Vec<u8>) -> Result<(), LimitE
             THUMBNAIL
         }
         Request::Link => LINK,
+        Request::Peers => PEERS,
         Request::Pair { ref host } => {
             put_text(&mut p, host, MAX_NAME_FIELD)?;
             PAIR
@@ -600,6 +620,7 @@ pub fn decode_request(buf: &[u8]) -> Result<Option<(Request, usize)>, DecodeErro
         SUBSCRIBE => Request::Subscribe,
         THUMBNAIL => Request::Thumbnail { id: r.u64()? },
         LINK => Request::Link,
+        PEERS => Request::Peers,
         PAIR => Request::Pair { host: text(&mut r, MAX_NAME_FIELD)? },
         PAIR_ANSWER => Request::PairAnswer { yes: flag(&mut r)? },
         UNPAIR => Request::Unpair { peer: text(&mut r, MAX_NAME_FIELD)? },
@@ -730,7 +751,8 @@ fn pair_reason_of(code: u8) -> Result<PairReason, DecodeError> {
         .ok_or(DecodeError::Limit(LimitError::UnknownCode { code }))
 }
 
-fn put_link(p: &mut Vec<u8>, l: &LinkStatus) -> Result<(), LimitError> {
+/// With `dialed`, each peer's [`PeerSummary::dialed`] too ([`Response::Peers`]).
+fn put_link(p: &mut Vec<u8>, l: &LinkStatus, dialed: bool) -> Result<(), LimitError> {
     if l.peers.len() > MAX_PEERS {
         return Err(LimitError::TooManyEntries { count: l.peers.len() });
     }
@@ -762,11 +784,18 @@ fn put_link(p: &mut Vec<u8>, l: &LinkStatus) -> Result<(), LimitError> {
             }
         }
         p.extend_from_slice(&peer.connects.to_be_bytes());
+        if dialed {
+            p.push(match peer.dialed {
+                None => 0,
+                Some(Dialer::Us) => 1,
+                Some(Dialer::Peer) => 2,
+            });
+        }
     }
     Ok(())
 }
 
-fn link(r: &mut Reader<'_>) -> Result<LinkStatus, DecodeError> {
+fn link(r: &mut Reader<'_>, dialed: bool) -> Result<LinkStatus, DecodeError> {
     let off = option_text(r, MAX_LINK_TEXT)?;
     let port = if flag(r)? { Some(u16_be(r)?) } else { None };
     let bind_error = option_text(r, MAX_LINK_TEXT)?;
@@ -784,7 +813,17 @@ fn link(r: &mut Reader<'_>) -> Result<LinkStatus, DecodeError> {
         let state = peer_state_of(r.u8()?)?;
         let rtt_us = if flag(r)? { Some(r.u32()?) } else { None };
         let connects = r.u32()?;
-        peers.push(PeerSummary { name, fingerprint, address, state, rtt_us, connects });
+        let dialed = if dialed {
+            match r.u8()? {
+                0 => None,
+                1 => Some(Dialer::Us),
+                2 => Some(Dialer::Peer),
+                code => return Err(LimitError::UnknownCode { code }.into()),
+            }
+        } else {
+            None
+        };
+        peers.push(PeerSummary { name, fingerprint, address, state, rtt_us, connects, dialed });
     }
     Ok(LinkStatus { off, port, bind_error, fingerprint, pairing, peers })
 }
@@ -873,9 +912,10 @@ pub fn encode_response(response: &Response, out: &mut Vec<u8>) -> Result<(), Lim
             }
             THUMBNAIL_REPLY
         }
-        Response::Link(l) => {
-            put_link(&mut p, l)?;
-            LINK_REPLY
+        Response::Link(l) | Response::Peers(l) => {
+            let dialed = matches!(response, Response::Peers(_));
+            put_link(&mut p, l, dialed)?;
+            if dialed { PEERS_REPLY } else { LINK_REPLY }
         }
         Response::PairCode { name, fingerprint, code } => {
             put_text(&mut p, name, MAX_LINK_TEXT)?;
@@ -967,7 +1007,8 @@ pub fn decode_response(buf: &[u8]) -> Result<Option<(Response, usize)>, DecodeEr
             };
             Response::Thumbnail { id, thumbnail }
         }
-        LINK_REPLY => Response::Link(link(&mut r)?),
+        LINK_REPLY => Response::Link(link(&mut r, false)?),
+        PEERS_REPLY => Response::Peers(link(&mut r, true)?),
         PAIR_CODE => Response::PairCode {
             name: text(&mut r, MAX_LINK_TEXT)?,
             fingerprint: text(&mut r, MAX_LINK_TEXT)?,

@@ -167,8 +167,13 @@ fingerprint, each peer's name, fingerprint, address, state, last round trip and 
 flow: `Pair` is answered `Ok`, and that client then gets `PairCode`, then `Paired` or `PairFailed`
 as they happen; it answers the code with `PairAnswer`. One client pairs at a time; pairing ends if
 it disconnects, and a new one is refused until the old one's last event has come. An unpairing
-is answered once the peers file is saved. A client of version 2 is still greeted, in its own
-version: each version only adds requests.
+is answered once the peers file is saved.
+
+Version 4 adds `Peers`: `Link`'s answer, with which machine dialed each kept session. That machine
+is QUIC's client, the only one that may change its address without the link dropping
+(docs/link.md, "Testing"); `jackstay peers` shows it. `Link` still answers without it, byte for
+byte as version 3 did. A client of version 2 or 3 is still greeted, in its own version: each
+version only adds requests.
 
 `jackstay` is the thin CLI over it: `status`, `list`, `select`, `delete`, `pin`, `unpin`, `clear`,
 `clear-history`, `import-clipman`, `peers`, `pair`, `unpair`.

@@ -7,7 +7,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use jackstay_proto::control::{
-    Error, Kinds, LinkStatus, PeerState, Request, Response, Summary, printable,
+    Dialer, Error, Kinds, LinkStatus, PeerState, Request, Response, Summary, printable,
 };
 use jackstayd::client::{Client, ClientError};
 use jackstayd::ui_socket::{self, Ask};
@@ -135,7 +135,7 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
         ("clear-history", []) => Request::ClearHistory,
         ("import-clipman", []) => Request::ImportClipman { remove: false },
         ("import-clipman", [flag]) if flag == "--remove" => Request::ImportClipman { remove: true },
-        ("peers", []) => Request::Link,
+        ("peers", []) => Request::Peers,
         ("pair", [host]) => Request::Pair { host: text(host)? },
         ("unpair", [peer]) => Request::Unpair { peer: text(peer)? },
         ("help" | "--help" | "-h", []) => {
@@ -177,7 +177,7 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
     show(&request, response)?;
     if request == Request::Status {
         // The link's line too, for a status that says everything.
-        if let Ok(Response::Link(l)) = client.ask(&Request::Link) {
+        if let Ok(Response::Peers(l)) = client.ask(&Request::Peers) {
             print_link(&l, false);
         }
     }
@@ -290,6 +290,12 @@ fn print_link(l: &LinkStatus, full: bool) {
                 printable(&p.address),
                 p.connects
             );
+            // Only the machine that dialed may change its address without the link dropping.
+            match p.dialed {
+                Some(Dialer::Us) => println!("    dialed by this machine"),
+                Some(Dialer::Peer) => println!("    dialed by {}", printable(&p.name)),
+                None => {}
+            }
         }
     }
 }
@@ -347,7 +353,7 @@ fn show(request: &Request, response: Response) -> Result<(), Failure> {
             }
             Ok(())
         }
-        (Request::Link, Response::Link(l)) => {
+        (Request::Peers, Response::Peers(l)) => {
             print_link(&l, true);
             Ok(())
         }

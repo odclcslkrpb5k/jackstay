@@ -383,7 +383,7 @@ A separately briefed reviewer, read-only.
 | # | Finding | Resolution |
 |---|---|---|
 | 1 | A whole process paused 10 s or more is taken for a wedged link thread (101) | Fixed: a 3 s gap between checks forgives the silence; the suspend test stops for 30 s and checks the daemon still runs |
-| 2 | The rebind test depended on key order: only QUIC's client may move | Fixed: the dialing side rebinds; the answering side's limit documented above |
+| 2 | The rebind test depended on key order: only QUIC's client may move | Fixed: the dialing side rebinds; the answering side's limit documented above. That fix still took the smaller key for the dialer, which holds only usually: a session the larger key dialed can come up alone (CI, 2026-10-30; 1 run in 30 here). The test now asks the daemon who dialed (control version 4, `Peers`); planted inverted, it fails every run |
 | 3 | On a link failure, the exit joined a wedged thread; a stalled lookup held up shutdown | Fixed: the handle is abandoned; the runtime shuts down within 0.5 s |
 | 4 | Saving the peers file blocked the engine | Fixed: saved on the blocking pool, one change at a time |
 | 5 | A cancelled pairing's last event could be taken for a new one's | Fixed: the session refuses a new pairing until the cancelled one has ended |
