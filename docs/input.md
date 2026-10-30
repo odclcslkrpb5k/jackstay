@@ -4,7 +4,8 @@ How one machine's keyboard and mouse drive another's screen (milestone M4). Plan
 input sharing must do; this says how. It rides on the link (docs/link.md).
 
 Status: **design, revised after red-team pass 1** (findings and their resolutions at the end);
-slice 1 (the `input` crate, the `proto::link` input messages, `[input]` configuration) built.
+slice 1 (the `input` crate, the `proto::link` input messages, `[input]` configuration) and
+slice 2 (`x11-input`, tested against Xvfb) built.
 Facts marked *measured* come from `spikes/x11-probes` (`run-input.sh` and `run.sh`, Xvfb 21.1.22,
 2026-10-29), from the reviewer's probes, or were read from the owner's X server (athena,
 read-only, 2026-10-29).
@@ -112,7 +113,8 @@ unknown.
   connected and its layout known, and no button is held (checked with `XIQueryPointer`'s button
   mask; a barrier event carries no button state): grab the master pointer and keyboard with
   `XIGrabDevice`, the pointer with an invisible cursor. Then check the button mask again, and if a
-  button went down in between, ungrab and stay. *Measured:* both grabs take 72 µs; the cursor is a
+  button went down in between, ungrab and stay. The pointer grab asks for raw motion itself:
+  *measured*, raw motion selected on the root does not reach the client that grabs. *Measured:* both grabs take 72 µs; the cursor is a
   1×1 transparent image while grabbed, and the server restores the real one on ungrab, so a crash
   cannot leave it hidden. Then park the pointer at the centre of its monitor (a warp; *measured:*
   a warp adds no raw event), mark the session active (100 ms pings, docs/link.md, "Liveness"),
@@ -136,9 +138,11 @@ unknown.
     processed values really are accelerated is measured at acceptance.
   - **buttons** 1–9 (4–7 are the wheel), from `XI_ButtonPress`/`Release`; XTest has no button
     beyond 10 (*measured*: 12 is `BadValue`). Whether XI 2.4 delivers the wheel's emulated button
-    events to a grabbing client, or only scroll valuators, is measured in slice 2; if only
-    valuators, the primary turns each scroll step (the valuator's increment) into a button 4–7
-    click.
+    events to a grabbing client, or only scroll valuators, cannot be measured on Xvfb (XTest's
+    wheel buttons are real buttons, not emulated). The protocol flags emulated button events to
+    XI2 clients (`XIPointerEmulated`, XI2.h), so they are forwarded as buttons; acceptance on
+    athena checks a real wheel. If only valuators arrive, the primary turns each scroll step (the
+    valuator's increment) into a button 4–7 click.
   - **keys** as keycodes, from `XI_KeyPress`/`Release`, skipping the server's repeats.
     *Measured:* a held key's repeats arrive as `XI_KeyPress` with the repeat flag (9 in a second
     on Xvfb), and raw key events are never repeated.
@@ -175,7 +179,9 @@ unknown.
 
 ## Secondary
 
-- **Clearing XTest's held keys.** *Measured (corrected 2026-10-29):* the X server does **not**
+- **Clearing XTest's held keys.** Slice 2's tests confirm it on every run: a key injected,
+  seen down by another client, stays down after the injecting connection closes, and
+  `clear_xtest` releases it. *Measured (corrected 2026-10-29):* the X server does **not**
   release keys held through XTest when the injecting connection closes; they stay down and
   auto-repeat (plan §5.3 had said otherwise, from a probe that was Xvfb's only client). So at
   every start, input on or off, and at every `Enter`, the secondary reads the XTest keyboard's and
@@ -304,8 +310,10 @@ unaffected.
 
 On athena and xiphos, with Synergy stopped: the owner uses Jackstay for input (plan §6), after
 these are measured and recorded here: added latency p99; whether athena's processed motion is
-accelerated (a read-only XI2 listener while the owner moves the trackball); xiphos's repeat delay
-and keymap differences; crossings near xiphos's top, against Synergy's habit.
+accelerated (a read-only XI2 listener while the owner moves the trackball); that the trackball's
+wheel scrolls on xiphos; crossings near xiphos's top, against Synergy's habit. Already read
+(2026-10-29): xiphos has a US layout without `caps:super`, a 500 ms repeat delay, and no pointer
+device of its own.
 
 ## Slices
 
@@ -356,3 +364,30 @@ A separately briefed reviewer, which verified each finding with a scratch test.
 | 4 | A keycode with no keysyms on the primary passed through, typing whatever it is here | Dropped |
 | 5 | A move longer than a monitor clamped to the monitor it started on, missing the one it reached and its edge | The target clamped into the bounding box picks the monitor |
 | 6 | The document claimed neighbour resolution and hotkey settings in slice 1 | Moved to slice 3 |
+
+### Pass 3 (code review of slice 2), 2026-10-29
+
+A separately briefed reviewer, which verified findings 1 and 2 with probes on Xvfb.
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | An XKB client gets no core `MappingNotify`, and nothing for a new keyboard: `xmodmap` and `setxkbmap` went unreported, so a changed keymap would stay stale until restart | XKB `MapNotify` and `NewKeyboardNotify` selected. *Measured*: a new keyboard is also announced each time typing moves from one keyboard device to another, with the same details as `setxkbmap`'s, so any of these re-reads the map and reports it only if it changed |
+| 2 | XTest's raw motion can be absolute (`xdotool mousemove`): an absolute move came through as a jump of hundreds of pixels | While grabbing, XTest's motion is measured from the pointer's positions, not its raw values |
+| 3 | The watchdog read the beat before the grab flag, and could shut the socket right after a first grab | It reads the flag first; the beat is stored before the flag |
+| 4 | A call that waits for a reply reads waiting events into x11rb's queue, where `poll` cannot see them | Documented on `Display::fd`: the loop calls `events` after any such call and before every poll (slice 3) |
+| 5 | An X error on the keyboard grab left the pointer grabbed, unseen by the watchdog | Every way out after the pointer grab releases it |
+| 6 | The repeat test never showed a repeat happened | It now proves the server repeats the held key, then that the grab forwards it once |
+| 7 | Two tests relied on sleeps for ordering between clients, and one on a tight bound | A round trip after setting barriers; 1.5 s for the watchdog |
+
+### Slice 2 plants, 2026-10-29
+
+Fifteen bugs planted in `x11-input`, one at a time; thirteen were caught (three of them after
+the review above). The two button checks
+around the grab mask each other, and both stay:
+
+- Without the check **before** grabbing, a grab taken with a button held over the root is
+  released at once by the check after, so no test sees a difference. The check stays because a
+  button released during that brief grab would go to us, not to the application, which would be
+  left mid-drag.
+- Without the check **after** grabbing, the button checked before is still caught. Only a button
+  pressed between the two requests reaches it, which a test cannot time.

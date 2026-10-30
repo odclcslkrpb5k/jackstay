@@ -1,0 +1,17 @@
+[package]
+name = "jackstay-x11-input"
+description = "Jackstay's input thread's X side: RandR, barriers, XInput 2 grabs and raw events, XTest"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+jackstay-input = { path = "../input", version = "=0.0.0" }
+jackstay-proto = { path = "../proto", version = "=0.0.0" }
+x11rb = { version = "=0.14.0", default-features = false, features = ["xfixes", "xinput", "xtest", "randr", "xkb"] }
