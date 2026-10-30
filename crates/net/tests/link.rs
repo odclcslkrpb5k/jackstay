@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 
 use jackstay_net::peers::{self, Peer};
 use jackstay_net::{
-    Address, Config, Event, Handle, Identity, PairFailure, PeerState, PeerStatus, PublicKey,
+    Address, Config, Event, Handle, Identity, Input, PairFailure, PeerState, PeerStatus, PublicKey,
     Refusal, Status, Timings, start,
 };
+use jackstay_proto::link::{Message, Side};
 
 const CHILD: &str = "JACKSTAY_NET_CHILD";
 
@@ -85,10 +86,17 @@ impl Machine {
 
     fn start_with(&self, timings: Timings) -> Link {
         let (tx, events) = channel();
-        let handle = ok(start(self.config(timings), move |e| {
-            let _ = tx.send(e);
-        }));
-        Link { handle, events, last: None }
+        let (input_tx, inputs) = channel();
+        let handle = ok(start(
+            self.config(timings),
+            move |e| {
+                let _ = tx.send(e);
+            },
+            move |i| {
+                let _ = input_tx.send(i);
+            },
+        ));
+        Link { handle, events, inputs, last: None }
     }
 
     /// This machine in a child process, which can be killed or stopped.
@@ -159,6 +167,7 @@ fn address(port: u16) -> Address {
 struct Link {
     handle: Handle,
     events: Receiver<Event>,
+    inputs: Receiver<Input>,
     last: Option<Status>,
 }
 
@@ -198,6 +207,13 @@ impl Link {
         })
     }
 
+    /// The next input report within `within`.
+    fn input(&mut self, within: Duration, what: &str) -> Input {
+        self.inputs
+            .recv_timeout(within)
+            .unwrap_or_else(|e| panic!("no {what} within {within:?}: {e}"))
+    }
+
     /// How long, within `within`, the peer with `key` stays in `state` without leaving it.
     fn stays(&mut self, key: PublicKey, state: PeerState, within: Duration) -> bool {
         let until = Instant::now() + within;
@@ -235,7 +251,7 @@ fn child() {
         timings: Timings::default(),
     };
     let peers = ok(peers::load(&config.state_dir.join("peers")));
-    let handle = ok(start(config, |_| {}));
+    let handle = ok(start(config, |_| {}, |_| {}));
     // Gone with the parent, however it ends: its end of our standard input closes.
     std::thread::spawn(|| {
         let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
@@ -892,7 +908,7 @@ fn pairing_an_existing_peer_again_keeps_its_session() {
 fn a_peers_file_naming_this_machine_is_refused() {
     let a = Machine::new("a");
     a.knows(&a);
-    match start(a.config(Timings::default()), |_| {}) {
+    match start(a.config(Timings::default()), |_| {}, |_| {}) {
         Err(jackstay_net::StartError::Peers(jackstay_net::PeersError::OwnKey)) => {}
         other => panic!("{other:?}"),
     }
@@ -1099,4 +1115,135 @@ fn a_tokio_task_that_panics_is_reported_by_its_join_handle() {
     let rt = ok(tokio::runtime::Builder::new_current_thread().build());
     let joined = rt.block_on(async { tokio::spawn(async { panic!("planted") }).await });
     assert!(joined.is_err_and(|e| e.is_panic()));
+}
+
+/// Both machines linked in this process, each with the session it kept: once the first sessions
+/// have settled (a deferred dial can replace the first one kept).
+fn linked_for_input() -> (Machine, Link, u64, Machine, Link, u64) {
+    let (a, b) = (Machine::new("a"), Machine::new("b"));
+    a.knows(&b);
+    b.knows(&a);
+    let (mut la, mut lb) = (a.start(), b.start());
+    la.peer_in(b.key, PeerState::Connected, SOON);
+    lb.peer_in(a.key, PeerState::Connected, SOON);
+    let timings = Timings::default();
+    std::thread::sleep(timings.backoff_max + timings.dial_deadline + Duration::from_millis(500));
+    let last = |l: &mut Link, key| {
+        let mut session = None;
+        while let Ok(i) = l.inputs.try_recv() {
+            match i {
+                Input::Kept { key: k, session: s, .. } if k == key => session = Some(s),
+                Input::Ended { session: s, .. } if Some(s) == session => session = None,
+                _ => {}
+            }
+        }
+        session.unwrap_or_else(|| panic!("no session kept"))
+    };
+    let (sa, sb) = (last(&mut la, b.key), last(&mut lb, a.key));
+    (a, la, sa, b, lb, sb)
+}
+
+#[test]
+fn input_messages_cross_the_kept_session_in_order() {
+    let (a, la, sa, b, mut lb, sb) = linked_for_input();
+    for i in 0..1000 {
+        la.handle.send(b.key, sa, Message::Motion { span: 1, dx: i, dy: -i });
+    }
+    for i in 0..1000 {
+        match lb.input(SOON, "motion") {
+            Input::Message { key, session, message: Message::Motion { span: 1, dx, dy } } => {
+                assert_eq!((key, session, dx, dy), (a.key, sb, i, -i));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    // And back.
+    lb.handle.send(a.key, sb, Message::Leave { span: 1, side: Side::Left, fraction: 7 });
+    let mut la = la;
+    match la.input(SOON, "leave") {
+        Input::Message { key, message: Message::Leave { fraction: 7, .. }, .. } => {
+            assert_eq!(key, b.key);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn only_input_for_the_session_kept_is_sent() {
+    let (_a, la, sa, b, mut lb, _sb) = linked_for_input();
+    // A message for another session (one replaced since), and one the link speaks itself (a
+    // goodbye, which would end the session): neither is sent, and the session stays.
+    la.handle.send(b.key, sa.wrapping_add(1000), Message::Exit { span: 1 });
+    la.handle.send(b.key, sa, Message::Bye);
+    la.handle.send(b.key, sa, Message::Exit { span: 2 });
+    match lb.input(SOON, "exit") {
+        Input::Message { message: Message::Exit { span }, .. } => assert_eq!(span, 2),
+        other => panic!("{other:?}"),
+    }
+    assert!(lb.inputs.recv_timeout(Duration::from_millis(300)).is_err());
+}
+
+#[test]
+fn a_kept_session_reports_its_silence_freshness_and_end() {
+    let (here, there) = (Machine::new("a"), Machine::new("b"));
+    here.knows(&there);
+    there.knows(&here);
+    let mut la = here.start();
+    let mut child = there.spawn_active();
+    la.peer_in(there.key, PeerState::Connected, SOON);
+    let timings = Timings::default();
+    std::thread::sleep(timings.backoff_max + timings.dial_deadline + Duration::from_millis(500));
+    let mut kept = None;
+    while let Ok(i) = la.inputs.try_recv() {
+        if let Input::Kept { session, heard, .. } = i {
+            kept = Some((session, heard));
+        }
+    }
+    let (session, heard) = kept.unwrap_or_else(|| panic!("no session kept"));
+    // The child pings every 100 ms.
+    assert!(heard.age() < Duration::from_millis(250), "{:?}", heard.age());
+    child.signal(rustix::process::Signal::STOP);
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(heard.age() >= Duration::from_millis(300), "{:?}", heard.age());
+    let suspect = |l: &mut Link, on: bool| match l.input(SOON, "suspect") {
+        Input::Suspect { session: s, suspect, .. } => assert_eq!((s, suspect), (session, on)),
+        other => panic!("{other:?}"),
+    };
+    suspect(&mut la, true);
+    child.signal(rustix::process::Signal::CONT);
+    suspect(&mut la, false);
+    assert!(heard.age() < Duration::from_millis(250), "{:?}", heard.age());
+    child.kill();
+    // Silent first, then ended once QUIC's idle timeout passes.
+    loop {
+        match la.input(Duration::from_secs(15), "end") {
+            Input::Suspect { suspect: true, .. } => {}
+            Input::Ended { session: s, .. } => break assert_eq!(s, session),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[test]
+fn input_sent_as_soon_as_a_session_is_kept_arrives() {
+    // Only a can dial, so there is one session. b answers, and keeps it as soon as a's `Hello`
+    // arrives, before a has b's: what b sends at once reaches a before a's engine keeps the
+    // session, and is held until it does.
+    let (a, b) = (Machine::new("a"), Machine::new("b"));
+    a.knows(&b);
+    b.knows_at(&a, address(1));
+    let (mut la, mut lb) = (a.start(), b.start());
+    let session = loop {
+        if let Input::Kept { session, .. } = lb.input(SOON, "kept") {
+            break session;
+        }
+    };
+    lb.handle.send(a.key, session, Message::Exit { span: 9 });
+    loop {
+        match la.input(SOON, "exit") {
+            Input::Kept { .. } => {}
+            Input::Message { message: Message::Exit { span }, .. } => break assert_eq!(span, 9),
+            other => panic!("{other:?}"),
+        }
+    }
 }

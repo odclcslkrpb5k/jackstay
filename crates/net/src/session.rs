@@ -1,7 +1,9 @@
 //! One session with a paired peer (docs/link.md, "Streams", "Liveness"): the `Hello` exchange on
-//! stream 0, then pings both ways, with silence measured against the peer's announced interval.
+//! stream 0, then pings both ways, with silence measured against the peer's announced interval;
+//! and, once the engine kept it, input sharing's messages both ways (docs/input.md).
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 use jackstay_proto::link::{self, Message};
@@ -11,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::identity::PublicKey;
+use crate::input::{Heard, Input, Sink, is_input};
 use crate::{Refusal, Timings};
 
 /// Application close codes: why a session was closed on purpose.
@@ -38,6 +41,10 @@ const ALPN_ALERT: u8 = 120;
 
 /// Unanswered pings remembered for measuring round trips: at 100 ms, 1.6 s of them.
 const PINGS_KEPT: usize = 16;
+/// Input messages held from before the engine kept the session: the peer's engine may keep it
+/// first, and send its layout at once. More than this before then is more than a peer sends, and
+/// the rest are dropped.
+const EARLY_KEPT: usize = 16;
 
 /// The key the peer proved in the handshake.
 pub(crate) fn peer_key(conn: &Connection) -> Option<PublicKey> {
@@ -164,6 +171,10 @@ pub(crate) fn stream_ended(conn: &Connection, e: &StreamError) -> Ended {
 #[derive(Debug)]
 pub(crate) enum ToSession {
     Active(bool),
+    /// The engine kept this session: report to input sharing, and accept its messages.
+    Kept,
+    /// An input message to send.
+    Send(Message),
     Bye,
 }
 
@@ -178,6 +189,8 @@ pub(crate) enum Report {
 
 pub(crate) struct Args {
     pub id: u64,
+    /// The peer's key, as dialed or as proven when it dialed us.
+    pub key: PublicKey,
     pub conn: Connection,
     pub dialed: bool,
     /// Our `Hello`.
@@ -186,6 +199,54 @@ pub(crate) struct Args {
     pub timings: Timings,
     pub reports: mpsc::UnboundedSender<(u64, Report)>,
     pub commands: mpsc::UnboundedReceiver<ToSession>,
+    pub input: Sink,
+}
+
+/// What this session tells input sharing ([`Input`]): nothing until the engine keeps it, then
+/// what it held from before, and from then on as it happens, ending with `Ended`.
+struct ToInput {
+    sink: Sink,
+    key: PublicKey,
+    session: u64,
+    kept: bool,
+    heard: Arc<Heard>,
+    early: Vec<Message>,
+}
+
+impl ToInput {
+    fn kept(&mut self, suspect: bool) {
+        self.kept = true;
+        let (key, session) = (self.key, self.session);
+        (self.sink)(Input::Kept { key, session, heard: Arc::clone(&self.heard) });
+        for message in self.early.drain(..) {
+            (self.sink)(Input::Message { key, session, message });
+        }
+        if suspect {
+            self.suspect(true);
+        }
+    }
+
+    /// An input message from the peer. Before the engine kept the session it is held until it
+    /// does; never delivered if it does not (the peer kept it alone, and it is about to close).
+    fn message(&mut self, message: Message) {
+        if self.kept {
+            (self.sink)(Input::Message { key: self.key, session: self.session, message });
+        } else if self.early.len() < EARLY_KEPT {
+            self.early.push(message);
+        }
+    }
+
+    fn suspect(&self, suspect: bool) {
+        if self.kept {
+            (self.sink)(Input::Suspect { key: self.key, session: self.session, suspect });
+        }
+    }
+
+    fn ended(&self) {
+        if self.kept {
+            (self.sink)(Input::Ended { key: self.key, session: self.session });
+        }
+    }
 }
 
 fn interval_ms(d: Duration) -> u16 {
@@ -200,7 +261,17 @@ pub(crate) async fn run(mut a: Args) {
         Err(e) => e,
         Ok((stream, key, run)) => {
             let _ = a.reports.send((a.id, Report::Up { key, run }));
-            live(&mut a, stream).await
+            let mut to_input = ToInput {
+                sink: Arc::clone(&a.input),
+                key: a.key,
+                session: a.id,
+                kept: false,
+                heard: Arc::new(Heard::new()),
+                early: Vec::new(),
+            };
+            let ended = live(&mut a, stream, &mut to_input).await;
+            to_input.ended();
+            ended
         }
     };
     let _ = a.reports.send((a.id, Report::Down(ended)));
@@ -244,7 +315,7 @@ async fn handshake(a: &Args) -> Result<(Stream, PublicKey, u64), Ended> {
     }
 }
 
-async fn live(a: &mut Args, mut stream: Stream) -> Ended {
+async fn live(a: &mut Args, mut stream: Stream, to_input: &mut ToInput) -> Ended {
     let report = {
         let (reports, id) = (a.reports.clone(), a.id);
         move |r: Report| {
@@ -277,6 +348,12 @@ async fn live(a: &mut Args, mut stream: Stream) -> Ended {
                         next_ping = Instant::now();
                     }
                 }
+                Some(ToSession::Kept) => to_input.kept(suspect),
+                Some(ToSession::Send(m)) => {
+                    if let Err(e) = stream.write(&m).await {
+                        return stream_ended(&a.conn, &e);
+                    }
+                }
                 Some(ToSession::Bye) | None => {
                     stream.bye().await;
                     a.conn.close(close::BYE, b"");
@@ -289,9 +366,11 @@ async fn live(a: &mut Args, mut stream: Stream) -> Ended {
                     Err(e) => return stream_ended(&a.conn, &e),
                 };
                 heard = Instant::now();
+                to_input.heard.stamp();
                 if suspect {
                     suspect = false;
                     report(Report::Suspect(false));
+                    to_input.suspect(false);
                 }
                 match message {
                     Message::Ping { seq, interval_ms } => {
@@ -313,6 +392,7 @@ async fn live(a: &mut Args, mut stream: Stream) -> Ended {
                         a.conn.close(close::BYE, b"");
                         return Ended::Closed;
                     }
+                    message if is_input(&message) => to_input.message(message),
                     _ => {
                         a.conn.close(close::PROTOCOL, b"");
                         return Ended::Closed;
@@ -334,6 +414,7 @@ async fn live(a: &mut Args, mut stream: Stream) -> Ended {
             () = sleep_until(suspect_at), if !suspect => {
                 suspect = true;
                 report(Report::Suspect(true));
+                to_input.suspect(true);
             }
             e = a.conn.closed() => return ended(&e),
         }

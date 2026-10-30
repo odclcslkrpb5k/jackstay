@@ -4,8 +4,10 @@ How one machine's keyboard and mouse drive another's screen (milestone M4). Plan
 input sharing must do; this says how. It rides on the link (docs/link.md).
 
 Status: **design, revised after red-team pass 1** (findings and their resolutions at the end);
-slice 1 (the `input` crate, the `proto::link` input messages, `[input]` configuration) and
-slice 2 (`x11-input`, tested against Xvfb) built.
+slice 1 (the `input` crate, the `proto::link` input messages, `[input]` configuration),
+slice 2 (`x11-input`, tested against Xvfb) and slice 3 (the link's input path, the primary's
+state machine, the daemon's input thread, `jackstay status` and `switch`, the hotkeys, two-daemon
+tests and the latency gate) built. Acceptance on the owner's machines (slice 4) is next.
 Facts marked *measured* come from `spikes/x11-probes` (`run-input.sh` and `run.sh`, Xvfb 21.1.22,
 2026-10-29), from the reviewer's probes, or were read from the owner's X server (athena,
 read-only, 2026-10-29).
@@ -38,9 +40,12 @@ read-only, 2026-10-29).
   clipboard's, plan §4), RandR, XFixes barriers, XInput 2 grabs and raw events, XTest, and XKB's
   lock state. It forbids `unsafe`.
 - In the daemon, an **input thread** runs a blocking poll loop over its X connection and a wake
-  pipe from the link thread, as the clipboard thread does. It talks to the link thread through
-  its own pair of channels (docs/link.md, "Shape"), so a keypress never waits behind the
-  clipboard.
+  pipe, as the clipboard thread does. The link reaches it without the clipboard thread: each kept
+  session calls input's own callback from the link thread, in order (kept, with a lock-free
+  freshness stamp; each input message; silent or heard again; ended), every report naming its
+  session. The input thread sends through a handle of its own (`jackstay_net::Sender`), naming
+  the session it means, and a message for a session since replaced is dropped, never sent on its
+  successor. So a keypress never waits behind the clipboard.
 
 ### No C after all
 
@@ -58,8 +63,10 @@ Substitute; plan §5.1's `x11-input` row changes with it.
 
 - Each machine reads its **monitors** from RandR (`GetMonitors`) at start, on
   `RRScreenChangeNotify`, on RandR CRTC and output change notifications, and on the root window's
-  `ConfigureNotify` (*measured*: on Xvfb, `xrandr --setmonitor` sends only the last). It sends
-  them to every neighbour in a `Layout` message whenever they change. A layout is at most 16
+  `ConfigureNotify` (*measured*: on Xvfb, `xrandr --setmonitor` sends only the last). A secondary
+  sends them to its primary in a `Layout` message on each new session and whenever they change;
+  a primary sends none, so a peer's layout says it is a secondary, ready to be driven, and two
+  machines both set as primary never cross to each other. A layout is at most 16
   rectangles in root-window coordinates.
 - A machine's **side** (left, right, top, bottom) is the side of its monitors' bounding box. Its
   **edge** on that side is the set of monitor segments that lie on it: athena's left edge is
@@ -89,7 +96,11 @@ side independently, on:
   themselves, without waiting for a message.
 
 Every return the primary starts itself also queues `Exit`, so the secondary ends the span even if
-it never noticed the silence. When a span ends, the secondary releases everything it holds and
+it never noticed the silence. And every `Enter` follows an `Exit` with the last span id: a
+silence only the secondary noticed (the way to it lost, while the primary still heard it) left it
+draining, and this ends that drain after anything late. A message that arrives before this machine's engine has kept the
+session (the peer's engine kept it first, and sent its layout at once) is held, up to 16, and
+delivered when it does. When a span ends, the secondary releases everything it holds and
 ignores the rest of the span's messages.
 
 **The backlog after silence.** After a black hole, QUIC delivers what was sent meanwhile, in
@@ -163,7 +174,10 @@ unknown.
   - `input.lock_key` (default Scroll Lock with Shift): lock the pointer to the secondary it is on
     until pressed again (plan §3, "lock to screen"). The primary sends `Lock`, and the
     secondary never sends `Leave` while locked, so neither side ends the span by itself.
-  Outside a grab these keys do nothing special. `jackstay switch PEER` crosses to a neighbour
+  Each is written as a key name (`Scroll_Lock`, `Pause`, `Break`, `Print`, `Insert`, `Menu`,
+  `F1`–`F24`) or a keysym in hexadecimal, after `Shift+` for one with Shift, or `"none"`
+  (docs/daemon.md, "Configuration"); Shift counts if either Shift key is held, including one held
+  when the pointer crossed. Outside a grab these keys do nothing special. `jackstay switch PEER` crosses to a neighbour
   without the mouse, entering at the middle of the edge that faces this machine; `jackstay
   switch` alone returns. Either can be bound to keys through Xfce's shortcuts.
 - **Watchdog.** A wedged input thread holding the grab would leave this machine with no working
@@ -264,8 +278,14 @@ unaffected.
 ## In the daemon
 
 - `jackstay status` shows input's state: off and why, waiting for a neighbour, here, on a peer,
-  or locked to a peer. The journal says when the pointer crosses, by peer fingerprint, and why a
-  crossing was refused; never keys or positions (DP-3).
+  or locked to a peer; on a secondary, which primary can drive it and whether it does now
+  (control version 5, `Input`; docs/daemon.md). The journal says when the pointer crosses and
+  returns, by peer fingerprint; never keys or positions (DP-3).
+- Neighbours are resolved on the input thread whenever the clipboard thread sees the peers
+  change. A secondary's neighbours must all be one peer, its primary; it takes input from no
+  other. The input thread counts its failures in a row (`input-failures` in the state directory)
+  as the link counts its own: three, and input is off at the next start; a minute running forgets
+  them.
 - `jackstay switch [PEER]` (Primary, above).
 - Configuration gains `[input]` (`primary`, `left`, `right`, `top`, `bottom`, `return_key`,
   `lock_key`); the settings window keeps it as it keeps the link's keys.
@@ -277,8 +297,13 @@ unaffected.
   thread → channel and wake → input thread → XTest, flushed at once. Nothing on it allocates per
   event beyond the frame, and nothing on it takes a lock the clipboard holds.
 - **CI gate:** in the two-daemon harness, the time from injecting a motion on A's Xvfb to B's
-  Xvfb reporting it, both stamped with `CLOCK_MONOTONIC` in the test process (plan §5.7). The
-  budget is set from the first measurements, loose enough not to flake.
+  Xvfb reporting it, both stamped with `CLOCK_MONOTONIC` in the test process (plan §5.7).
+  *Measured* (2026-10-30, ten runs on athena, 200 motions each, beside the other input tests):
+  median 0.39–0.56 ms, p99 0.6–2.2 ms. The gate: median under 20 ms, p99 under 100 ms.
+  Xvfb applies `XTest` input when it gets to it, and now and then not at all (*measured*: a
+  3-pixel nudge during the grab left the pointer where it was, and no event came); so the test
+  nudges one way only, and a nudge that shows nothing within 500 ms is counted, not timed (none
+  so far; at most ten allowed).
 - **Acceptance on the owner's LAN** (plan §6, M4): added latency p99 under 2 ms, measured as half
   of `Motion` echo round trips through a debug-only echo mode, beside the link's own ping round
   trips. Measured once, recorded here.
@@ -305,6 +330,25 @@ unaffected.
   Synergy-named process runs, the watchdog (input thread stopped while grabbing), the hotkeys, and
   the latency gate.
 - Plants for each control, as in M3.
+
+### Built in slice 3
+
+- `jackstay-net`: per-session input reports (`Input`), `Handle::send` and `Sender`, held early
+  messages, `Heard`; four tests (in order both ways; only input, only for the session kept; silence,
+  freshness and end; a message sent the moment a session is kept).
+- `jackstay-input`: the primary's state machine (`Primary`), twenty scripted tests and a property
+  test that crossing out and straight back lands within a pixel; the secondary follows this
+  machine's own mouse (`Secondary::moved`).
+- `jackstayd`: the input thread, coexistence with Synergy and its successors, `[input]`
+  `return_key` and `lock_key`, control version 5; ten two-daemon tests: crossing out and back
+  on the owner's layouts, keys, a black hole releasing a held key within its 300 ms and never
+  pressing it again, loss from the secondary alone, no crossing with a button held, the return
+  key and `jackstay switch`, input off while `synergys` runs and on within 10 s of its end, a key
+  held when the secondary is killed released when it restarts, crossings after idle spells, loss
+  toward the secondary alone, and the latency gate.
+- Not yet tested end to end: the freshness check with a wedged link thread, and the watchdog with
+  a wedged input thread (each needs a hook to wedge a thread; each is tested on its own, the
+  freshness rule in `Primary`, the watchdog against Xvfb in slice 2).
 
 ## Acceptance
 
@@ -379,6 +423,20 @@ A separately briefed reviewer, which verified findings 1 and 2 with probes on Xv
 | 6 | The repeat test never showed a repeat happened | It now proves the server repeats the held key, then that the grab forwards it once |
 | 7 | Two tests relied on sleeps for ordering between clients, and one on a tight bound | A round trip after setting barriers; 1.5 s for the watchdog |
 
+### Pass 4 (code review of slice 3), 2026-10-30
+
+A separately briefed reviewer, reading only.
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | Freshness was measured from the last frame, which on an idle session is up to a second old: about half of all crossings ended at once, and `jackstay switch` failed as often | Measured from the crossing at the latest; a test switches after idle spells and stays on the peer |
+| 2 | Loss toward the secondary alone, while idle, left it draining for good (the primary still heard it, and sent no `Exit`); the next crossing grabbed with nothing driven | Every `Enter` follows an `Exit` with the last span id; a test drops traffic toward B for 4 s, then types on B |
+| 3 | A secondary whose primary changed mid-span released nothing: the old state was replaced before its keys were let go | The old span's keys and buttons go up first |
+| 4 | A layout with no monitor (every output off) failed the input thread, and the daemon with it | Ignored after start (the last layout stands); at start, input is off with the reason |
+| 5 | The 10 s scan for a rival read every process's name on the input thread, even while driving a peer; and a layout change while a rival ran put the barriers back | No scan while the pointer is on a peer; no barriers while asleep |
+| 6 | Two machines both set as primary saw each other's layout and crossed into a peer that ignores `Enter` | A primary sends no layout |
+| 7 | Tests that retried hid finding 1, and nothing lost traffic toward B alone | The two tests above, each watched failing without its fix |
+
 ### Slice 2 plants, 2026-10-29
 
 Fifteen bugs planted in `x11-input`, one at a time; thirteen were caught (three of them after
@@ -391,3 +449,24 @@ around the grab mask each other, and both stay:
   left mid-drag.
 - Without the check **after** grabbing, the button checked before is still caught. Only a button
   pressed between the two requests reaches it, which a test cannot time.
+
+### Slice 3 plants, 2026-10-30
+
+Each control's removal planted, and the tests run.
+
+- Link (`jackstay-net`, 6): 5 caught (the session id on sending, input kinds only, the freshness
+  stamp, silence reported, the end reported). Survives, accepted: holding the messages that
+  arrive before the engine keeps the session. The window is microseconds (the answering side
+  keeps first, and its message makes a round trip through the test before it is sent); without
+  the hold, a lost layout would leave the primary unable to cross until the next session.
+- Primary (`jackstay-input`, 19): 18 caught. The survivor, clearing a grab asked for when the
+  session ended, was redundant (the grab's answer finds no session, and lets go) and is removed.
+- Daemon (`jackstayd`, 10): 6 caught (keys left held cleared at start, the rival check, the
+  session marked active, keys forwarded, the leave sent, the secondary's layout on a new session).
+  Of the four that survive, one is the flag below; three are accepted: the freshness check and the watchdog's feeding (both need a wedged
+  thread, above), and sending the layout when the primary is first resolved after its session
+  was kept (in these tests the peers always arrive first; a name that resolves later, after a
+  third machine is unpaired, needs it).
+- A secondary drains only after silence, and the design is that a secondary is never the faster
+  pinger, so it suspects only when it has heard nothing from its primary: a flag for which kind
+  of silence was built, planted, survived, and removed as unreachable.

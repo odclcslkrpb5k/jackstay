@@ -1,4 +1,4 @@
-use jackstayd::coexist::{is_clipman, panel_lists_clipman};
+use jackstayd::coexist::{input_rival, input_rival_named, is_clipman, panel_lists_clipman};
 
 #[test]
 fn clipman_is_recognised_as_a_process_or_a_panel_plugin() {
@@ -26,4 +26,29 @@ fn the_panel_listing_is_read_by_plugin_id() {
                 /plugins/plugin-5/names-ordered                      [clipman,task manager]\n\
                 /plugins/plugin-5                                    systray\n";
     assert!(!panel_lists_clipman(tray));
+}
+
+#[test]
+fn synergy_and_its_successors_are_recognised_by_process_name() {
+    assert_eq!(input_rival_named(b"synergys\n"), Some("synergys"));
+    assert_eq!(input_rival_named(b"deskflow-core\n"), Some("deskflow-core"));
+    assert_eq!(input_rival_named(b"input-leapc"), Some("input-leapc"));
+    for not in [&b"synergy2\n"[..], b"jackstayd\n", b"barrierd\n", b"Synergy\n", b""] {
+        assert_eq!(input_rival_named(not), None, "{}", String::from_utf8_lossy(not));
+    }
+}
+
+#[test]
+fn a_rival_is_found_among_processes() {
+    let proc = std::env::temp_dir().join(format!("jackstay-proc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&proc);
+    for (pid, comm) in [("1", "systemd\n"), ("42", "synergys\n"), ("self", "synergyc\n")] {
+        std::fs::create_dir_all(proc.join(pid)).unwrap_or_else(|e| panic!("{e}"));
+        std::fs::write(proc.join(pid).join("comm"), comm).unwrap_or_else(|e| panic!("{e}"));
+    }
+    assert_eq!(input_rival(&proc), Some("synergys"));
+    std::fs::remove_dir_all(proc.join("42")).unwrap_or_else(|e| panic!("{e}"));
+    // Not a process: "self" is a link in the real /proc.
+    assert_eq!(input_rival(&proc), None);
+    let _ = std::fs::remove_dir_all(&proc);
 }

@@ -21,6 +21,7 @@ use rustix::event::{PollFd, PollFlags, Timespec, poll};
 
 use crate::control::{ClientId, Clients};
 use crate::import;
+use crate::input::InputThread;
 use crate::link::{self, Link};
 use crate::notify::Notifier;
 use crate::store::{Reply, Request as StoreRequest, Snapshot};
@@ -46,6 +47,8 @@ pub enum Exit {
     StoreGone,
     /// The link thread ended or stopped reporting (exit status 101).
     LinkGone(link::Gone),
+    /// The input thread failed, with why (exit status 101).
+    InputGone(String),
 }
 
 /// The store thread, as the session talks to it.
@@ -78,6 +81,8 @@ pub struct Parts {
     pub thumbnails: Option<Thumbnails>,
     /// `None` when its wake pipe could not be made; otherwise running, or off with a reason.
     pub link: Option<Link>,
+    /// Running, or off with a reason.
+    pub input: InputThread,
 }
 
 impl std::fmt::Debug for Parts {
@@ -110,6 +115,9 @@ pub struct Session {
     pub clipman_check: ClipmanCheck,
     pub thumbnails: Option<Thumbnails>,
     pub link: Option<Link>,
+    pub input: InputThread,
+    /// The peers the input thread was last told of.
+    peers_told: Option<Vec<(jackstay_net::PublicKey, String)>>,
     /// The client that started the pairing running now, which gets its events.
     pairing: Option<Flow>,
     /// Clients waiting for an unpairing to be saved, in the order asked.
@@ -213,6 +221,7 @@ impl Session {
             clipman_check,
             mut thumbnails,
             link,
+            input,
         } = parts;
         if let Some(store) = &store {
             let _ = store.wake.set_nonblocking(true);
@@ -232,6 +241,8 @@ impl Session {
             clipman_check,
             thumbnails,
             link,
+            input,
+            peers_told: None,
             pairing: None,
             unpairing: VecDeque::new(),
             waiting: HashMap::new(),
@@ -388,34 +399,16 @@ impl Session {
                 log(&format!("history cleared: {removed} entries"));
                 self.save_urgently(client, true, failure);
             }
-            Request::ImportClipman { remove } => {
-                match import::import(&mut self.tracker, &self.clipman_dir, self.per_target) {
-                    Ok(done) => {
-                        log(&format!(
-                            "clipman import: {} added, {} skipped",
-                            done.added, done.skipped
-                        ));
-                        if remove && import::remove(&self.clipman_dir).is_err() {
-                            respond(self, Response::Error(Error::ImportFailed));
-                        } else {
-                            respond(
-                                self,
-                                Response::Imported { added: done.added, skipped: done.skipped },
-                            );
-                        }
-                        if done.added > 0 {
-                            self.save();
-                        }
-                    }
-                    Err(_) => respond(self, Response::Error(Error::ImportFailed)),
-                }
-            }
+            Request::ImportClipman { remove } => self.import_clipman(client, remove),
             Request::Thumbnail { id } => {
                 let thumbnail =
                     self.thumbnails.as_ref().map_or(Thumb::Absent, |t| t.get(EntryId::new(id)));
                 respond(self, Response::Thumbnail { id, thumbnail });
             }
-            Request::Link
+            Request::Input
+            | Request::Switch { .. }
+            | Request::SwitchHome
+            | Request::Link
             | Request::Peers
             | Request::Pair { .. }
             | Request::PairAnswer { .. }
@@ -428,9 +421,79 @@ impl Session {
         Ok(())
     }
 
+    fn import_clipman(&mut self, client: ClientId, remove: bool) {
+        let response = match import::import(&mut self.tracker, &self.clipman_dir, self.per_target) {
+            Ok(done) => {
+                log(&format!("clipman import: {} added, {} skipped", done.added, done.skipped));
+                if done.added > 0 {
+                    self.save();
+                }
+                if remove && import::remove(&self.clipman_dir).is_err() {
+                    Response::Error(Error::ImportFailed)
+                } else {
+                    Response::Imported { added: done.added, skipped: done.skipped }
+                }
+            }
+            Err(_) => Response::Error(Error::ImportFailed),
+        };
+        self.clients.respond(client, &response);
+    }
+
+    /// Input sharing's requests (docs/input.md, "In the daemon").
+    fn input_request(&mut self, client: ClientId, request: Request) {
+        use crate::input::State;
+        use jackstay_proto::control::{InputState, InputStatus};
+        let peers = self.link.as_ref().map(Link::peers).unwrap_or_default();
+        let name = |key: jackstay_net::PublicKey| {
+            let named = peers.iter().find(|(k, _)| *k == key).map(|(_, n)| n.clone());
+            truncate(&printable(&named.unwrap_or_else(|| key.fingerprint())), 64)
+        };
+        let primary =
+            matches!(self.input.state(), State::Here | State::On { .. } | State::Waiting(_));
+        let response = match request {
+            Request::Input => {
+                let (state, peer, detail) = match self.input.state() {
+                    State::Off(why) => (InputState::Off, String::new(), why),
+                    State::Waiting(why) => (InputState::Waiting, String::new(), why),
+                    State::Here => (InputState::Here, String::new(), String::new()),
+                    State::On { peer, locked } => {
+                        let state = if locked { InputState::Locked } else { InputState::On };
+                        (state, name(peer), String::new())
+                    }
+                    State::Secondary { primary, driven } => {
+                        let state = if driven { InputState::Driven } else { InputState::Secondary };
+                        (state, name(primary), String::new())
+                    }
+                };
+                let detail = truncate(&printable(&detail), 128);
+                Response::Input(InputStatus { state, peer, detail })
+            }
+            _ if !primary => Response::Error(Error::InputOff),
+            Request::Switch { peer } => {
+                let found = self.link.as_ref().map_or(Err(Error::NoSuchPeer), |l| l.find(&peer));
+                match found {
+                    Ok(key) if self.input.neighbours().contains(&key) => {
+                        self.input.tell(crate::input::Command::Switch(Some(key)));
+                        Response::Ok
+                    }
+                    Ok(_) => Response::Error(Error::NotNeighbour),
+                    Err(e) => Response::Error(e),
+                }
+            }
+            _ => {
+                self.input.tell(crate::input::Command::Switch(None));
+                Response::Ok
+            }
+        };
+        self.clients.respond(client, &response);
+    }
+
     /// The link's requests (docs/link.md, "In the daemon").
     fn link_request(&mut self, client: ClientId, request: Request) {
         match request {
+            Request::Input | Request::Switch { .. } | Request::SwitchHome => {
+                self.input_request(client, request);
+            }
             Request::Link | Request::Peers => {
                 let status = self.link.as_ref().map_or_else(
                     || jackstay_proto::control::LinkStatus {
@@ -501,7 +564,14 @@ impl Session {
     /// What the link thread said: status is kept; pairing's events go to the pairing client.
     fn link_events(&mut self) {
         let Some(link) = &mut self.link else { return };
-        for event in link.receive() {
+        let events = link.receive();
+        // The input thread resolves its neighbours against the peers, whenever they change.
+        let peers = link.peers();
+        if self.peers_told.as_ref() != Some(&peers) {
+            self.input.tell(crate::input::Command::Peers(peers.clone()));
+            self.peers_told = Some(peers);
+        }
+        for event in events {
             match event {
                 jackstay_net::Event::PairCode { name, fingerprint, code } => {
                     if let Some(Flow::Client(c)) = self.pairing {
@@ -732,6 +802,7 @@ impl Session {
         if let Some(l) = &mut self.link {
             l.check().map_err(Exit::LinkGone)?;
         }
+        self.input.check().map_err(Exit::InputGone)?;
         if self.last_clipman_check.elapsed() >= CLIPMAN_CHECK_EVERY {
             self.last_clipman_check = Instant::now();
             if (self.clipman_check)() {

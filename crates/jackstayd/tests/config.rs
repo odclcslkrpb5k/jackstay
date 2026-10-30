@@ -1,7 +1,7 @@
 use std::num::NonZeroUsize;
 
 use jackstayd::config::{
-    Config, ConfigError, Input, MAX_BYTES, MAX_ENTRIES, MAX_LINK_PORT, MAX_PER_ENTRY,
+    Config, ConfigError, Hotkey, Input, MAX_BYTES, MAX_ENTRIES, MAX_LINK_PORT, MAX_PER_ENTRY,
     MAX_PER_TARGET, MAX_PINNED, MIN_LINK_PORT, parse, render,
 };
 use proptest::prelude::*;
@@ -105,6 +105,40 @@ fn input_neighbours_are_read_and_written() {
 }
 
 #[test]
+fn hotkeys_default_to_scroll_lock_and_are_read_and_written() {
+    let d = Input::default();
+    assert_eq!(d.return_key, Some(Hotkey { sym: 0xff14, shift: false }));
+    assert_eq!(d.lock_key, Some(Hotkey { sym: 0xff14, shift: true }));
+    let c = parse("[input]\nreturn_key = \"Pause\"\nlock_key = \"none\"\n")
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(c.input.return_key, Some(Hotkey { sym: 0xff13, shift: false }));
+    assert_eq!(c.input.lock_key, None);
+    let header = "# Written by Jackstay's settings window; a key left out has its default (docs/daemon.md).\n";
+    assert_eq!(
+        render(&c),
+        format!("{header}\n[input]\nreturn_key = \"Pause\"\nlock_key = \"none\"\n")
+    );
+    for (text, sym, shift) in [
+        ("Shift+F13", 0xffca, true),
+        ("0xff6b", 0xff6b, false),
+        ("Shift+0x1008ff2f", 0x1008_ff2f, true),
+    ] {
+        let c =
+            parse(&format!("[input]\nreturn_key = \"{text}\"\n")).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(c.input.return_key, Some(Hotkey { sym, shift }), "{text}");
+        assert_eq!(parse(&render(&c)), Ok(c), "{text}");
+    }
+    let bad = |s: &str| ConfigError::BadValue(s.to_owned());
+    for text in
+        ["", "a", "Shift+", "shift+F1", "0x", "0x0", "0x123456789", "0xfg", "F25", "Ctrl+F1"]
+    {
+        let got = parse(&format!("[input]\nlock_key = \"{text}\"\n"));
+        assert_eq!(got, Err(bad("input.lock_key")), "{text}");
+    }
+    assert_eq!(parse("[input]\nreturn_key = 5\n"), Err(bad("input.return_key")));
+}
+
+#[test]
 fn a_neighbour_with_quotes_or_control_characters_reads_back() {
     let c = Config {
         input: Input { left: Some("a\"b\\c\u{1b}d\u{7f}é".into()), ..Input::default() },
@@ -125,7 +159,9 @@ proptest! {
         port in MIN_LINK_PORT..=MAX_LINK_PORT,
         primary in any::<bool>(),
         sides in proptest::collection::vec(proptest::option::of("\\PC{1,40}"), 4),
+        keys in proptest::collection::vec(proptest::option::of((1u32.., any::<bool>())), 2),
     ) {
+        let key = |i: usize| keys.get(i).copied().flatten().map(|(sym, shift)| Hotkey { sym, shift });
         let side = |i: usize| sides.get(i).cloned().flatten();
         let c = Config {
             max_entries: NonZeroUsize::new(usize::try_from(entries).unwrap_or(1)).unwrap_or(NonZeroUsize::MIN),
@@ -135,7 +171,15 @@ proptest! {
             per_entry: target.saturating_add(extra).min(MAX_PER_ENTRY),
             link_enabled,
             link_port: u16::try_from(port).unwrap_or(24810),
-            input: Input { primary, left: side(0), right: side(1), top: side(2), bottom: side(3) },
+            input: Input {
+                primary,
+                left: side(0),
+                right: side(1),
+                top: side(2),
+                bottom: side(3),
+                return_key: key(0),
+                lock_key: key(1),
+            },
         };
         prop_assert_eq!(parse(&render(&c)), Ok(c.clone()));
     }

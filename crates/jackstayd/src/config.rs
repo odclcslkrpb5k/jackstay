@@ -4,6 +4,8 @@
 use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 
+pub use jackstay_input::Hotkey;
+
 /// The daemon's settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -25,8 +27,9 @@ pub struct Config {
     pub input: Input,
 }
 
-/// `[input]`: whether this machine's keyboard and mouse lead, and the peer beyond each side.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// `[input]`: whether this machine's keyboard and mouse lead, the peer beyond each side, and the
+/// primary's hotkeys while on a peer (docs/input.md, "Primary").
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Input {
     pub primary: bool,
     /// A paired peer's fingerprint, or a name only one peer has; per side.
@@ -34,6 +37,93 @@ pub struct Input {
     pub right: Option<String>,
     pub top: Option<String>,
     pub bottom: Option<String>,
+    /// Brings the pointer back at once; `None` turns it off.
+    pub return_key: Option<Hotkey>,
+    /// Locks the pointer to the peer it is on, until pressed again.
+    pub lock_key: Option<Hotkey>,
+}
+
+/// Scroll Lock: athena's keyboard has it, and nothing on the owner's desktop uses it.
+const SCROLL_LOCK: u32 = 0xff14;
+
+impl Default for Input {
+    fn default() -> Self {
+        Input {
+            primary: false,
+            left: None,
+            right: None,
+            top: None,
+            bottom: None,
+            return_key: Some(Hotkey { sym: SCROLL_LOCK, shift: false }),
+            lock_key: Some(Hotkey { sym: SCROLL_LOCK, shift: true }),
+        }
+    }
+}
+
+/// The keys a hotkey may name, by their X keysym names: keys nothing else on a desktop needs. Any
+/// other key can be named by its keysym in hexadecimal (`0xff13`).
+const KEY_NAMES: [(&str, u32); 30] = [
+    ("Scroll_Lock", SCROLL_LOCK),
+    ("Pause", 0xff13),
+    ("Break", 0xff6b),
+    ("Print", 0xff61),
+    ("Insert", 0xff63),
+    ("Menu", 0xff67),
+    ("F1", 0xffbe),
+    ("F2", 0xffbf),
+    ("F3", 0xffc0),
+    ("F4", 0xffc1),
+    ("F5", 0xffc2),
+    ("F6", 0xffc3),
+    ("F7", 0xffc4),
+    ("F8", 0xffc5),
+    ("F9", 0xffc6),
+    ("F10", 0xffc7),
+    ("F11", 0xffc8),
+    ("F12", 0xffc9),
+    ("F13", 0xffca),
+    ("F14", 0xffcb),
+    ("F15", 0xffcc),
+    ("F16", 0xffcd),
+    ("F17", 0xffce),
+    ("F18", 0xffcf),
+    ("F19", 0xffd0),
+    ("F20", 0xffd1),
+    ("F21", 0xffd2),
+    ("F22", 0xffd3),
+    ("F23", 0xffd4),
+    ("F24", 0xffd5),
+];
+
+/// A hotkey as written: `none`, or a key name or `0x` keysym, after `Shift+` for one with Shift.
+fn hotkey(value: &toml::Value, key: &str) -> Result<Option<Hotkey>, ConfigError> {
+    let bad = || ConfigError::BadValue(key.to_owned());
+    let text = value.as_str().ok_or_else(bad)?;
+    if text == "none" {
+        return Ok(None);
+    }
+    let (shift, name) = match text.strip_prefix("Shift+") {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let sym = match name.strip_prefix("0x") {
+        Some(hex) if (1..=8).contains(&hex.len()) => {
+            u32::from_str_radix(hex, 16).ok().filter(|&s| s != 0).ok_or_else(bad)?
+        }
+        Some(_) => return Err(bad()),
+        None => KEY_NAMES.iter().find(|(n, _)| *n == name).map(|(_, s)| *s).ok_or_else(bad)?,
+    };
+    Ok(Some(Hotkey { sym, shift }))
+}
+
+/// A hotkey as [`hotkey`] reads it.
+fn hotkey_text(h: Option<Hotkey>) -> String {
+    let Some(h) = h else { return "none".to_owned() };
+    let name = KEY_NAMES
+        .iter()
+        .find(|(_, s)| *s == h.sym)
+        .map_or_else(|| format!("0x{:x}", h.sym), |(n, _)| (*n).to_owned());
+    if h.shift { format!("Shift+{name}") } else { name }
 }
 
 impl Input {
@@ -171,6 +261,8 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 ("input", "right") => config.input.right = neighbour(value, &name)?,
                 ("input", "top") => config.input.top = neighbour(value, &name)?,
                 ("input", "bottom") => config.input.bottom = neighbour(value, &name)?,
+                ("input", "return_key") => config.input.return_key = hotkey(value, &name)?,
+                ("input", "lock_key") => config.input.lock_key = hotkey(value, &name)?,
                 _ => return Err(ConfigError::UnknownKey(name)),
             }
         }
@@ -225,6 +317,18 @@ pub fn render(config: &Config) -> String {
         ("input", "right", quoted(&i.right), none.clone()),
         ("input", "top", quoted(&i.top), none.clone()),
         ("input", "bottom", quoted(&i.bottom), none),
+        (
+            "input",
+            "return_key",
+            basic_string(&hotkey_text(i.return_key)),
+            basic_string(&hotkey_text(default.input.return_key)),
+        ),
+        (
+            "input",
+            "lock_key",
+            basic_string(&hotkey_text(i.lock_key)),
+            basic_string(&hotkey_text(default.input.lock_key)),
+        ),
     ];
     let keys: Vec<_> = keys.into_iter().chain(link).chain(input).collect();
     let mut text = String::from(

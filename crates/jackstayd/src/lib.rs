@@ -7,6 +7,7 @@ pub mod config;
 pub mod control;
 pub mod daemon;
 pub mod import;
+pub mod input;
 pub mod link;
 pub mod notify;
 pub mod paths;

@@ -14,6 +14,7 @@ use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::identity::{Identity, PublicKey};
+use crate::input::Sink;
 use crate::pairing::{self, PairCommand, PairOut};
 use crate::peers::{self, MAX_PEERS, Peer};
 use crate::session::{self, Ended, Report, ToSession, close, peer_key};
@@ -41,8 +42,9 @@ pub(crate) fn run(
     peers: Vec<Peer>,
     commands: mpsc::UnboundedReceiver<Command>,
     events: Box<dyn FnMut(Event) + Send>,
+    input: Sink,
 ) {
-    runtime.block_on(Engine::new(config, identity, peers, events).run(commands));
+    runtime.block_on(Engine::new(config, identity, peers, events, input).run(commands));
     runtime.shutdown_timeout(SHUTDOWN_WAIT);
 }
 
@@ -149,6 +151,7 @@ struct Engine {
     saving: bool,
     bucket: Bucket,
     events: Box<dyn FnMut(Event) + Send>,
+    input: Sink,
     tasks: JoinSet<()>,
     internal: mpsc::UnboundedSender<Internal>,
     internal_rx: mpsc::UnboundedReceiver<Internal>,
@@ -180,6 +183,7 @@ impl Engine {
         identity: Identity,
         peers: Vec<Peer>,
         events: Box<dyn FnMut(Event) + Send>,
+        input: Sink,
     ) -> Engine {
         let (internal, internal_rx) = mpsc::unbounded_channel();
         let (reports, reports_rx) = mpsc::unbounded_channel();
@@ -205,6 +209,7 @@ impl Engine {
             saving: false,
             bucket: Bucket { tokens: HANDSHAKES_PER_SECOND, at: now },
             events,
+            input,
             tasks: JoinSet::new(),
             internal,
             internal_rx,
@@ -448,6 +453,7 @@ impl Engine {
         self.sessions.insert(id, SessionEntry { key, dialed, conn: conn.clone(), to, run: None });
         self.tasks.spawn(session::run(session::Args {
             id,
+            key,
             conn,
             dialed,
             hello: self.hello(),
@@ -455,6 +461,7 @@ impl Engine {
             timings: self.timings.clone(),
             reports: self.reports.clone(),
             commands,
+            input: Arc::clone(&self.input),
         }));
     }
 
@@ -583,6 +590,9 @@ impl Engine {
             slot.suspect = false;
             slot.rtt = None;
         }
+        if let Some(s) = self.sessions.get(&id) {
+            let _ = s.to.send(ToSession::Kept);
+        }
         if self.active.contains(&key)
             && let Some(s) = self.sessions.get(&id)
         {
@@ -646,6 +656,13 @@ impl Engine {
                     && let Some(s) = self.sessions.get(&id)
                 {
                     let _ = s.to.send(ToSession::Active(on));
+                }
+            }
+            Command::Send { key, session, message } => {
+                if self.slots.get(&key).and_then(|s| s.current) == Some(session)
+                    && let Some(s) = self.sessions.get(&session)
+                {
+                    let _ = s.to.send(ToSession::Send(message));
                 }
             }
             Command::Shutdown => {}

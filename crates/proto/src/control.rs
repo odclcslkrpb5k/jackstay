@@ -20,11 +20,14 @@
 //! Version 4 added [`Request::Peers`]: the link's state as [`Request::Link`] gives it, with which
 //! machine dialed each kept session ([`PeerSummary::dialed`]). Only the machine that dialed may
 //! change its address without the link dropping (docs/link.md, "Testing").
+//!
+//! Version 5 added input sharing (docs/input.md, "In the daemon"): [`Request::Input`] for its
+//! state, and [`Request::Switch`] and [`Request::SwitchHome`] to move the pointer.
 
 use crate::{DecodeError, FRAME_HEADER_LEN, LimitError, MAX_PAYLOAD_LEN, Reader};
 
 /// The control protocol version this code speaks.
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 /// The oldest version the daemon still answers: each version adds to the last, so a client of an
 /// older one (a UI still running across an upgrade) keeps working.
 pub const OLDEST_VERSION: u16 = 2;
@@ -86,6 +89,14 @@ pub enum Request {
     Link,
     /// The link's state with who dialed ([`Response::Peers`]).
     Peers,
+    /// Input sharing's state ([`Response::Input`]).
+    Input,
+    /// Moves the pointer to the neighbour named by its name or fingerprint (the primary only).
+    Switch {
+        peer: String,
+    },
+    /// Brings the pointer back to the primary.
+    SwitchHome,
     /// Starts pairing with the machine at `host` (`host` or `host:port`).
     Pair {
         host: String,
@@ -126,6 +137,10 @@ pub enum Error {
     NotPairing,
     /// The peers file could not be saved; nothing changed.
     SaveFailed,
+    /// Input sharing is off, or this machine is not the primary.
+    InputOff,
+    /// That machine is not a neighbour (`[input]`), or cannot be crossed to now.
+    NotNeighbour,
 }
 
 impl Error {
@@ -151,6 +166,10 @@ impl Error {
             }
             Error::NotPairing => "not pairing",
             Error::SaveFailed => "the peers file could not be saved; nothing changed",
+            Error::InputOff => {
+                "input sharing is not running here as the primary (see `jackstay status`)"
+            }
+            Error::NotNeighbour => "that machine is not a neighbour in [input]",
         }
     }
 }
@@ -165,6 +184,43 @@ pub struct Status {
     /// Whether the last save failed, so the history on disk is behind.
     pub store_failing: bool,
 }
+
+/// Input sharing, as `jackstay status` shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputStatus {
+    pub state: InputState,
+    /// The peer it concerns (on, locked, the primary), by its name.
+    pub peer: String,
+    /// Why it is off or waiting.
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputState {
+    Off,
+    /// Running, but no neighbour can be crossed to yet.
+    Waiting,
+    /// The primary, its pointer here.
+    Here,
+    /// The primary, its pointer on `peer`.
+    On,
+    /// The primary, its pointer locked to `peer`.
+    Locked,
+    /// A secondary of `peer`, not driven now.
+    Secondary,
+    /// A secondary, driven by `peer` now.
+    Driven,
+}
+
+const INPUT_STATES: [InputState; 7] = [
+    InputState::Off,
+    InputState::Waiting,
+    InputState::Here,
+    InputState::On,
+    InputState::Locked,
+    InputState::Secondary,
+    InputState::Driven,
+];
 
 /// The link, as `jackstay peers` and `jackstay status` show it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -310,6 +366,7 @@ pub enum Response {
     },
     Link(LinkStatus),
     Peers(LinkStatus),
+    Input(InputStatus),
     /// Pairing reached the other machine: show the code and its fingerprint, and ask.
     PairCode {
         name: String,
@@ -469,6 +526,9 @@ const PAIR: u8 = 13;
 const PAIR_ANSWER: u8 = 14;
 const UNPAIR: u8 = 15;
 const PEERS: u8 = 16;
+const INPUT: u8 = 17;
+const SWITCH: u8 = 18;
+const SWITCH_HOME: u8 = 19;
 
 const WELCOME: u8 = 64;
 const OK: u8 = 65;
@@ -483,6 +543,7 @@ const PAIR_CODE: u8 = 73;
 const PAIRED: u8 = 74;
 const PAIR_FAILED: u8 = 75;
 const PEERS_REPLY: u8 = 76;
+const INPUT_REPLY: u8 = 77;
 
 const ABSENT: u8 = 0;
 const PENDING: u8 = 1;
@@ -576,6 +637,12 @@ pub fn encode_request(request: &Request, out: &mut Vec<u8>) -> Result<(), LimitE
         }
         Request::Link => LINK,
         Request::Peers => PEERS,
+        Request::Input => INPUT,
+        Request::Switch { ref peer } => {
+            put_text(&mut p, peer, MAX_NAME_FIELD)?;
+            SWITCH
+        }
+        Request::SwitchHome => SWITCH_HOME,
         Request::Pair { ref host } => {
             put_text(&mut p, host, MAX_NAME_FIELD)?;
             PAIR
@@ -621,6 +688,9 @@ pub fn decode_request(buf: &[u8]) -> Result<Option<(Request, usize)>, DecodeErro
         THUMBNAIL => Request::Thumbnail { id: r.u64()? },
         LINK => Request::Link,
         PEERS => Request::Peers,
+        INPUT => Request::Input,
+        SWITCH => Request::Switch { peer: text(&mut r, MAX_NAME_FIELD)? },
+        SWITCH_HOME => Request::SwitchHome,
         PAIR => Request::Pair { host: text(&mut r, MAX_NAME_FIELD)? },
         PAIR_ANSWER => Request::PairAnswer { yes: flag(&mut r)? },
         UNPAIR => Request::Unpair { peer: text(&mut r, MAX_NAME_FIELD)? },
@@ -645,6 +715,8 @@ fn error_code(e: Error) -> u8 {
         Error::AmbiguousPeer => 11,
         Error::NotPairing => 12,
         Error::SaveFailed => 13,
+        Error::InputOff => 14,
+        Error::NotNeighbour => 15,
     }
 }
 
@@ -663,6 +735,8 @@ fn error_of(code: u8) -> Result<Error, DecodeError> {
         11 => Error::AmbiguousPeer,
         12 => Error::NotPairing,
         13 => Error::SaveFailed,
+        14 => Error::InputOff,
+        15 => Error::NotNeighbour,
         other => return Err(DecodeError::Limit(LimitError::UnknownCode { code: other })),
     })
 }
@@ -749,6 +823,55 @@ fn pair_reason_of(code: u8) -> Result<PairReason, DecodeError> {
         .get(usize::from(code))
         .copied()
         .ok_or(DecodeError::Limit(LimitError::UnknownCode { code }))
+}
+
+fn put_list(p: &mut Vec<u8>, total: u32, entries: &[Summary]) -> Result<(), LimitError> {
+    if entries.len() > MAX_LIST {
+        return Err(LimitError::TooManyEntries { count: entries.len() });
+    }
+    p.extend_from_slice(&total.to_be_bytes());
+    let count = u16::try_from(entries.len())
+        .map_err(|_| LimitError::TooManyEntries { count: entries.len() })?;
+    p.extend_from_slice(&count.to_be_bytes());
+    for e in entries {
+        if e.kinds.0 & !Kinds::ALL != 0 {
+            return Err(LimitError::UnknownCode { code: e.kinds.0 });
+        }
+        if e.preview.chars().count() > MAX_PREVIEW_CHARS {
+            return Err(LimitError::TextTooLong { len: e.preview.len() });
+        }
+        p.extend_from_slice(&e.id.to_be_bytes());
+        p.extend_from_slice(&e.copied_at_ms.to_be_bytes());
+        p.push(u8::from(e.pinned));
+        p.push(u8::from(e.current));
+        p.push(e.kinds.0);
+        p.extend_from_slice(&e.size.to_be_bytes());
+        match &e.source {
+            None => p.push(0),
+            Some(s) => {
+                p.push(1);
+                put_text(p, s, MAX_SOURCE_LEN)?;
+            }
+        }
+        put_text(p, &e.preview, MAX_PREVIEW_BYTES)?;
+    }
+    Ok(())
+}
+
+fn put_input(p: &mut Vec<u8>, i: &InputStatus) -> Result<(), LimitError> {
+    let state = INPUT_STATES.iter().position(|s| *s == i.state).unwrap_or(0);
+    p.push(u8::try_from(state).unwrap_or(0));
+    put_text(p, &i.peer, MAX_LINK_TEXT)?;
+    put_text(p, &i.detail, MAX_LINK_TEXT)
+}
+
+fn input(r: &mut Reader<'_>) -> Result<InputStatus, DecodeError> {
+    let code = r.u8()?;
+    let state = *INPUT_STATES
+        .get(usize::from(code))
+        .ok_or(DecodeError::Limit(LimitError::UnknownCode { code }))?;
+    let peer = text(r, MAX_LINK_TEXT)?;
+    Ok(InputStatus { state, peer, detail: text(r, MAX_LINK_TEXT)? })
 }
 
 /// With `dialed`, each peer's [`PeerSummary::dialed`] too ([`Response::Peers`]).
@@ -863,35 +986,7 @@ pub fn encode_response(response: &Response, out: &mut Vec<u8>) -> Result<(), Lim
             STATUS_REPLY
         }
         Response::List { total, entries } => {
-            if entries.len() > MAX_LIST {
-                return Err(LimitError::TooManyEntries { count: entries.len() });
-            }
-            p.extend_from_slice(&total.to_be_bytes());
-            let count = u16::try_from(entries.len())
-                .map_err(|_| LimitError::TooManyEntries { count: entries.len() })?;
-            p.extend_from_slice(&count.to_be_bytes());
-            for e in entries {
-                if e.kinds.0 & !Kinds::ALL != 0 {
-                    return Err(LimitError::UnknownCode { code: e.kinds.0 });
-                }
-                if e.preview.chars().count() > MAX_PREVIEW_CHARS {
-                    return Err(LimitError::TextTooLong { len: e.preview.len() });
-                }
-                p.extend_from_slice(&e.id.to_be_bytes());
-                p.extend_from_slice(&e.copied_at_ms.to_be_bytes());
-                p.push(u8::from(e.pinned));
-                p.push(u8::from(e.current));
-                p.push(e.kinds.0);
-                p.extend_from_slice(&e.size.to_be_bytes());
-                match &e.source {
-                    None => p.push(0),
-                    Some(s) => {
-                        p.push(1);
-                        put_text(&mut p, s, MAX_SOURCE_LEN)?;
-                    }
-                }
-                put_text(&mut p, &e.preview, MAX_PREVIEW_BYTES)?;
-            }
+            put_list(&mut p, *total, entries)?;
             LIST_REPLY
         }
         Response::Imported { added, skipped } => {
@@ -911,6 +1006,10 @@ pub fn encode_response(response: &Response, out: &mut Vec<u8>) -> Result<(), Lim
                 }
             }
             THUMBNAIL_REPLY
+        }
+        Response::Input(i) => {
+            put_input(&mut p, i)?;
+            INPUT_REPLY
         }
         Response::Link(l) | Response::Peers(l) => {
             let dialed = matches!(response, Response::Peers(_));
@@ -1009,6 +1108,7 @@ pub fn decode_response(buf: &[u8]) -> Result<Option<(Response, usize)>, DecodeEr
         }
         LINK_REPLY => Response::Link(link(&mut r, false)?),
         PEERS_REPLY => Response::Peers(link(&mut r, true)?),
+        INPUT_REPLY => Response::Input(input(&mut r)?),
         PAIR_CODE => Response::PairCode {
             name: text(&mut r, MAX_LINK_TEXT)?,
             fingerprint: text(&mut r, MAX_LINK_TEXT)?,

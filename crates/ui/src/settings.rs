@@ -28,7 +28,7 @@ pub enum Task {
     Load {
         show: bool,
     },
-    Save(Box<Loaded>, Changes),
+    Save(Box<Loaded>, Box<Changes>),
 }
 
 /// What came of a task.
@@ -515,7 +515,7 @@ impl Settings {
         self.state.borrow_mut().saving = true;
         self.save.set_sensitive(false);
         self.status.set_text("Saving…");
-        self.send(Task::Save(Box::new(loaded), changes));
+        self.send(Task::Save(Box::new(loaded), Box::new(changes)));
     }
 
     fn close(&self) {

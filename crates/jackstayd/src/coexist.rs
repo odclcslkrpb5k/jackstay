@@ -87,3 +87,48 @@ pub fn clipman_in_panel() -> bool {
     let _ = child.wait();
     out.is_ok_and(|out| panel_lists_clipman(&out))
 }
+
+/// Programs that share a keyboard and mouse as input sharing does: their barriers and grabs would
+/// fight ours (docs/input.md, "Coexistence"). Each name is at most 15 bytes, as `comm` keeps it.
+pub const INPUT_RIVALS: [&str; 16] = [
+    "synergy",
+    "synergys",
+    "synergyc",
+    "synergy-core",
+    "synergy-server",
+    "synergy-client",
+    "deskflow",
+    "deskflow-server",
+    "deskflow-client",
+    "deskflow-core",
+    "barrier",
+    "barriers",
+    "barrierc",
+    "input-leap",
+    "input-leaps",
+    "input-leapc",
+];
+
+/// Whether a process's `comm` is one of [`INPUT_RIVALS`]; which.
+#[must_use]
+pub fn input_rival_named(comm: &[u8]) -> Option<&'static str> {
+    let comm = comm.strip_suffix(b"\n").unwrap_or(comm);
+    INPUT_RIVALS.iter().copied().find(|r| r.as_bytes() == comm)
+}
+
+/// The first process in `proc` (normally `/proc`) that is one of [`INPUT_RIVALS`], whoever runs
+/// it.
+#[must_use]
+pub fn input_rival(proc: &Path) -> Option<&'static str> {
+    let entries = fs::read_dir(proc).ok()?;
+    entries.filter_map(Result::ok).find_map(|e| {
+        let is_pid = e
+            .file_name()
+            .to_str()
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if !is_pid {
+            return None;
+        }
+        input_rival_named(&fs::read(e.path().join("comm")).unwrap_or_default())
+    })
+}

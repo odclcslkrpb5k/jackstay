@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use jackstay_proto::control::{
-    self, Dialer, Error, Kinds, LinkStatus, PairReason, PeerState, PeerSummary, Request, Response,
-    Status, Summary, VERSION,
+    self, Dialer, Error, InputState, InputStatus, Kinds, LinkStatus, PairReason, PeerState,
+    PeerSummary, Request, Response, Status, Summary, VERSION,
 };
 
 #[track_caller]
@@ -193,6 +193,8 @@ fn each_command_sends_its_request_and_ok_is_success() {
         (vec!["unpin", "9"], Request::Pin { id: 9, pinned: false }),
         (vec!["clear"], Request::Clear),
         (vec!["clear-history"], Request::ClearHistory),
+        (vec!["switch", "xiphos"], Request::Switch { peer: "xiphos".into() }),
+        (vec!["switch"], Request::SwitchHome),
     ] {
         let (code, out, got) = exchange(&args, vec![Response::Ok]);
         assert_eq!((code, out.as_str(), got), (Some(0), "", vec![want]), "{args:?}");
@@ -500,4 +502,39 @@ fn unpair_names_the_machine_and_says_why_it_cannot() {
     let _ = server.join();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("give its fingerprint"));
+}
+
+#[test]
+fn status_says_where_the_pointer_is() {
+    let status = Response::Status(Status {
+        entries: 0,
+        pinned: 0,
+        current: None,
+        owns_clipboard: false,
+        store_failing: false,
+    });
+    for (state, says) in [
+        (InputState::Off, "input: off (synergys is running)\n"),
+        (InputState::Waiting, "input: waiting (synergys is running)\n"),
+        (InputState::Here, "input: the pointer is here\n"),
+        (InputState::On, "input: the pointer is on xiphos [2J\n"),
+        (InputState::Locked, "input: the pointer is locked to xiphos [2J\n"),
+        (InputState::Secondary, "input: xiphos [2J can drive this machine\n"),
+        (InputState::Driven, "input: xiphos [2J drives this machine now\n"),
+    ] {
+        let input = InputStatus {
+            state,
+            peer: "xiphos\u{1b}[2J".into(),
+            detail: "synergys is running".into(),
+        };
+        let answers =
+            vec![status.clone(), Response::Peers(link(Vec::new())), Response::Input(input)];
+        let (code, out, got) = exchange(&["status"], answers);
+        assert_eq!(got, vec![Request::Status, Request::Peers, Request::Input]);
+        assert_eq!(code, Some(0));
+        assert!(out.ends_with(says), "{out}");
+    }
+    let (code, out, _) =
+        exchange(&["switch", "xiphos"], vec![Response::Error(Error::NotNeighbour)]);
+    assert_eq!((code, out.as_str()), (Some(1), ""));
 }

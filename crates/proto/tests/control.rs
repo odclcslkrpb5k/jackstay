@@ -1,8 +1,8 @@
 use jackstay_proto::control::{
-    Dialer, Error, Kinds, LinkStatus, MAX_LIST, MAX_NAME_FIELD, MAX_PEERS, MAX_PREVIEW_CHARS,
-    MAX_SOURCE_LEN, MAX_THUMBNAIL_HEIGHT, MAX_THUMBNAIL_WIDTH, PairReason, PeerState, PeerSummary,
-    Request, Response, Status, Summary, Thumb, Thumbnail, VERSION, decode_request, decode_response,
-    encode_request, encode_response, preview, printable,
+    Dialer, Error, InputState, InputStatus, Kinds, LinkStatus, MAX_LIST, MAX_NAME_FIELD, MAX_PEERS,
+    MAX_PREVIEW_CHARS, MAX_SOURCE_LEN, MAX_THUMBNAIL_HEIGHT, MAX_THUMBNAIL_WIDTH, PairReason,
+    PeerState, PeerSummary, Request, Response, Status, Summary, Thumb, Thumbnail, VERSION,
+    decode_request, decode_response, encode_request, encode_response, preview, printable,
 };
 use jackstay_proto::{DecodeError, LimitError};
 use proptest::prelude::*;
@@ -42,7 +42,7 @@ fn summary(id: u64) -> Summary {
 
 #[test]
 fn the_layout_is_as_documented() {
-    assert_eq!(request_bytes(&Request::Hello { version: VERSION }), [0, 0, 0, 2, 1, 0, 4]);
+    assert_eq!(request_bytes(&Request::Hello { version: VERSION }), [0, 0, 0, 2, 1, 0, 5]);
     assert_eq!(request_bytes(&Request::Clear), [0, 0, 0, 0, 7]);
     assert_eq!(
         request_bytes(&Request::Pin { id: 258, pinned: true }),
@@ -187,8 +187,8 @@ fn a_partial_frame_waits_and_a_bad_one_is_refused() {
         Err(DecodeError::Limit(LimitError::UnknownCode { code: 0 }))
     );
     assert_eq!(
-        decode_response(&[0, 0, 0, 1, 66, 14]),
-        Err(DecodeError::Limit(LimitError::UnknownCode { code: 14 }))
+        decode_response(&[0, 0, 0, 1, 66, 16]),
+        Err(DecodeError::Limit(LimitError::UnknownCode { code: 16 }))
     );
     // Two frames in one buffer: the first is decoded and its length reported.
     let mut two = request_bytes(&Request::Status);
@@ -376,6 +376,8 @@ fn every_error_has_its_own_explanation() {
         Error::AmbiguousPeer,
         Error::NotPairing,
         Error::SaveFailed,
+        Error::InputOff,
+        Error::NotNeighbour,
     ];
     let said: std::collections::HashSet<&str> = all.iter().map(|e| e.explain()).collect();
     assert_eq!(said.len(), all.len());
@@ -656,4 +658,51 @@ fn every_link_request_and_response_round_trips() {
         let bytes = response_bytes(&r);
         assert_eq!(decode_response(&bytes), Ok(Some((r.clone(), bytes.len()))), "{r:?}");
     }
+}
+
+#[test]
+fn every_input_request_and_response_round_trips() {
+    for r in [
+        Request::Input,
+        Request::Switch { peer: "xiphos".into() },
+        Request::Switch { peer: "h".repeat(MAX_NAME_FIELD) },
+        Request::SwitchHome,
+    ] {
+        let bytes = request_bytes(&r);
+        assert_eq!(decode_request(&bytes), Ok(Some((r.clone(), bytes.len()))), "{r:?}");
+    }
+    let long = Request::Switch { peer: "h".repeat(MAX_NAME_FIELD + 1) };
+    assert_eq!(
+        encode_request(&long, &mut Vec::new()),
+        Err(LimitError::TextTooLong { len: MAX_NAME_FIELD + 1 })
+    );
+    let mut responses: Vec<Response> =
+        [Error::InputOff, Error::NotNeighbour].into_iter().map(Response::Error).collect();
+    for state in [
+        InputState::Off,
+        InputState::Waiting,
+        InputState::Here,
+        InputState::On,
+        InputState::Locked,
+        InputState::Secondary,
+        InputState::Driven,
+    ] {
+        responses.push(Response::Input(InputStatus {
+            state,
+            peer: "xiphos".into(),
+            detail: "synergys is running".into(),
+        }));
+    }
+    for r in responses {
+        let bytes = response_bytes(&r);
+        assert_eq!(decode_response(&bytes), Ok(Some((r.clone(), bytes.len()))), "{r:?}");
+    }
+    // A state past the last is refused.
+    let mut bad = response_bytes(&Response::Input(InputStatus {
+        state: InputState::Driven,
+        peer: String::new(),
+        detail: String::new(),
+    }));
+    bad[5] = 7;
+    assert_eq!(decode_response(&bad), Err(DecodeError::Limit(LimitError::UnknownCode { code: 7 })));
 }

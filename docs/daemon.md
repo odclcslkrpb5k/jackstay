@@ -172,11 +172,17 @@ is answered once the peers file is saved.
 Version 4 adds `Peers`: `Link`'s answer, with which machine dialed each kept session. That machine
 is QUIC's client, the only one that may change its address without the link dropping
 (docs/link.md, "Testing"); `jackstay peers` shows it. `Link` still answers without it, byte for
-byte as version 3 did. A client of version 2 or 3 is still greeted, in its own version: each
-version only adds requests.
+byte as version 3 did.
+
+Version 5 adds input sharing (docs/input.md, "In the daemon"): `Input` (its state: off or waiting
+and why, the pointer here or on a peer, or this machine a secondary and whether it is driven now),
+`Switch { peer }` (the pointer to that neighbour, entering at the middle of the edge facing this
+machine) and `SwitchHome`; a switch is refused with `InputOff` on a machine that is not running as
+the primary, and `NotNeighbour` for a peer that is not in `[input]`. A client of version 2 to 4 is
+still greeted, in its own version: each version only adds requests.
 
 `jackstay` is the thin CLI over it: `status`, `list`, `select`, `delete`, `pin`, `unpin`, `clear`,
-`clear-history`, `import-clipman`, `peers`, `pair`, `unpair`.
+`clear-history`, `import-clipman`, `peers`, `pair`, `unpair`, `switch`.
 
 ## Thumbnails
 
@@ -313,6 +319,8 @@ At start, after the lock:
 | `link.port` | 24810 | UDP, 1024–65534; pairing uses the next port |
 | `input.primary` | false | this machine's keyboard and mouse lead (docs/input.md) |
 | `input.left`, `.right`, `.top`, `.bottom` | none | the paired peer beyond that side: its fingerprint, or a name only one peer has (1–255 bytes) |
+| `input.return_key` | `"Scroll_Lock"` | the primary's key that brings the pointer back at once while it is on a peer: `Scroll_Lock`, `Pause`, `Break`, `Print`, `Insert`, `Menu`, `F1`–`F24`, or a keysym as `0x…`; after `Shift+` for one with Shift; `"none"` for no key |
+| `input.lock_key` | `"Shift+Scroll_Lock"` | the key that locks the pointer to the peer it is on, until pressed again; written as `return_key` |
 
 Parsed once at start into a typed config; an unknown key or a bad value refuses (exit 2) with the
 key named in the journal. The whole history is held in memory, within these limits. The settings

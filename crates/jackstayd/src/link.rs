@@ -77,7 +77,7 @@ fn text(t: &str) -> String {
 impl Link {
     /// Starts the link with `config`, or records why it is off: `config` is the reason when it is
     /// not to run, and the link may also fail to start (its identity or peers file unusable). The
-    /// daemon runs on either way. `failures` counts its failures in a row (docs/link.md,
+    /// daemon runs on either way. Input sharing's reports go to `input`, on the link thread. `failures` counts its failures in a row (docs/link.md,
     /// "Supervision"); the file is removed once the link has run for a minute.
     ///
     /// # Errors
@@ -85,6 +85,7 @@ impl Link {
     pub fn start(
         config: Result<jackstay_net::Config, String>,
         failures: Option<PathBuf>,
+        input: jackstay_net::Sink,
     ) -> std::io::Result<Link> {
         let (tx, events) = mpsc::channel();
         let (wake, wake_tx) = UnixStream::pair()?;
@@ -94,11 +95,12 @@ impl Link {
             Err(why) => (None, Some(why)),
             Ok(config) => {
                 let mut wake_tx = wake_tx;
-                match jackstay_net::start(config, move |e| {
+                let events = move |e| {
                     let _ = tx.send(e);
                     // Full means a wake-up is already pending.
                     let _ = wake_tx.write(&[1]);
-                }) {
+                };
+                match jackstay_net::start(config, events, move |i| input(i)) {
                     Ok(h) => (Some(h), None),
                     Err(e) => (None, Some(e.to_string())),
                 }
@@ -173,6 +175,13 @@ impl Link {
         } else {
             Ok(())
         }
+    }
+
+    /// The paired machines, by key and the name each gave itself.
+    #[must_use]
+    pub fn peers(&self) -> Vec<(jackstay_net::PublicKey, String)> {
+        let peers = self.status.as_ref().map(|s| s.peers.as_slice()).unwrap_or_default();
+        peers.iter().map(|p| (p.key, p.name.clone())).collect()
     }
 
     /// The paired machine `name_or_fingerprint` names: by fingerprint, or by a name only one has.

@@ -3,7 +3,8 @@
 //!
 //! [`start`] runs the link on a thread of its own, with a single-threaded tokio runtime. The daemon
 //! drives it through the returned [`Handle`] and hears from it through the `events` callback, which
-//! runs on the link thread and must not block.
+//! runs on the link thread and must not block. Input sharing has a callback of its own, `input`,
+//! called from each session as it hears ([`Input`]), and sends with [`Handle::send`].
 //!
 //! Bytes from other machines are decoded only by `jackstay_proto::link`, after the handshake has
 //! proved the sender holds a paired key. This crate does no arithmetic on lengths from the wire;
@@ -22,6 +23,7 @@
 pub mod address;
 mod engine;
 pub mod identity;
+mod input;
 mod pairing;
 pub mod peers;
 mod session;
@@ -29,6 +31,7 @@ mod tls;
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -36,6 +39,7 @@ use tokio::sync::mpsc;
 
 pub use address::Address;
 pub use identity::{Identity, IdentityError, PublicKey};
+pub use input::{Heard, Input, Sink, is_input};
 pub use peers::{Peer, PeersError};
 pub use tls::{ALPN, PAIR_ALPN};
 
@@ -230,6 +234,7 @@ pub(crate) enum Command {
     CancelPairing,
     Unpair(PublicKey),
     SetActive(PublicKey, bool),
+    Send { key: PublicKey, session: u64, message: jackstay_proto::link::Message },
     Shutdown,
 }
 
@@ -286,6 +291,17 @@ impl Handle {
         let _ = self.commands.send(Command::SetActive(key, active));
     }
 
+    /// Sends an input message ([`Sender::send`]).
+    pub fn send(&self, key: PublicKey, session: u64, message: jackstay_proto::link::Message) {
+        self.sender().send(key, session, message);
+    }
+
+    /// What input sharing's thread sends and marks sessions active with.
+    #[must_use]
+    pub fn sender(&self) -> Sender {
+        Sender { commands: self.commands.clone() }
+    }
+
     /// Our public key.
     #[must_use]
     pub fn public(&self) -> PublicKey {
@@ -316,6 +332,28 @@ impl Drop for Handle {
     }
 }
 
+/// Input sharing's way to the link, from its own thread: it never waits.
+#[derive(Debug, Clone)]
+pub struct Sender {
+    commands: mpsc::UnboundedSender<Command>,
+}
+
+impl Sender {
+    /// Sends an input message ([`is_input`]; any other is not sent) to the peer with `key` on
+    /// `session`, if that is still the session kept with it: a message meant for a session that
+    /// was replaced is dropped, never sent on its successor.
+    pub fn send(&self, key: PublicKey, session: u64, message: jackstay_proto::link::Message) {
+        if is_input(&message) {
+            let _ = self.commands.send(Command::Send { key, session, message });
+        }
+    }
+
+    /// As [`Handle::set_active`].
+    pub fn set_active(&self, key: PublicKey, active: bool) {
+        let _ = self.commands.send(Command::SetActive(key, active));
+    }
+}
+
 /// Starts the link on its own thread.
 ///
 /// The identity is made on the first start. A panic on the link thread is not caught: it ends the
@@ -327,6 +365,7 @@ impl Drop for Handle {
 pub fn start(
     config: Config,
     events: impl FnMut(Event) + Send + 'static,
+    input: impl Fn(Input) + Send + Sync + 'static,
 ) -> Result<Handle, StartError> {
     let identity = Identity::load_or_create(&config.state_dir.join("identity"))
         .map_err(StartError::Identity)?;
@@ -344,7 +383,17 @@ pub fn start(
         .map_err(StartError::Thread)?;
     let thread = std::thread::Builder::new()
         .name("link".to_owned())
-        .spawn(move || engine::run(runtime, config, identity, peers, receiver, Box::new(events)))
+        .spawn(move || {
+            engine::run(
+                runtime,
+                config,
+                identity,
+                peers,
+                receiver,
+                Box::new(events),
+                Arc::new(input),
+            );
+        })
         .map_err(StartError::Thread)?;
     Ok(Handle { commands, thread: Some(thread), public })
 }

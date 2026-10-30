@@ -18,6 +18,7 @@ use crate::coexist;
 use crate::config::{self, Config};
 use crate::control::Clients;
 use crate::import;
+use crate::input::{InputThread, Plumbing};
 use crate::paths::{self, Dirs, Overrides};
 use crate::session::{Exit, Parts, Session, StoreLink, manager_conflict};
 use crate::store::{self, Loaded, Paths, Reply, Snapshot, Store};
@@ -239,7 +240,7 @@ fn start_store(
 
 /// The link, started unless the configuration turns it off; off with the reason if it cannot
 /// start. The clipboard runs either way.
-fn start_link(setup: &Setup) -> Option<crate::link::Link> {
+fn start_link(setup: &Setup, input: jackstay_net::Sink) -> Option<crate::link::Link> {
     let failures = link_failures(setup);
     let failed = crate::link::failures(&failures);
     let config = if !setup.config.link_enabled {
@@ -256,7 +257,7 @@ fn start_link(setup: &Setup) -> Option<crate::link::Link> {
             timings: jackstay_net::Timings::default(),
         })
     };
-    match crate::link::Link::start(config, Some(failures)) {
+    match crate::link::Link::start(config, Some(failures), input) {
         Ok(link) => {
             if let Some(why) = link.link_status().off.filter(|_| link.handle().is_none()) {
                 log(&format!("link off: {why}"));
@@ -268,6 +269,39 @@ fn start_link(setup: &Setup) -> Option<crate::link::Link> {
             None
         }
     }
+}
+
+/// Input sharing's thread, started unless it failed too often in a row; off with the reason if it
+/// cannot start. The clipboard runs either way.
+fn start_input(
+    setup: &Setup,
+    plumbing: std::io::Result<Plumbing>,
+    link: Option<&crate::link::Link>,
+) -> InputThread {
+    let failures = crate::input::failures_file(&setup.dirs.state);
+    let failed = crate::link::failures(&failures);
+    let plumbing = match plumbing {
+        Ok(p) if failed < crate::link::FAILURES_ALLOWED => p,
+        Ok(_) => {
+            // Off for this run; the next start tries again.
+            let _ = std::fs::remove_file(&failures);
+            let why = format!("it failed {failed} times in a row; off until jackstayd restarts");
+            log(&format!("input off: {why}"));
+            return InputThread::off(why);
+        }
+        Err(e) => {
+            return InputThread::off(format!("its wake pipe could not be made: {}", e.kind()));
+        }
+    };
+    let start = crate::input::Start {
+        plumbing,
+        config: setup.config.input.clone(),
+        display: setup.flags.display.clone(),
+        link: link.and_then(crate::link::Link::handle).map(jackstay_net::Handle::sender),
+        failures: Some(failures),
+    };
+    InputThread::start(start)
+        .unwrap_or_else(|e| InputThread::off(format!("its thread could not start: {}", e.kind())))
 }
 
 /// Where the link's failures in a row are counted (docs/link.md, "Supervision").
@@ -317,7 +351,11 @@ fn start(args: &[OsString]) -> Result<i32, Refusal> {
             None
         }
     };
-    let peer_link = start_link(&setup);
+    let plumbing = crate::input::Plumbing::new();
+    let sink =
+        plumbing.as_ref().map_or_else(|_| Arc::new(|_| {}) as jackstay_net::Sink, Plumbing::sink);
+    let peer_link = start_link(&setup, sink);
+    let input = start_input(&setup, plumbing, peer_link.as_ref());
     let failures = link_failures(&setup);
     let mut session = Session::new(Parts {
         clipboard,
@@ -330,6 +368,7 @@ fn start(args: &[OsString]) -> Result<i32, Refusal> {
         clipman_check: Box::new(|| coexist::clipman_running(Path::new("/proc"))),
         thumbnails,
         link: peer_link,
+        input,
     });
     let exit = session.run();
     let status = match &exit {
@@ -366,6 +405,11 @@ fn start(args: &[OsString]) -> Result<i32, Refusal> {
                     crate::link::Gone::Silent => "stopped reporting",
                 }
             ));
+            status::PANIC
+        }
+        Exit::InputGone(why) => {
+            crate::link::failed(&crate::input::failures_file(&setup.dirs.state));
+            log(why);
             status::PANIC
         }
     };

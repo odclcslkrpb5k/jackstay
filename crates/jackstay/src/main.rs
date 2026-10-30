@@ -7,7 +7,8 @@ use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use jackstay_proto::control::{
-    Dialer, Error, Kinds, LinkStatus, PeerState, Request, Response, Summary, printable,
+    Dialer, Error, InputState, InputStatus, Kinds, LinkStatus, PeerState, Request, Response,
+    Summary, printable,
 };
 use jackstayd::client::{Client, ClientError};
 use jackstayd::ui_socket::{self, Ask};
@@ -27,7 +28,8 @@ commands:
   settings                   open the settings window (needs jackstay-ui)
   peers                      the link: this machine's fingerprint and each paired machine's state
   pair HOST                  pair with the machine at HOST (run it there too, naming this one)
-  unpair NAME|FINGERPRINT    forget a paired machine";
+  unpair NAME|FINGERPRINT    forget a paired machine
+  switch [NAME|FINGERPRINT]  move the pointer to that neighbour, or back here (the primary only)";
 
 /// Exit statuses: 0 done, 1 refused by the daemon, 2 bad usage, 3 the daemon (or, for `popup` and
 /// `settings`, jackstay-ui) unreachable.
@@ -138,6 +140,8 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
         ("peers", []) => Request::Peers,
         ("pair", [host]) => Request::Pair { host: text(host)? },
         ("unpair", [peer]) => Request::Unpair { peer: text(peer)? },
+        ("switch", [peer]) => Request::Switch { peer: text(peer)? },
+        ("switch", []) => Request::SwitchHome,
         ("help" | "--help" | "-h", []) => {
             println!("{USAGE}");
             return Ok(());
@@ -179,6 +183,9 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
         // The link's line too, for a status that says everything.
         if let Ok(Response::Peers(l)) = client.ask(&Request::Peers) {
             print_link(&l, false);
+        }
+        if let Ok(Response::Input(i)) = client.ask(&Request::Input) {
+            print_input(&i);
         }
     }
     Ok(())
@@ -300,6 +307,20 @@ fn print_link(l: &LinkStatus, full: bool) {
     }
 }
 
+fn print_input(i: &InputStatus) {
+    let peer = printable(&i.peer);
+    let detail = printable(&i.detail);
+    match i.state {
+        InputState::Off => println!("input: off ({detail})"),
+        InputState::Waiting => println!("input: waiting ({detail})"),
+        InputState::Here => println!("input: the pointer is here"),
+        InputState::On => println!("input: the pointer is on {peer}"),
+        InputState::Locked => println!("input: the pointer is locked to {peer}"),
+        InputState::Secondary => println!("input: {peer} can drive this machine"),
+        InputState::Driven => println!("input: {peer} drives this machine now"),
+    }
+}
+
 /// Entries are listed by offset, newest first: one copied or deleted while `--all` pages through
 /// may shift the pages, so an entry can be shown twice or not at all.
 fn list_all(client: &mut Client) -> Result<(), Failure> {
@@ -363,7 +384,9 @@ fn show(request: &Request, response: Response) -> Result<(), Failure> {
             | Request::Pin { .. }
             | Request::Clear
             | Request::ClearHistory
-            | Request::Unpair { .. },
+            | Request::Unpair { .. }
+            | Request::Switch { .. }
+            | Request::SwitchHome,
             Response::Ok,
         ) => Ok(()),
         _ => Err((REFUSED, "jackstayd sent an unexpected response".to_owned())),
