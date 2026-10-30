@@ -619,6 +619,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jackstay-input"
+version = "0.0.0"
+dependencies = [
+ "jackstay-proto",
+ "proptest",
+]
+
+[[package]]
 name = "jackstay-net"
 version = "0.0.0"
 dependencies = [

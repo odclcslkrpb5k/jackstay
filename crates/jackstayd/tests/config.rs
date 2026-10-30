@@ -1,15 +1,16 @@
 use std::num::NonZeroUsize;
 
 use jackstayd::config::{
-    Config, ConfigError, MAX_BYTES, MAX_ENTRIES, MAX_LINK_PORT, MAX_PER_ENTRY, MAX_PER_TARGET,
-    MAX_PINNED, MIN_LINK_PORT, parse, render,
+    Config, ConfigError, Input, MAX_BYTES, MAX_ENTRIES, MAX_LINK_PORT, MAX_PER_ENTRY,
+    MAX_PER_TARGET, MAX_PINNED, MIN_LINK_PORT, parse, render,
 };
 use proptest::prelude::*;
 
 #[test]
 fn an_empty_file_is_the_defaults() {
     let d = Config::default();
-    assert_eq!(parse(""), Ok(d));
+    assert_eq!(parse(""), Ok(d.clone()));
+    assert_eq!(d.input, Input::default());
     assert_eq!((d.max_entries.get(), d.max_bytes, d.max_pinned), (100, 512 << 20, 1000));
     assert_eq!((d.per_target, d.per_entry), (64 << 20, 128 << 20));
 }
@@ -70,6 +71,48 @@ fn render_writes_only_what_differs_from_the_defaults() {
     assert_eq!(render(&c), format!("{header}\n[capture]\nper_target = 5\nper_entry = 5\n"));
 }
 
+#[test]
+fn input_neighbours_are_read_and_written() {
+    let c = parse("[input]\nprimary = true\nleft = \"xiphos\"\nright = \"0123456789abcdef\"\n")
+        .unwrap_or_else(|e| panic!("{e}"));
+    let want = Input {
+        primary: true,
+        left: Some("xiphos".into()),
+        right: Some("0123456789abcdef".into()),
+        ..Input::default()
+    };
+    assert_eq!(c.input, want);
+    let header = "# Written by Jackstay's settings window; a key left out has its default (docs/daemon.md).\n";
+    assert_eq!(
+        render(&c),
+        format!(
+            "{header}\n[input]\nprimary = true\nleft = \"xiphos\"\nright = \"0123456789abcdef\"\n"
+        )
+    );
+    let bad = |s: &str| ConfigError::BadValue(s.to_owned());
+    assert_eq!(parse("[input]\nleft = \"\"\n"), Err(bad("input.left")));
+    assert_eq!(parse("[input]\ntop = 5\n"), Err(bad("input.top")));
+    assert_eq!(
+        parse(&format!("[input]\nbottom = \"{}\"\n", "x".repeat(256))),
+        Err(bad("input.bottom"))
+    );
+    assert!(parse(&format!("[input]\nbottom = \"{}\"\n", "x".repeat(255))).is_ok());
+    assert_eq!(parse("[input]\nprimary = 1\n"), Err(bad("input.primary")));
+    assert_eq!(
+        parse("[input]\nmiddle = \"x\"\n"),
+        Err(ConfigError::UnknownKey("input.middle".into()))
+    );
+}
+
+#[test]
+fn a_neighbour_with_quotes_or_control_characters_reads_back() {
+    let c = Config {
+        input: Input { left: Some("a\"b\\c\u{1b}d\u{7f}é".into()), ..Input::default() },
+        ..Config::default()
+    };
+    assert_eq!(parse(&render(&c)), Ok(c));
+}
+
 proptest! {
     #[test]
     fn render_reads_back(
@@ -80,7 +123,10 @@ proptest! {
         extra in 0..=MAX_PER_ENTRY,
         link_enabled in any::<bool>(),
         port in MIN_LINK_PORT..=MAX_LINK_PORT,
+        primary in any::<bool>(),
+        sides in proptest::collection::vec(proptest::option::of("\\PC{1,40}"), 4),
     ) {
+        let side = |i: usize| sides.get(i).cloned().flatten();
         let c = Config {
             max_entries: NonZeroUsize::new(usize::try_from(entries).unwrap_or(1)).unwrap_or(NonZeroUsize::MIN),
             max_bytes: bytes,
@@ -89,7 +135,8 @@ proptest! {
             per_entry: target.saturating_add(extra).min(MAX_PER_ENTRY),
             link_enabled,
             link_port: u16::try_from(port).unwrap_or(24810),
+            input: Input { primary, left: side(0), right: side(1), top: side(2), bottom: side(3) },
         };
-        prop_assert_eq!(parse(&render(&c)), Ok(c));
+        prop_assert_eq!(parse(&render(&c)), Ok(c.clone()));
     }
 }

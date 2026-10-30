@@ -88,8 +88,7 @@ pub fn config(f: &Fields, was: &Config) -> Result<Config, String> {
         per_target: size(f.target_mib, shown.target_mib, was.per_target),
         per_entry: size(f.entry_mib, shown.entry_mib, was.per_entry),
         // Not in the window: kept as the file has them.
-        link_enabled: was.link_enabled,
-        link_port: was.link_port,
+        ..was.clone()
     };
     // The daemon's own check, so the window never saves a file the daemon would refuse. With
     // each field in its range, what is left to refuse is the one rule across two of them.

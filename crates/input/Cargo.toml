@@ -1,0 +1,18 @@
+[package]
+name = "jackstay-input"
+description = "Input sharing's logic with no X in it: layouts, edges, the secondary's pointer, spans"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+jackstay-proto = { path = "../proto", version = "=0.0.0" }
+
+[dev-dependencies]
+proptest.workspace = true

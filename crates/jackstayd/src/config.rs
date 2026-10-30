@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 
 /// The daemon's settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Unpinned entries kept.
     pub max_entries: NonZeroUsize,
@@ -21,6 +21,33 @@ pub struct Config {
     pub link_enabled: bool,
     /// The link's UDP port; pairing uses the next one.
     pub link_port: u16,
+    /// Input sharing (docs/input.md).
+    pub input: Input,
+}
+
+/// `[input]`: whether this machine's keyboard and mouse lead, and the peer beyond each side.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Input {
+    pub primary: bool,
+    /// A paired peer's fingerprint, or a name only one peer has; per side.
+    pub left: Option<String>,
+    pub right: Option<String>,
+    pub top: Option<String>,
+    pub bottom: Option<String>,
+}
+
+impl Input {
+    /// The neighbour named for `side`.
+    #[must_use]
+    pub fn neighbour(&self, side: jackstay_proto::link::Side) -> Option<&str> {
+        use jackstay_proto::link::Side;
+        match side {
+            Side::Left => self.left.as_deref(),
+            Side::Right => self.right.as_deref(),
+            Side::Top => self.top.as_deref(),
+            Side::Bottom => self.bottom.as_deref(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -33,6 +60,7 @@ impl Default for Config {
             per_entry: 128 << 20,
             link_enabled: true,
             link_port: jackstay_net::DEFAULT_PORT,
+            input: Input::default(),
         }
     }
 }
@@ -74,6 +102,15 @@ pub const MIN_LINK_PORT: u64 = 1024;
 pub const MAX_LINK_PORT: u64 = 65534;
 /// The largest `capture.per_entry`.
 pub const MAX_PER_ENTRY: u64 = MAX_PER_TARGET << 2;
+
+/// A neighbour: a peer's name or fingerprint, as long as a name may be.
+fn neighbour(value: &toml::Value, key: &str) -> Result<Option<String>, ConfigError> {
+    value
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= jackstay_proto::link::MAX_NAME_LEN)
+        .map(|s| Some(s.to_owned()))
+        .ok_or_else(|| ConfigError::BadValue(key.to_owned()))
+}
 
 fn number(value: &toml::Value, key: &str, min: u64, max: u64) -> Result<u64, ConfigError> {
     value
@@ -126,6 +163,14 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                     let n = number(value, &name, MIN_LINK_PORT, MAX_LINK_PORT)?;
                     config.link_port = u16::try_from(n).map_err(|_| ConfigError::BadValue(name))?;
                 }
+                ("input", "primary") => {
+                    config.input.primary =
+                        value.as_bool().ok_or_else(|| ConfigError::BadValue(name.clone()))?;
+                }
+                ("input", "left") => config.input.left = neighbour(value, &name)?,
+                ("input", "right") => config.input.right = neighbour(value, &name)?,
+                ("input", "top") => config.input.top = neighbour(value, &name)?,
+                ("input", "bottom") => config.input.bottom = neighbour(value, &name)?,
                 _ => return Err(ConfigError::UnknownKey(name)),
             }
         }
@@ -134,6 +179,23 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         return Err(ConfigError::BadValue("capture.per_entry".to_owned()));
     }
     Ok(config)
+}
+
+/// `s` as a TOML basic string: quoted, with quotes, backslashes and control characters escaped.
+fn basic_string(s: &str) -> String {
+    let mut out = String::from('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04X}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// The file's text for `config`, as the settings window writes it: only the keys that differ from
@@ -155,7 +217,16 @@ pub fn render(config: &Config) -> String {
         ("link", "enabled", config.link_enabled.to_string(), default.link_enabled.to_string()),
         ("link", "port", config.link_port.to_string(), default.link_port.to_string()),
     ];
-    let keys: Vec<_> = keys.into_iter().chain(link).collect();
+    let quoted = |s: &Option<String>| s.as_deref().map_or_else(String::new, basic_string);
+    let (i, none) = (&config.input, String::new());
+    let input = [
+        ("input", "primary", i.primary.to_string(), default.input.primary.to_string()),
+        ("input", "left", quoted(&i.left), none.clone()),
+        ("input", "right", quoted(&i.right), none.clone()),
+        ("input", "top", quoted(&i.top), none.clone()),
+        ("input", "bottom", quoted(&i.bottom), none),
+    ];
+    let keys: Vec<_> = keys.into_iter().chain(link).chain(input).collect();
     let mut text = String::from(
         "# Written by Jackstay's settings window; a key left out has its default (docs/daemon.md).\n",
     );

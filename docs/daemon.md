@@ -306,6 +306,8 @@ At start, after the lock:
 | `capture.per_entry` | 128 MiB | |
 | `link.enabled` | true | the link to other machines (docs/link.md) |
 | `link.port` | 24810 | UDP, 1024–65534; pairing uses the next port |
+| `input.primary` | false | this machine's keyboard and mouse lead (docs/input.md) |
+| `input.left`, `.right`, `.top`, `.bottom` | none | the paired peer beyond that side: its fingerprint, or a name only one peer has (1–255 bytes) |
 
 Parsed once at start into a typed config; an unknown key or a bad value refuses (exit 2) with the
 key named in the journal. The whole history is held in memory, within these limits. The settings

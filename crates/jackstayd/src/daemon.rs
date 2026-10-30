@@ -147,7 +147,7 @@ fn report_load(loaded: &Loaded) {
 /// an empty clipboard, and imports clipman's history on the first start. Returns whether it
 /// imported, so the marker is written once that is saved.
 fn connect(setup: &mut Setup) -> Result<(Clipboard, Tracker, bool), Refusal> {
-    let config = setup.config;
+    let config = &setup.config;
     let per_target = usize::try_from(config.per_target).unwrap_or(usize::MAX);
     let per_entry = usize::try_from(config.per_entry).unwrap_or(usize::MAX);
     let engine = EngineConfig { limits: CaptureLimits { per_target, per_entry } };

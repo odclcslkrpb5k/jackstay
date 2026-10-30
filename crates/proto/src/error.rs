@@ -60,6 +60,10 @@ pub enum LimitError {
     BadInterval {
         interval_ms: u16,
     },
+    /// A monitor that is empty or reaches beyond X's largest coordinate.
+    BadMonitor,
+    /// Pointer motion beyond the largest delta.
+    BadMotion,
 }
 
 impl From<LimitError> for DecodeError {
@@ -103,6 +107,8 @@ impl fmt::Display for LimitError {
             LimitError::BadInterval { interval_ms } => {
                 write!(f, "ping interval of {interval_ms} ms")
             }
+            LimitError::BadMonitor => write!(f, "monitor empty or out of range"),
+            LimitError::BadMotion => write!(f, "pointer motion out of range"),
         }
     }
 }

@@ -195,27 +195,38 @@ fn fields_show_sizes_in_mib_and_keep_exact_bytes_unless_changed() {
         f,
         Fields { entries: 100, size_mib: 512, pinned: 1000, target_mib: 64, entry_mib: 128 }
     );
-    assert_eq!(form::config(&f, &d), Ok(d));
-    let odd = Config { max_bytes: 1000, per_target: 3 << 19, per_entry: 5 << 20, ..d };
+    assert_eq!(form::config(&f, &d), Ok(d.clone()));
+    let odd = Config { max_bytes: 1000, per_target: 3 << 19, per_entry: 5 << 20, ..d.clone() };
     let f = form::fields(&odd);
     assert_eq!((f.size_mib, f.target_mib, f.entry_mib), (0, 2, 5), "to the nearest MiB");
-    assert_eq!(form::config(&f, &odd), Ok(odd), "unchanged fields keep their bytes");
+    assert_eq!(form::config(&f, &odd), Ok(odd.clone()), "unchanged fields keep their bytes");
     let changed = Fields { entries: 7, size_mib: 1, target_mib: 3, ..f };
     let want = Config {
         max_entries: NonZeroUsize::new(7).unwrap_or(NonZeroUsize::MIN),
         max_bytes: 1 << 20,
         per_target: 3 << 20,
-        ..odd
+        ..odd.clone()
     };
     assert_eq!(form::config(&changed, &odd), Ok(want));
     // Within the field's range at the top too, and kept exact.
-    let top = Config { max_bytes: MAX_BYTES, ..d };
+    let top = Config { max_bytes: MAX_BYTES, ..d.clone() };
     assert_eq!(form::fields(&top).size_mib, RANGES.size_mib.1);
-    assert_eq!(form::config(&form::fields(&top), &top), Ok(top));
+    assert_eq!(form::config(&form::fields(&top), &top), Ok(top.clone()));
     // At least the lowest a field allows, even for a size of a few bytes.
     let tiny = Config { per_target: 1, per_entry: 1, ..d };
     assert_eq!(form::fields(&tiny).target_mib, 1);
-    assert_eq!(form::config(&form::fields(&tiny), &tiny), Ok(tiny));
+    assert_eq!(form::config(&form::fields(&tiny), &tiny), Ok(tiny.clone()));
+    // Settings the window does not show are kept as the file has them.
+    let input = jackstayd::config::Input {
+        primary: true,
+        left: Some("xiphos".into()),
+        right: Some("xiphos".into()),
+        ..jackstayd::config::Input::default()
+    };
+    let linked = Config { link_port: 30000, input, ..d };
+    let changed = Fields { entries: 9, ..form::fields(&linked) };
+    let saved = form::config(&changed, &linked).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!((saved.link_port, saved.input), (30000, linked.input));
 }
 
 #[test]

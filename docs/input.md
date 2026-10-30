@@ -3,7 +3,8 @@
 How one machine's keyboard and mouse drive another's screen (milestone M4). Plan §5.3 says what
 input sharing must do; this says how. It rides on the link (docs/link.md).
 
-Status: **design, revised after red-team pass 1** (findings and their resolutions at the end).
+Status: **design, revised after red-team pass 1** (findings and their resolutions at the end);
+slice 1 (the `input` crate, the `proto::link` input messages, `[input]` configuration) built.
 Facts marked *measured* come from `spikes/x11-probes` (`run-input.sh` and `run.sh`, Xvfb 21.1.22,
 2026-10-29), from the reviewer's probes, or were read from the owner's X server (athena,
 read-only, 2026-10-29).
@@ -88,9 +89,17 @@ side independently, on:
 
 Every return the primary starts itself also queues `Exit`, so the secondary ends the span even if
 it never noticed the silence. When a span ends, the secondary releases everything it holds and
-ignores the rest of the span's messages: after a black hole, QUIC delivers the backlog, and a late
-key press arriving after the span has ended is dropped rather than injected with no release to
-follow.
+ignores the rest of the span's messages.
+
+**The backlog after silence.** After a black hole, QUIC delivers what was sent meanwhile, in
+order, and that can include an `Enter` the secondary never saw before the silence, with keys after
+it. So when the session goes suspect, the secondary ends its span and **drains**: it drops every
+input message until an `Exit`. The primary, when it notices the silence, queues `Exit` with its
+last span id whether a span was open or not, so on the ordered stream that `Exit` follows exactly
+the backlog. A late key is therefore never injected, however the silence fell. A new session
+starts with no backlog and no drain. The primary also sends `Keymap` before its first `Enter` on a
+session; until it arrives the secondary injects no key at all, since a keycode's meaning here is
+unknown.
 
 ## Primary
 
@@ -148,8 +157,8 @@ follow.
   - `input.return_key` (default Scroll Lock, which athena's keyboard has at keycode 78): return
     the pointer at once, a way home if the secondary's screen is off or its daemon wedged.
   - `input.lock_key` (default Scroll Lock with Shift): lock the pointer to the secondary it is on
-    until pressed again; barrier hits and `Leave` are ignored meanwhile (plan §3, "lock to
-    screen").
+    until pressed again (plan §3, "lock to screen"). The primary sends `Lock`, and the
+    secondary never sends `Leave` while locked, so neither side ends the span by itself.
   Outside a grab these keys do nothing special. `jackstay switch PEER` crosses to a neighbour
   without the mouse, entering at the middle of the edge that faces this machine; `jackstay
   switch` alone returns. Either can be bound to keys through Xfce's shortcuts.
@@ -194,7 +203,7 @@ follow.
   per session and on `MappingNotify`. A keycode whose keysyms differ is sent as the keycode on this
   machine that has the primary's keysyms, found once per keymap change. One with no match here is
   dropped and logged by keycode (borrowing a spare keycode, plan §5.3, is left until a real key
-  needs it). This matters on the owner's machines: athena maps Caps Lock to Super (`caps:super`;
+  needs it), as is a keycode with no keysyms on the primary: nothing says what it means here. This matters on the owner's machines: athena maps Caps Lock to Super (`caps:super`;
   *measured*: keycodes 66 and 133 are both Super_L, and athena has no Caps_Lock key at all); if
   xiphos does not, athena's keycode 66 is sent to xiphos as its Super_L.
 - **Auto-repeat** is this machine's own. *Measured:* the X server auto-repeats a key held through
@@ -220,19 +229,21 @@ machines update together, as for control v3).
 
 | Kind | Way | Payload |
 |---|---|---|
-| `Layout` | both | up to 16 monitors, each x, y, width, height (i16, i16, u16, u16) |
+| `Layout` | both | 1 to 16 monitors, each x, y, width, height (u16; none empty, none past 32767) |
 | `Keymap` | primary → secondary | first keycode, count (≤ 248), two keysyms (u32) and a modifier flag each |
 | `Enter` | primary → secondary | span (u32), side, edge fraction (u16), held modifier keys (32-byte bitmap), locks (u8) |
 | `Motion` | primary → secondary | span, dx, dy in 1/256 px (i32 each) |
 | `Button` | primary → secondary | span, button (u8), down (u8) |
 | `Key` | primary → secondary | span, keycode (u8), down (u8) |
 | `Leave` | secondary → primary | span, side, edge fraction (u16) |
-| `Exit` | primary → secondary | span |
+| `Exit` | primary → secondary | span; also the end of what arrives late after silence (Spans) |
+| `Lock` | primary → secondary | span, on (u8): the lock key locked the pointer to the secondary |
 
-Decoding refuses a side, button, keycode or monitor count out of range; a monitor with no area;
-a held-key bitmap naming a keycode not flagged as a modifier; and `Motion` beyond ±65,536 px. A
-secondary drops input messages from a peer that is not its neighbour, and any message whose span
-is not the current one.
+Decoding refuses a side, button, keycode, lock bit or monitor count out of range; a monitor with
+no area or past 32767; a keymap running past keycode 255; an up/down or modifier flag other than 0
+or 1, so every frame has one encoding; and `Motion` beyond ±65,536 px. A secondary drops input
+messages from a peer that is not its neighbour, and any message whose span is not the current
+one; of `Enter`'s held keys it presses only those the primary's `Keymap` flags as modifiers.
 
 ## Coexistence
 
@@ -299,12 +310,13 @@ and keymap differences; crossings near xiphos's top, against Synergy's habit.
 ## Slices
 
 1. The `input` crate (layouts, edges, fractions, virtual pointer, spans, held state), the
-   `proto::link` input messages with their fuzz target, and the `[input]` configuration with
-   neighbours resolved to keys.
+   `proto::link` input messages with their fuzz target, and the `[input]` neighbours and
+   `primary` in the configuration.
 2. `x11-input` and the input thread on one machine: barriers, grabs, button checks, injection,
    XTest clearing, RandR, the watchdog, tested against Xvfb.
-3. Wiring to the link (freshness stamps, spans over stream 0), the two-daemon tests, `jackstay
-   status`/`switch`, the hotkeys, the latency gate.
+3. Wiring to the link (freshness stamps, spans over stream 0, the drain's `Exit`), neighbours
+   resolved to keys, the two-daemon tests, `jackstay status`/`switch`, the hotkeys and their
+   configuration (`return_key`, `lock_key`), the latency gate.
 4. Acceptance on the owner's LAN, then dogfood.
 
 ## Red team
@@ -331,3 +343,16 @@ server read-only.
 | 13 | Grab retries per barrier hit | At most one per 50 ms |
 | 14 | Synergy's GUI and forks' process names | Full list |
 | 15 | Cursor left visible at the secondary's edge; Synergy's mapping differs | Kept, as Synergy does; mapping difference checked at acceptance |
+
+### Pass 2 (code review of slice 1), 2026-10-29
+
+A separately briefed reviewer, which verified each finding with a scratch test.
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | Locked to the secondary, a push past its edge still sent `Leave` and ended the span there, leaving the primary grabbing with nothing accepting input | `Lock` message; no `Leave` while locked |
+| 2 | After silence, the backlog can hold an `Enter` the secondary never saw, and keys after it, injected seconds late | Drain after suspect until the primary's `Exit`, which it sends on noticing silence, span or not |
+| 3 | Before `Keymap`, keycodes passed through untranslated (athena's Super as xiphos's Caps Lock) | No key until `Keymap`; the primary sends it before any `Enter` |
+| 4 | A keycode with no keysyms on the primary passed through, typing whatever it is here | Dropped |
+| 5 | A move longer than a monitor clamped to the monitor it started on, missing the one it reached and its edge | The target clamped into the bounding box picks the monitor |
+| 6 | The document claimed neighbour resolution and hotkey settings in slice 1 | Moved to slice 3 |

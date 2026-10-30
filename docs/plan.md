@@ -277,6 +277,7 @@ libxkbcommon, until docs/input.md removed the need).
 | `x11-clip` | Implements that port over x11rb's `RustConnection`; the clipboard thread's event loop | forbidden |
 | `x11-input` | Barriers, grabs, XI2, XTest, XKB locks, over x11rb's pure-Rust connection (docs/input.md: no libxkbcommon after all) | forbidden |
 | `net` | QUIC sessions, pairing, reconnect | forbidden |
+| `input` | Input sharing's logic with no X: layouts, edges, the secondary's pointer, keymap translation, spans (docs/input.md) | forbidden |
 | `jackstayd` | Wires the above into threads and channels; config; supervision | forbidden |
 | `jackstay-ui` | gtk3-rs popup, settings, ksni tray | forbidden in our code |
 | `jackstay` | CLI: `popup`, `clear`, `switch <screen>`, `lock`, `status`, `pair`; a thin socket client | forbidden |
