@@ -69,17 +69,31 @@ fn the_helper_confines_itself_before_it_reads() {
         .stdout(Stdio::null())
         .spawn());
     let proc = PathBuf::from(format!("/proc/{}", child.id()));
-    // Its input not yet closed: it is waiting to read, already confined.
+    // Its input not yet closed: it is waiting to read, already confined. Its seccomp filter is the
+    // last step (crates/thumbnail/tests/confine.rs proves what it stops), so every limit is set
+    // once it shows; read before, a limit may not be yet. One filter more than this process has,
+    // not filter mode alone: a container's runtime puts every process in it in filter mode.
+    let filters = |status: &str| {
+        let line = status.lines().find(|l| l.starts_with("Seccomp_filters:"))?;
+        line.split_whitespace().nth(1)?.parse::<u32>().ok()
+    };
+    let own = filters(&ok(std::fs::read_to_string("/proc/self/status")));
+    let confined = own.and_then(|n| n.checked_add(1));
+    assert!(confined.is_some(), "no seccomp filter count");
     let deadline = Instant::now() + Duration::from_secs(10);
-    let limits = loop {
-        let limits = std::fs::read_to_string(proc.join("limits")).unwrap_or_default();
-        if limit(&limits, "Max address space").as_deref() == Some("1073741824") {
-            break limits;
+    let status = loop {
+        let status = std::fs::read_to_string(proc.join("status")).unwrap_or_default();
+        if filters(&status) == confined {
+            break status;
         }
-        assert!(Instant::now() < deadline, "never confined: {limits}");
+        assert!(Instant::now() < deadline, "never confined: {status}");
         std::thread::sleep(Duration::from_millis(10));
     };
+    assert!(status.lines().any(|l| l.split_whitespace().eq(["NoNewPrivs:", "1"])), "{status}");
+    assert!(status.lines().any(|l| l.split_whitespace().eq(["Seccomp:", "2"])), "{status}");
+    let limits = std::fs::read_to_string(proc.join("limits")).unwrap_or_default();
     for (name, value) in [
+        ("Max address space", "1073741824"),
         ("Max cpu time", "5"),
         ("Max file size", "0"),
         ("Max core file size", "0"),
@@ -88,10 +102,6 @@ fn the_helper_confines_itself_before_it_reads() {
     ] {
         assert_eq!(limit(&limits, name).as_deref(), Some(value), "{name}");
     }
-    let status = std::fs::read_to_string(proc.join("status")).unwrap_or_default();
-    assert!(status.lines().any(|l| l.split_whitespace().eq(["NoNewPrivs:", "1"])), "{status}");
-    // Its seccomp filter, in filter mode (crates/thumbnail/tests/confine.rs proves what it stops).
-    assert!(status.lines().any(|l| l.split_whitespace().eq(["Seccomp:", "2"])), "{status}");
     drop(child.stdin.take());
     assert_eq!(ok(child.wait()).code(), Some(1));
 }

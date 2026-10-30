@@ -272,17 +272,31 @@ fn paired_machines_connect_and_measure_round_trips() {
 #[test]
 fn both_machines_dialing_at_once_settle_on_one_session_that_stays() {
     // Neither waits before dialing, so both sessions come up together, round after round; each
-    // machine must keep the same one, the session the smaller key dialed.
+    // machine must settle on the same one, the session the smaller key dialed, and keep it. A
+    // machine may keep the other session first, until the preferred one arrives: on a loaded
+    // machine the peer's close of that first session can even come before (CI and a loaded
+    // workstation, 2026-10-30). So: at most one replacement, then two seconds unchanged.
     let at_once = || Timings { defer_dial: Duration::ZERO, ..Timings::default() };
     for _ in 0..4 {
         let (a, b) = (Machine::new("a"), Machine::new("b"));
         a.knows(&b);
         b.knows(&a);
         let (mut la, mut lb) = (a.start_with(at_once()), b.start_with(at_once()));
-        la.peer_in(b.key, PeerState::Connected, SOON);
-        lb.peer_in(a.key, PeerState::Connected, SOON);
-        assert!(la.stays(b.key, PeerState::Connected, Duration::from_secs(2)), "{:?}", la.last);
-        assert!(lb.stays(a.key, PeerState::Connected, Duration::from_millis(200)), "{:?}", lb.last);
+        for (l, peer) in [(&mut la, b.key), (&mut lb, a.key)] {
+            let settled = Instant::now() + SOON;
+            loop {
+                l.peer_in(peer, PeerState::Connected, SOON);
+                if l.stays(peer, PeerState::Connected, Duration::from_secs(2)) {
+                    break;
+                }
+                assert!(Instant::now() < settled, "never settled: {:?}", l.last);
+            }
+        }
+        for (l, peer) in [(&la, b.key), (&lb, a.key)] {
+            let last = l.last.as_ref().map(|s| s.peers.as_slice()).unwrap_or_default();
+            let connects = last.iter().find(|p| p.key == peer).map(|p| p.connects);
+            assert!(matches!(connects, Some(1 | 2)), "{connects:?} sessions kept");
+        }
     }
 }
 

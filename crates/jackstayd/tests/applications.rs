@@ -137,6 +137,19 @@ impl App {
             .and_then(|mut c| c.ask(&Request::Status));
         matches!(status, Ok(Response::Status(s)) if s.owns_clipboard)
     }
+
+    /// What a quit that never finished left behind: its windows still up mean the keys were
+    /// lost or a dialog stopped it; none mean it is exiting slowly with the daemon not serving.
+    fn left_behind(&self) -> String {
+        let windows = Command::new("xdotool")
+            .args(["search", "--onlyvisible", "--pid", &self.child.id().to_string()])
+            .env("DISPLAY", &self.display)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().count());
+        let status = Client::connect(&self.control, Duration::from_secs(5))
+            .and_then(|mut c| c.ask(&Request::Status));
+        format!("visible windows: {windows:?}; the daemon: {status:?}")
+    }
 }
 
 impl Owner for App {
@@ -152,7 +165,12 @@ impl Owner for App {
         // group is killed when the test is done with it.
         let deadline = began + Duration::from_secs(30);
         while ok(self.child.try_wait()).is_none() && !self.daemon_serves() {
-            assert!(Instant::now() < deadline, "{} did not quit", self.name);
+            assert!(
+                Instant::now() < deadline,
+                "{} did not quit ({})",
+                self.name,
+                self.left_behind()
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         began.elapsed()

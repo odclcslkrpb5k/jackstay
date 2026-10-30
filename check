@@ -111,7 +111,9 @@ for f in "${fuzz[@]}"; do
   step "format (fuzz targets, ${f%/Cargo.toml})" cargo fmt --manifest-path "$f" --check
 done
 step "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
-step "tests" cargo test --workspace --locked
+# Every test binary, past a failing one: a flaky test elsewhere then cannot hide a real failure
+# (a planted one, in prove-checks: CI, 2026-10-30).
+step "tests" cargo test --workspace --locked --no-fail-fast
 step "install script" install_script
 step "dependencies (cargo-deny, whole graph)" deny_whole_graph
 for f in "${fuzz[@]}"; do

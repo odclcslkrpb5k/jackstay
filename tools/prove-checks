@@ -159,6 +159,8 @@ for entry in "${plants[@]}"; do
   else
     printf 'FAIL  %-34s exit %d at "%s", wanted a failure at "%s" matching /%s/ (log: %s)\n' \
       "$name" "$status" "$got" "$want" "$reason" "$copy.log"
+    # CI keeps no files: what failed instead must show here.
+    grep -E 'panicked at|FAILED|^error' "$copy.log" | head -20 | sed 's/^/      /' || true
     failures=1
   fi
 done
