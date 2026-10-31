@@ -8,6 +8,7 @@ use std::io::{Read as _, Write as _};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,7 @@ use crate::import;
 use crate::input::InputThread;
 use crate::link::{self, Link};
 use crate::notify::Notifier;
+use crate::sharing::{Do, Sharing};
 use crate::store::{Reply, Request as StoreRequest, Snapshot};
 use crate::summary::{summary, truncate};
 use crate::thumbnails::Thumbnails;
@@ -116,6 +118,8 @@ pub struct Session {
     pub thumbnails: Option<Thumbnails>,
     pub link: Option<Link>,
     pub input: InputThread,
+    /// Clipboard sharing, while the link runs.
+    sharing: Option<Sharing>,
     /// The peers the input thread was last told of.
     peers_told: Option<Vec<(jackstay_net::PublicKey, String)>>,
     /// The client that started the pairing running now, which gets its events.
@@ -186,13 +190,14 @@ fn describe(report: &Report) -> Option<String> {
         Report::KeptAlive => "the owner exited; serving its last copy".to_owned(),
         Report::ManagerConflict { holder } => manager_conflict(holder.as_deref()),
         Report::ManagerLost => "another client took CLIPBOARD_MANAGER".to_owned(),
+        Report::Emptied => "the clipboard's owner gave it up".to_owned(),
         Report::CaptureStarted { .. }
         | Report::CaptureEnded { .. }
         | Report::Claimed
         | Report::ClaimFailed
         | Report::Lost
         | Report::SaveAnswered { .. }
-        // The fetch it asks for is the sharing's (slice 5); never logged with the target.
+        // Never logged with the target, which can say what is copied.
         | Report::Wanted { .. } => return None,
     })
 }
@@ -231,6 +236,10 @@ impl Session {
         if let Some(t) = &mut thumbnails {
             t.sync(tracker.history());
         }
+        let sharing = link
+            .as_ref()
+            .and_then(Link::handle)
+            .map(|h| Sharing::new(h.public(), &tracker, per_target));
         Session {
             clipboard,
             tracker,
@@ -244,6 +253,7 @@ impl Session {
             thumbnails,
             link,
             input,
+            sharing,
             peers_told: None,
             pairing: None,
             unpairing: VecDeque::new(),
@@ -254,7 +264,8 @@ impl Session {
         }
     }
 
-    /// Applies reports from the engine. Returns `Err` if one ends the session.
+    /// Applies reports from the engine, and shares what they changed. Returns `Err` if one ends
+    /// the session.
     fn reports(&mut self, reports: &[Report]) -> Result<bool, Exit> {
         let now = wall_ms();
         let mut changed = false;
@@ -267,7 +278,75 @@ impl Session {
             }
             changed |= self.tracker.on_report(r, now);
         }
+        if let Some(sharing) = &mut self.sharing {
+            let dos = sharing.reports(reports, &mut self.tracker, Instant::now(), now);
+            changed |= self.act(dos)?;
+        }
         Ok(changed)
+    }
+
+    /// Carries out what sharing asks. Returns whether the history needs saving.
+    fn act(&mut self, dos: Vec<Do>) -> Result<bool, Exit> {
+        let mut changed = false;
+        for d in dos {
+            let handle = self.link.as_ref().and_then(Link::handle);
+            match d {
+                Do::Share { key, session, message } => {
+                    if let Some(h) = handle {
+                        h.share(key, session, message);
+                    }
+                }
+                Do::Fetch { key, session, fetch, digest, name, size } => {
+                    if let Some(h) = handle {
+                        h.fetch(key, session, fetch, digest, name, size);
+                    }
+                }
+                Do::Cancel { fetch } => {
+                    if let Some(h) = handle {
+                        h.cancel_fetch(fetch);
+                    }
+                }
+                Do::Answer { request, bytes } => {
+                    if let Some(h) = handle {
+                        h.answer(request, bytes);
+                    }
+                }
+                Do::Serve(id) => {
+                    let Some(content) =
+                        self.tracker.history().get(id).map(|e| Arc::clone(e.content()))
+                    else {
+                        continue;
+                    };
+                    let reports = self.clipboard.serve(content).map_err(Exit::XGone)?;
+                    changed |= self.reports(&reports)?;
+                    changed |= self.tracker.served(id, reports.contains(&Report::Claimed));
+                }
+                Do::Update(id) => {
+                    let Some(content) =
+                        self.tracker.history().get(id).map(|e| Arc::clone(e.content()))
+                    else {
+                        continue;
+                    };
+                    self.clipboard.update(content).map_err(Exit::XGone)?;
+                    changed |= self.tracker.served(id, true);
+                }
+                Do::Empty => {
+                    let reports = self.clipboard.clear().map_err(Exit::XGone)?;
+                    changed |= self.reports(&reports)?;
+                    changed |= self.tracker.emptied();
+                }
+                Do::Save => changed = true,
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Hands what sharing asks to [`Session::act`], saving if the history changed.
+    fn share(&mut self, dos: Vec<Do>) -> Result<(), Exit> {
+        if self.act(dos)? {
+            self.save();
+        }
+        Ok(())
     }
 
     /// After any change to the history: its thumbnails brought up to date, and subscribers told.
@@ -359,7 +438,8 @@ impl Session {
             }
             Request::Select { id } => {
                 let id = EntryId::new(id);
-                let Some(content) = self.tracker.select(id) else {
+                let tick = self.tracker.next_tick(wall_ms());
+                let Some(content) = self.tracker.select(id, tick) else {
                     respond(self, Response::Error(Error::NoSuchEntry));
                     return Ok(());
                 };
@@ -367,19 +447,28 @@ impl Session {
                 self.reports(&reports)?;
                 let claimed = reports.contains(&Report::Claimed);
                 self.tracker.served(id, claimed);
+                if let Some(sharing) = &mut self.sharing {
+                    let dos = sharing.selected(&self.tracker, id);
+                    self.act(dos)?;
+                }
                 self.save();
                 respond(
                     self,
                     if claimed { Response::Ok } else { Response::Error(Error::ClaimFailed) },
                 );
             }
-            Request::Delete { id } => match self.tracker.delete(EntryId::new(id)) {
-                None => respond(self, Response::Error(Error::NoSuchEntry)),
-                Some(was_current) => {
-                    let failure = if was_current { self.clear_clipboard()? } else { None };
-                    self.save_urgently(client, false, failure);
+            Request::Delete { id } => {
+                let id = EntryId::new(id);
+                let digest = self.tracker.history().get(id).map(|e| e.content().digest());
+                match self.tracker.delete(id) {
+                    None => respond(self, Response::Error(Error::NoSuchEntry)),
+                    Some(was_current) => {
+                        let failure = if was_current { self.clear_clipboard()? } else { None };
+                        self.forget(digest.into_iter().collect())?;
+                        self.save_urgently(client, false, failure);
+                    }
                 }
-            },
+            }
             Request::Pin { id, pinned } => match self.tracker.pin(EntryId::new(id), pinned) {
                 Ok(()) => {
                     self.save();
@@ -391,14 +480,24 @@ impl Session {
                 }
             },
             Request::Clear => {
+                // The clipboard's entry, deleted unless pinned: then deleted everywhere (and
+                // spared everywhere if pinned here).
+                let current = self.tracker.current();
+                let digest = current.and_then(|id| self.tracker.history().get(id));
+                let digest = digest.map(|e| e.content().digest());
                 let failure = self.clear_clipboard()?;
+                let deleted = current.is_some_and(|id| self.tracker.history().get(id).is_none());
                 log("clipboard cleared");
+                self.forget(digest.filter(|_| deleted).into_iter().collect())?;
+                self.empty_everywhere()?;
                 self.save_urgently(client, false, failure);
             }
             Request::ClearHistory => {
                 let removed = self.tracker.clear_history();
                 let failure = self.clear_clipboard()?;
                 log(&format!("history cleared: {removed} entries"));
+                // Only the clipboard's emptying leaves this machine (docs/sharing.md, "Forget").
+                self.empty_everywhere()?;
                 self.save_urgently(client, true, failure);
             }
             Request::ImportClipman { remove } => self.import_clipman(client, remove),
@@ -421,6 +520,30 @@ impl Session {
             Request::Hello { .. } | Request::Subscribe => {}
         }
         Ok(())
+    }
+
+    /// Deletes entries on every peer too, remembered here (docs/sharing.md, "Forget").
+    fn forget(&mut self, digests: Vec<[u8; 32]>) -> Result<(), Exit> {
+        if digests.is_empty() {
+            return Ok(());
+        }
+        let tick = self.tracker.next_tick(wall_ms());
+        let dos = if let Some(sharing) = &mut self.sharing {
+            sharing.deleted(&mut self.tracker, &digests, tick)
+        } else {
+            for d in digests {
+                self.tracker.remember_forgotten(d, tick);
+            }
+            Vec::new()
+        };
+        self.act(dos).map(|_| ())
+    }
+
+    /// Empties the clipboard on every peer too.
+    fn empty_everywhere(&mut self) -> Result<(), Exit> {
+        let tick = self.tracker.next_tick(wall_ms());
+        let dos = self.sharing.as_mut().map(|s| s.emptied(tick)).unwrap_or_default();
+        self.act(dos).map(|_| ())
     }
 
     fn import_clipman(&mut self, client: ClientId, remove: bool) {
@@ -569,9 +692,10 @@ impl Session {
         self.clients.respond(client, &Response::Ok);
     }
 
-    /// What the link thread said: status is kept; pairing's events go to the pairing client.
-    fn link_events(&mut self) {
-        let Some(link) = &mut self.link else { return };
+    /// What the link thread said: status is kept; pairing's events go to the pairing client;
+    /// clipboard sharing's to sharing.
+    fn link_events(&mut self) -> Result<(), Exit> {
+        let Some(link) = &mut self.link else { return Ok(()) };
         let events = link.receive();
         // The input thread resolves its neighbours against the peers, whenever they change.
         let peers = link.peers();
@@ -619,11 +743,21 @@ impl Session {
                         self.clients.resolve(c, &response);
                     }
                 }
-                // Status is the link's own; clipboard sharing is not wired yet (docs/sharing.md,
-                // slice 5): a peer's fetch is answered "not held" after the link's 5 s.
-                jackstay_net::Event::Status(_) | jackstay_net::Event::Clip(_) => {}
+                jackstay_net::Event::Clip(clip) => {
+                    let Some(sharing) = &mut self.sharing else { continue };
+                    let peers = self.link.as_ref().map(Link::peers).unwrap_or_default();
+                    let name = |key: &jackstay_net::PublicKey| {
+                        let named = peers.iter().find(|(k, _)| k == key).map(|(_, n)| n.clone());
+                        truncate(&printable(&named.unwrap_or_else(|| key.fingerprint())), 64)
+                    };
+                    let dos = sharing.clip(clip, &mut self.tracker, &name, wall_ms());
+                    self.share(dos)?;
+                }
+                // The link's own: kept by `Link::receive`.
+                jackstay_net::Event::Status(_) => {}
             }
         }
+        Ok(())
     }
 
     /// Ends pairing if the client that started it has gone.
@@ -749,8 +883,10 @@ impl Session {
     fn turn(&mut self) -> Result<(), Exit> {
         self.clients.begin_turn();
         let ready = self.clients.ready();
+        let sharing = self.sharing.as_ref().and_then(Sharing::next_deadline);
+        let sharing = sharing.map(|d| d.saturating_duration_since(Instant::now()));
         let sleep = if ready.is_empty() {
-            self.clipboard.timeout().map_or(MAX_SLEEP, |t| t.min(MAX_SLEEP))
+            [self.clipboard.timeout(), sharing].into_iter().flatten().fold(MAX_SLEEP, Duration::min)
         } else {
             Duration::ZERO
         };
@@ -759,6 +895,10 @@ impl Session {
         let reports = self.clipboard.process().map_err(Exit::XGone)?;
         if self.reports(&reports)? {
             self.save();
+        }
+        if let Some(sharing) = &mut self.sharing {
+            let dos = sharing.tick(&mut self.tracker, Instant::now());
+            self.share(dos)?;
         }
         let mut readable = Vec::new();
         for (slot, fired) in fired {
@@ -775,7 +915,7 @@ impl Session {
                         t.receive();
                     }
                 }
-                Slot::Link if fired => self.link_events(),
+                Slot::Link if fired => self.link_events()?,
                 Slot::Client(id) if fired => readable.push(id),
                 Slot::X
                 | Slot::Listener

@@ -187,6 +187,18 @@ impl Clipboard {
         Ok(reports)
     }
 
+    /// Serves `content` in place of what is served now, without claiming the clipboard again: more
+    /// of the same entry, its targets from a peer arrived (docs/sharing.md, "Receiving"). Pastes
+    /// waiting for them are answered. Nothing happens unless the engine is serving content.
+    ///
+    /// # Errors
+    /// [`Error::Connection`] if the X connection is gone.
+    pub fn update(&mut self, content: Arc<Content>) -> Result<(), Error> {
+        let now = self.now();
+        self.engine.update(&mut self.port, content, now);
+        self.finish_turn()
+    }
+
     /// Serves `content`, saved from an earlier run, only if no client owns the clipboard; reports
     /// `Claimed` if it did.
     ///

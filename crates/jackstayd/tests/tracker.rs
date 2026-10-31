@@ -148,7 +148,7 @@ fn selecting_mid_capture_in_the_engines_order() {
     let old = copy(&mut t, 1, "old");
     apply(&mut t, &[started(2), captured(2, "new", false)]);
     // The session promotes, then serves; serving ends the capture, then claims.
-    assert!(t.select(old).is_some());
+    assert!(t.select(old, 5_000).is_some());
     apply(&mut t, &[Report::CaptureEnded { capture: 2 }, Report::Claimed]);
     t.served(old, true);
     assert_eq!(t.current(), Some(old));
@@ -193,7 +193,7 @@ fn clearing_deletes_the_current_entry_unless_pinned_and_is_remembered() {
     assert!(!t.cleared());
     // A pinned current entry stays.
     assert_eq!(t.pin(keep, true), Ok(()));
-    assert!(t.select(keep).is_some());
+    assert!(t.select(keep, 5_000).is_some());
     t.served(keep, true);
     t.clipboard_cleared();
     assert!(t.history().get(keep).is_some());
@@ -206,7 +206,7 @@ fn select_promotes_and_serving_makes_it_current() {
     let a = copy(&mut t, 1, "a");
     copy(&mut t, 2, "b");
     t.clipboard_cleared();
-    let served = t.select(a);
+    let served = t.select(a, 5_000);
     assert_eq!(served.map(|c| c.kept_len()), Some(1));
     assert_eq!(texts(&t), ["a"], "b was current when cleared");
     assert!(!t.served(a, false), "another client owns the clipboard");
@@ -214,7 +214,7 @@ fn select_promotes_and_serving_makes_it_current() {
     assert!(t.served(a, true), "the cleared flag is saved");
     assert_eq!(t.current(), Some(a));
     assert!(!t.served(a, true));
-    assert!(t.select(EntryId::new(99)).is_none());
+    assert!(t.select(EntryId::new(99), 5_000).is_none());
     assert!(!t.served(EntryId::new(99), true));
 }
 
@@ -346,7 +346,7 @@ proptest! {
                     let ids: Vec<EntryId> = t.history().entries().map(jackstay_clip::Entry::id).collect();
                     if let Some(&id) = ids.get(i % ids.len().max(1)) {
                         // The engine's order: promote, then serving ends the capture, then claims.
-                        prop_assert!(t.select(id).is_some());
+                        prop_assert!(t.select(id, 5_000).is_some());
                         t.on_report(&Report::CaptureEnded { capture }, 0);
                         open = false;
                         let still_there = t.history().get(id).is_some();

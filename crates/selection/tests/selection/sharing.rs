@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use crate::support::{
-    Call, FIREFOX, FakeX, Notice, XTERM, engine, name, notified, request, some, written,
+    Call, FIREFOX, FakeX, Notice, XTERM, engine, name, notified, request, set, some, written,
 };
 use jackstay_clip::{Content, Format, Kept, Remote, Target, TargetData};
 use jackstay_selection::{Event, Millis, Report, Timestamp};
@@ -158,4 +158,17 @@ fn an_update_while_not_serving_content_changes_nothing() {
     e.update(&mut x, content(vec![text()]), Millis(1));
     assert!(!e.owns_clipboard());
     assert_eq!(x.take_calls(), Vec::<Call>::new());
+}
+
+#[test]
+fn an_owner_giving_the_clipboard_up_empties_it() {
+    // A password manager clears what it copied by giving the clipboard up: no owner, no capture.
+    let mut x = FakeX::new();
+    let (mut e, _) = engine(&mut x);
+    let r = send!(e, &mut x, set(&mut x, Some(FIREFOX), 10), Millis(1));
+    assert_eq!(r, vec![Report::CaptureStarted { capture: 1 }]);
+    x.time = 20;
+    let r = send!(e, &mut x, set(&mut x, None, 20), Millis(2));
+    assert_eq!(r, vec![Report::CaptureFailed { capture: 1 }, Report::Emptied]);
+    assert!(!e.owns_clipboard());
 }

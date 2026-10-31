@@ -292,9 +292,12 @@ fn a_capture_cut_short_after_reporting_content_says_so() {
     assert!(!some(captured(&r)).1, "incomplete: the image is still coming");
     let r = send!(e, &mut x, set(&mut x, Some(QT_APP), 20), Millis(3));
     assert_eq!(r, vec![Report::CaptureEnded { capture: 1 }, Report::CaptureStarted { capture: 2 }]);
-    // A capture that never reported anything ends silently.
+    // A capture that never reported anything ends as failed, so the daemon sees it end.
     let r = send!(e, &mut x, set(&mut x, Some(FIREFOX), 30), Millis(4));
-    assert_eq!(r, vec![Report::CaptureStarted { capture: 3 }]);
+    assert_eq!(
+        r,
+        vec![Report::CaptureFailed { capture: 2 }, Report::CaptureStarted { capture: 3 }]
+    );
     let _ = (refuse, OURS);
 }
 

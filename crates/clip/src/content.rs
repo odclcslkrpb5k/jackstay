@@ -1,5 +1,6 @@
 use std::fmt;
-use std::sync::Arc;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, OnceLock};
 
 use sha2::{Digest, Sha256};
 
@@ -87,11 +88,31 @@ impl Format {
 /// The bytes of one target, exactly as its owner sent them, with the type and format to serve them
 /// back under. Its `Debug` shows their length, never the bytes, so no log line or panic message can
 /// carry clipboard contents.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone)]
 pub struct Kept {
     type_name: TargetName,
     format: Format,
     bytes: Arc<[u8]>,
+    /// The bytes' SHA-256, worked out once when first asked for: a 64 MiB image takes a while.
+    sha256: Arc<OnceLock<[u8; 32]>>,
+}
+
+impl PartialEq for Kept {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_name == other.type_name
+            && self.format == other.format
+            && self.bytes == other.bytes
+    }
+}
+
+impl Eq for Kept {}
+
+impl Hash for Kept {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.type_name.hash(state);
+        self.format.hash(state);
+        self.bytes.hash(state);
+    }
 }
 
 impl Kept {
@@ -106,7 +127,7 @@ impl Kept {
         if bytes.len() % format.unit_len() != 0 {
             return Err(ContentError::Misaligned { format, len: bytes.len() });
         }
-        Ok(Kept { type_name, format, bytes })
+        Ok(Kept { type_name, format, bytes, sha256: Arc::default() })
     }
 
     #[must_use]
@@ -124,10 +145,16 @@ impl Kept {
         &self.bytes
     }
 
+    /// The bytes, shared rather than copied, to hand to another thread.
+    #[must_use]
+    pub fn shared(&self) -> Arc<[u8]> {
+        Arc::clone(&self.bytes)
+    }
+
     /// The SHA-256 of the bytes: what a [`Remote`] target names them by.
     #[must_use]
     pub fn sha256(&self) -> [u8; 32] {
-        Sha256::digest(&self.bytes).into()
+        *self.sha256.get_or_init(|| Sha256::digest(&self.bytes).into())
     }
 }
 

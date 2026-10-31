@@ -283,7 +283,7 @@ fn a_new_owner_ends_the_candidate_so_copy_and_quit_never_resurrects_the_previous
     send!(e, &mut x, set(&mut x, Some(Window(800)), 400), Millis(10));
     x.take_calls();
     let r = send!(e, &mut x, died(&mut x, 400, 401), Millis(11));
-    assert_eq!(r, vec![]);
+    assert_eq!(r, vec![Report::CaptureFailed { capture: 2 }]);
     assert!(!x.take_calls().iter().any(|c| matches!(c, Call::SetOwner { .. })));
 }
 
@@ -659,7 +659,7 @@ fn clear_abandons_the_capture_claims_empty_and_empties_cut_buffers() {
     send!(e, &mut x, set(&mut x, Some(FIREFOX), 300), Millis(0));
     let (_, tp) = one(x.converts());
     let r = e.clear(&mut x, Millis(1));
-    assert_eq!(r, vec![Report::Claimed]);
+    assert_eq!(r, vec![Report::CaptureFailed { capture: 1 }, Report::Claimed]);
     assert!(x.take_calls().contains(&Call::ClearCutBuffers));
     // The password manager's reply arrives after the clear: it must not come back.
     let list = x.atom_list(&["UTF8_STRING"]);
@@ -826,17 +826,20 @@ fn every_capture_is_announced_before_its_content() {
     let (mut e, reports) = engine(&mut x);
     assert_eq!(reports, vec![Report::CaptureStarted { capture: 1 }], "the owner at start");
     let r = send!(e, &mut x, set(&mut x, Some(QT_APP), 10), Millis(1));
-    assert_eq!(r, vec![Report::CaptureStarted { capture: 2 }]);
-    // Our own claim, and a release, start nothing.
+    assert_eq!(
+        r,
+        vec![Report::CaptureFailed { capture: 1 }, Report::CaptureStarted { capture: 2 }]
+    );
+    // Our own claim, and a release, start nothing; a release empties the clipboard.
     x.time = 20;
     assert_eq!(
         e.serve(&mut x, crate::support::text_content("h"), Millis(2)),
-        vec![Report::Claimed]
+        vec![Report::CaptureFailed { capture: 2 }, Report::Claimed]
     );
     let r = send!(e, &mut x, set(&mut x, Some(OURS), 20), Millis(3));
     assert_eq!(r, vec![]);
     let r = send!(e, &mut x, set(&mut x, None, 30), Millis(4));
-    assert_eq!(r, vec![]);
+    assert_eq!(r, vec![Report::Emptied]);
 }
 
 #[test]

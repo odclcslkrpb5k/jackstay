@@ -35,7 +35,7 @@ pub enum Report {
     /// A capture that had reported content was cut short (a newer copy, the owner's death, a
     /// clear): its last report stands, and no more will come.
     CaptureEnded { capture: u64 },
-    /// A capture ended with nothing kept.
+    /// A capture ended with nothing kept: failed, or cut short before it reported anything.
     CaptureFailed { capture: u64 },
     /// The owner exited and the engine now serves its last copy.
     KeptAlive,
@@ -53,6 +53,9 @@ pub enum Report {
     OwnerHung,
     /// An exiting application's `SAVE_TARGETS` was answered; `taken` if we took the clipboard.
     SaveAnswered { taken: bool },
+    /// The clipboard's owner gave it up, leaving no owner (as password managers do to clear
+    /// it): a change, which other machines follow (docs/sharing.md, "Capture and announce").
+    Emptied,
     /// A paste waits for `target`, still to come from a peer (docs/sharing.md, "Paste"): it is
     /// answered when [`Engine::update`] brings it, or refused after 3 s.
     Wanted { target: TargetName },
@@ -109,6 +112,8 @@ pub struct Engine {
     capture_seq: u64,
     /// Whether the current capture has reported content but not yet completion.
     capture_open: bool,
+    /// Whether the current capture has reported nothing yet: neither content nor failure.
+    capture_silent: bool,
     candidate: Option<Candidate>,
     transfers: Transfers,
     manager_owned: bool,
@@ -138,6 +143,7 @@ impl Engine {
             capture: None,
             capture_seq: 0,
             capture_open: false,
+            capture_silent: false,
             candidate: None,
             transfers,
             manager_owned: false,
@@ -396,11 +402,11 @@ impl Engine {
                 self.abort_save(port, reports);
                 self.cancel_probe(now);
                 self.candidate = None;
-                match owner {
-                    Some(owner) => {
-                        self.start_capture(port, owner, selection_time, now, reports);
-                    }
-                    None => self.ownership = Ownership::Unowned,
+                if let Some(owner) = owner {
+                    self.start_capture(port, owner, selection_time, now, reports);
+                } else {
+                    self.ownership = Ownership::Unowned;
+                    reports.push(Report::Emptied);
                 }
             }
             OwnerChange::WindowDestroyed | OwnerChange::ClientClosed => {
@@ -458,6 +464,7 @@ impl Engine {
         self.capture_seq = self.capture_seq.saturating_add(1);
         reports.push(Report::CaptureStarted { capture: self.capture_seq });
         self.capture_open = false;
+        self.capture_silent = true;
         let mut cx = Ctx {
             port,
             known: &self.known,
@@ -470,15 +477,19 @@ impl Engine {
         self.probe.next_at = Some(now.after(PROBE_EVERY_MS));
     }
 
-    /// Abandons the capture, telling the daemon if it had reported content not yet complete.
+    /// Abandons the capture, telling the daemon if it had reported content not yet complete, or
+    /// nothing at all, so every capture started is seen to end.
     fn end_capture(&mut self, now: Millis, reports: &mut Vec<Report>) {
         if let Some(mut c) = self.capture.take() {
             c.abandon(&mut self.pool, now);
             if self.capture_open {
                 reports.push(Report::CaptureEnded { capture: self.capture_seq });
+            } else if self.capture_silent {
+                reports.push(Report::CaptureFailed { capture: self.capture_seq });
             }
         }
         self.capture_open = false;
+        self.capture_silent = false;
     }
 
     /// Answers a pending `SAVE_TARGETS` with "not saved": the clipboard has moved on.
@@ -526,6 +537,7 @@ impl Engine {
                     content: Arc::clone(&content),
                 });
                 self.capture_open = !complete;
+                self.capture_silent = false;
                 reports.push(Report::Captured {
                     capture: self.capture_seq,
                     content,
@@ -535,6 +547,7 @@ impl Engine {
             }
             Progress::Failed => {
                 self.capture_open = false;
+                self.capture_silent = false;
                 reports.push(Report::CaptureFailed { capture: self.capture_seq });
             }
         }

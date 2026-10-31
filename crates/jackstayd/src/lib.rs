@@ -12,6 +12,7 @@ pub mod link;
 pub mod notify;
 pub mod paths;
 pub mod session;
+pub mod sharing;
 pub mod store;
 pub mod summary;
 pub mod thumbnails;

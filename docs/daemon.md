@@ -47,8 +47,10 @@ acceptable. `WatchdogSignal=SIGKILL` and `LimitCORE=0`: a core dump would hold c
 - **Current entry.** The daemon tracks which history entry, if any, is on the clipboard now:
   - the entry of a capture, once its first content arrives (`Captured`);
   - the entry served after `select`, a keep-alive, or a restore at start;
+  - the entry a peer's newer change served (docs/sharing.md);
   - nothing after an owner change whose capture has not reported yet (`CaptureStarted`), after
-    `CaptureFailed`, after `Lost`, or after a clear.
+    `CaptureFailed`, after `Lost`, after the owner gave the clipboard up (`Emptied`), or after a
+    clear.
 - **Progressive captures.** The first report of a capture adds a **new** entry
   (`History::record_partial`, or `History::record` if it is already complete); later reports of
   the same capture replace that entry's content, keeping its id, pin and place
@@ -64,9 +66,14 @@ acceptable. `WatchdogSignal=SIGKILL` and `LimitCORE=0`: a core dump would hold c
 - `CaptureEnded` and `CaptureFailed`: the entry, if any, stands as last reported, and is completed
   (`History::update(id, last content, true)`), so a capture cut short is deduplicated like any
   other. Every capture is thereby completed before the next one starts (`CaptureEnded` precedes
-  `CaptureStarted`), so duplicates exist only while one capture is open.
+  `CaptureStarted`), so duplicates exist only while one capture is open. A capture cut short
+  before it reported anything ends with `CaptureFailed`, so the daemon always sees a capture end
+  (clipboard sharing waits for it, docs/sharing.md, "Order").
+- **Ticks.** A capture's entry takes the tick of its owner change, taken at `CaptureStarted`
+  (`History::record_at`); a re-select takes a new one (docs/sharing.md, "Order").
 - Every eviction and deletion goes to the store (below).
-- **Re-select** (`jackstay select <id>`): `History::promote`, then `Clipboard::serve`.
+- **Re-select** (`jackstay select <id>`): `History::promote` at a new tick, then
+  `Clipboard::serve`, then announced to peers.
 
 ## Clearing
 

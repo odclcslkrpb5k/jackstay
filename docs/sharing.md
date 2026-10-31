@@ -6,7 +6,8 @@ clipboard sharing must do; this says how, and where it departs from the plan (ma
 link (docs/link.md) and on the selection engine (docs/selection.md).
 
 Status: **design, revised after red-team pass 1** (findings and resolutions at the end); slice 1
-(`proto`), slice 2 (`net`), slice 3 (`selection`) and slice 4 (`clip`, `store`) built. Code facts are as read on 2026-10-31 at 2c9e386.
+(`proto`), slice 2 (`net`), slice 3 (`selection`) and slice 4 (`clip`, `store`) built; slice 5's
+daemon logic built (5a), its interfaces and two-daemon tests to come. Code facts are as read on 2026-10-31 at 2c9e386.
 
 ## What exists to build on
 
@@ -272,9 +273,42 @@ A request for a pending target **waits**:
 4. `clip` and `store`: `Source::Peer`, `Remote`, the digest, the clock, placing by tick, the
    index's version 2, the forgets. **Built.** A re-select takes its tick in slice 5, with the
    daemon's sharing; until then it keeps the one it had.
-5. The daemon: announce, receive, fetch, serve, re-select, empty, forget, replay on a new session,
-   the loop guard; control version 6, the CLI, the popup, the README; the two-daemon tests.
+5. The daemon, in three parts:
+   - 5a: announce, receive, fetch, serve, re-select, empty, forget, replay on a new session, the
+     loop guard (`jackstayd::sharing`, a state machine without I/O the clipboard thread drives,
+     tested as two machines joined by a queue of messages). **Built.**
+   - 5b: control version 6, the CLI, the popup, the README.
+   - 5c: the two-daemon tests.
 6. Acceptance on the owner's LAN; the owner uninstalls Synergy (plan §6, M5).
+
+## As built (5a)
+
+Where the daemon departs from the design above, and why:
+
+- **A target never arrives as `NotKept`.** One past the per-target limit, not held by the peer,
+  or sent wrong stays to come (`Remote`): turning it into `NotKept` would change the entry's
+  digest, which names it on both machines (deletes and replays would miss it). It is not asked
+  for again until jackstayd restarts or a paste asks for it; a paste of one past the limit waits
+  its 3 s and is refused. A fetch lost with its session is asked for again on the next one.
+- **A pending target held here already** is found among the history's kept targets by type,
+  format, size and SHA-256 (only targets of the same size are hashed, once each: a kept target's
+  SHA-256 is worked out when first asked for and kept).
+- **An announcement too large for one message** (many long target names) goes with no bytes
+  inline, all fetched; if even that is too large it is not sent, and the journal says so. Leaving
+  targets out would change the digest.
+- **Inline bytes have no check of their own:** the digest is worked out from them, so a
+  mismatch is refused as a digest that does not match.
+- **`jackstay clear`** sends `Forget` only when it deleted the entry here: pinned here, it is
+  spared everywhere (only `Emptied` goes).
+- **The clipboard state at start** is the entry restored, as this machine's change at its tick;
+  an empty state is not kept across a restart.
+- **A peer's replay of the change already on the clipboard** (the same digest) moves the state
+  on without claiming again, so applications see nothing on a reconnect.
+- **The 64-announcement cap is not built:** the clipboard thread handles every message the turn
+  it arrives, and only a paired machine can send one.
+- **The engine reports every capture's end:** one cut short before it reported anything now
+  ends with `CaptureFailed`, so a peer's change waiting for it is applied; and an owner giving
+  the clipboard up reports `Emptied`.
 
 ## Red team
 
@@ -323,3 +357,17 @@ as its copy time, a peer source only in version 2, a target to come equal to the
 and a restored clock past every entry's tick (caught once a test restored a version-1 history):
 all caught. The index's fuzz corpus was seeded with version 2's lines and regrown (1404 to 1670
 inputs, 180 s).
+
+### Slice 5a plants, 2026-10-31
+
+Each control removed, and the daemon's sharing tests run: the origin key breaking a tie of ticks,
+holding a change while a capture runs here, the tick taken at the owner change, an equal digest
+being no change, the rate that pauses announcing, a tick a day ahead, a digest that does not
+match, remembering a received forget, a forget deleting the entry, replaying forgets and the
+clipboard on a new session, a replay of the change already served claiming nothing (caught once a
+test of a reconnect with nothing new was added), an owner's
+release announced and applied, the tracker's empty state after it, a waiting paste preempting the
+running fetch, a deleted entry cancelling its fetch, the hash of fetched bytes, not asking again
+for what failed, asking again for what a lost session dropped, an early announcement replaced in
+place, the early announcement on a timer, and a target already held not being fetched: all
+caught. Survived, and removed as redundant: checking inline bytes against their own hash, which the digest already covers.

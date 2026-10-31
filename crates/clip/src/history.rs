@@ -269,6 +269,12 @@ impl History {
         self.entries.iter().find(|e| e.content.same_kept(content)).map(|e| e.id)
     }
 
+    /// The entry whose content has `digest` ([`Content::digest`]), if any.
+    #[must_use]
+    pub fn find_digest(&self, digest: &[u8; 32]) -> Option<EntryId> {
+        self.entries.iter().find(|e| e.content.digest() == *digest).map(|e| e.id)
+    }
+
     /// Records a copy. If the history already holds the same thing, that entry moves to the front,
     /// keeping its id and pin, with this copy's source and time. Otherwise a new entry is added.
     ///
@@ -276,6 +282,22 @@ impl History {
     /// After 2^64 - 1 new entries, rather than reuse an id.
     pub fn record(&mut self, content: Arc<Content>, source: Source, copied_at_ms: u64) -> Recorded {
         let tick = self.next_tick(copied_at_ms);
+        self.record_at(content, source, copied_at_ms, tick)
+    }
+
+    /// [`History::record`], for a change whose tick was taken when it started (docs/sharing.md,
+    /// "Order": a copy's tick is its owner change's).
+    ///
+    /// # Panics
+    /// After 2^64 - 1 new entries, rather than reuse an id.
+    pub fn record_at(
+        &mut self,
+        content: Arc<Content>,
+        source: Source,
+        copied_at_ms: u64,
+        tick: u64,
+    ) -> Recorded {
+        self.observe(tick);
         if let Some(at) = self.entries.iter().position(|e| e.content.same_kept(&content))
             && let Some(mut entry) = self.entries.remove(at)
         {
@@ -331,6 +353,21 @@ impl History {
         copied_at_ms: u64,
     ) -> Recorded {
         let tick = self.next_tick(copied_at_ms);
+        self.record_partial_at(content, source, copied_at_ms, tick)
+    }
+
+    /// [`History::record_partial`] at a tick taken when the copy started.
+    ///
+    /// # Panics
+    /// After 2^64 - 1 new entries, rather than reuse an id.
+    pub fn record_partial_at(
+        &mut self,
+        content: Arc<Content>,
+        source: Source,
+        copied_at_ms: u64,
+        tick: u64,
+    ) -> Recorded {
+        self.observe(tick);
         let id = self.take_id();
         self.entries.push_front(Entry { id, content, source, copied_at_ms, pinned: false, tick });
         Recorded { id, evicted: self.enforce_limits() }
@@ -397,10 +434,13 @@ impl History {
         id
     }
 
-    /// Moves an entry to the front, as when the user selects it to paste again.
-    pub fn promote(&mut self, id: EntryId) -> Option<(Arc<Content>, Vec<Entry>)> {
+    /// Moves an entry to the front as the clipboard's again, at `tick`, as when the user selects
+    /// it to paste again, here or on another machine.
+    pub fn promote(&mut self, id: EntryId, tick: u64) -> Option<(Arc<Content>, Vec<Entry>)> {
         let at = self.entries.iter().position(|e| e.id == id)?;
-        let entry = self.entries.remove(at)?;
+        let mut entry = self.entries.remove(at)?;
+        self.observe(tick);
+        entry.tick = tick;
         let content = Arc::clone(&entry.content);
         self.entries.push_front(entry);
         // The entry that was newest, and so outside the byte limit, no longer is.

@@ -177,11 +177,11 @@ fn promote_and_unpin_report_what_they_evict() {
     h.set_pinned(small, true);
     let big = add(&mut h, "much too long", 2);
     assert_eq!(texts(&h), ["much too long", "ab"]);
-    let (content, evicted) = some(h.promote(small));
+    let (content, evicted) = some(h.promote(small, 10));
     assert!(content.same_kept(&text("ab")));
     assert_eq!(ids(&evicted), [big]);
     assert_eq!(texts(&h), ["ab"]);
-    assert!(h.promote(EntryId::new(999)).is_none());
+    assert!(h.promote(EntryId::new(999), 11).is_none());
 
     let mut h = History::new(limits(1, 1_000));
     let a = add(&mut h, "a", 1);
@@ -320,7 +320,7 @@ fn updating_applies_the_limits() {
     let mut h = History::new(limits(10, 3));
     let old = add(&mut h, "ab", 1);
     let partial = h.record_partial(text("c"), local(), 2).id;
-    h.promote(old);
+    h.promote(old, 10);
     let r = some(h.update(partial, text("cdef"), false));
     assert_eq!(ids(&r.evicted), [partial], "no longer newest, it outgrew the budget");
 }
@@ -495,7 +495,7 @@ proptest! {
                 Op::Promote(i) => match pick(i, m.entries.len()) {
                     Some(i) => {
                         let e = m.entries.remove(i);
-                        let (_, evicted) = some(h.promote(e.0));
+                        let (_, evicted) = some(h.promote(e.0, 0));
                         m.entries.insert(0, e);
                         (ids(&evicted), m.enforce(max_entries, max_bytes))
                     }
@@ -593,6 +593,26 @@ fn a_received_copy_goes_where_its_tick_puts_it() {
 }
 
 #[test]
+fn a_copy_takes_the_tick_its_change_started_at() {
+    let mut h = History::new(limits(10, 1_000));
+    // Started at 5_000, its content in at 5_400: the entry is ordered by its start.
+    let a = h.record_partial_at(text("a"), local(), 5_400, 5_000).id;
+    assert_eq!((some(h.get(a)).tick(), h.clock()), (5_000, 5_000));
+    let b = h.record_at(text("b"), local(), 6_100, 6_000).id;
+    assert_eq!((some(h.get(b)).tick(), some(h.get(b)).copied_at_ms()), (6_000, 6_100));
+    // A tick the clock had passed still moves it no further back.
+    let _ = h.record_at(text("c"), local(), 1, 10);
+    assert_eq!(h.clock(), 6_000);
+    // Promoted again: in front, at the new tick.
+    let (content, _) = some(h.promote(a, 7_000));
+    assert_eq!(content.digest(), text("a").digest());
+    assert_eq!(texts(&h), ["a", "c", "b"]);
+    assert_eq!((some(h.get(a)).tick(), h.clock()), (7_000, 7_000));
+    assert_eq!(h.find_digest(&text("b").digest()), Some(b));
+    assert_eq!(h.find_digest(&text("z").digest()), None);
+}
+
+#[test]
 fn deletions_are_remembered_up_to_a_thousand() {
     let mut h = History::new(limits(10, 1_000));
     for i in 0..=MAX_FORGOTTEN {
@@ -610,6 +630,26 @@ fn deletions_are_remembered_up_to_a_thousand() {
     let saved = Saved { next_id: 1, clock: 77, forgotten: h.forgotten().copied().collect() };
     let (r, _) = ok(History::restore(limits(10, 1_000), vec![], saved));
     assert_eq!((r.clock(), r.forgotten().len()), (77, MAX_FORGOTTEN));
+}
+
+#[test]
+fn a_kept_target_is_equal_whether_or_not_its_hash_was_asked_for() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let new =
+        || ok(Kept::new(ok(TargetName::from_latin1(b"image/png")), Format::Bits8, vec![5; 9]));
+    let (asked, fresh) = (new(), new());
+    let sha = asked.sha256();
+    assert_eq!(asked, fresh);
+    let hash = |k: &Kept| {
+        let mut h = DefaultHasher::new();
+        k.hash(&mut h);
+        h.finish()
+    };
+    assert_eq!(hash(&asked), hash(&fresh));
+    // A clone shares the bytes, and the hash once worked out.
+    assert_eq!((asked.clone().sha256(), fresh.sha256()), (sha, sha));
+    assert!(Arc::ptr_eq(&asked.shared(), &asked.clone().shared()));
 }
 
 #[test]

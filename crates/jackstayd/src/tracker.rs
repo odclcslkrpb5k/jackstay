@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use jackstay_clip::{Content, EntryId, History, Source};
+use jackstay_clip::{Content, Entry, EntryId, History, Source};
 use jackstay_selection::Report;
 
 /// What the capture being recorded has become.
@@ -22,6 +22,9 @@ enum Recording {
 #[derive(Debug)]
 struct Open {
     capture: u64,
+    /// Taken at the owner change, so the copy is ordered by when it started (docs/sharing.md,
+    /// "Order").
+    tick: u64,
     recording: Recording,
     /// The content last reported, which completes the entry if the capture is cut short.
     last: Option<Arc<Content>>,
@@ -74,8 +77,9 @@ impl Tracker {
         match report {
             Report::CaptureStarted { capture } => {
                 let changed = self.complete_open();
-                self.open =
-                    Some(Open { capture: *capture, recording: Recording::Nothing, last: None });
+                let tick = self.history.next_tick(now_ms);
+                let recording = Recording::Nothing;
+                self.open = Some(Open { capture: *capture, tick, recording, last: None });
                 self.current = None;
                 changed
             }
@@ -93,6 +97,8 @@ impl Tracker {
                 self.current = None;
                 false
             }
+            // Given up by its owner: nothing is on the clipboard, and a restart puts nothing back.
+            Report::Emptied => self.emptied(),
             Report::KeptAlive
             | Report::Claimed
             | Report::ClaimFailed
@@ -118,10 +124,11 @@ impl Tracker {
             Recording::Nothing => {
                 let source = Source::Local { owner_class: source.cloned() };
                 let content = Arc::clone(content);
+                let tick = open.tick;
                 Some(if complete {
-                    self.history.record(content, source, now_ms)
+                    self.history.record_at(content, source, now_ms, tick)
                 } else {
-                    self.history.record_partial(content, source, now_ms)
+                    self.history.record_partial_at(content, source, now_ms, tick)
                 })
             }
             Recording::Entry(id) => self.history.update(id, Arc::clone(content), complete),
@@ -165,13 +172,64 @@ impl Tracker {
         }
     }
 
-    /// Moves an entry to the front to be served again: returns its content for
-    /// `Clipboard::serve`, whose outcome goes to [`Tracker::served`]. The history changed (the
-    /// order, and what the limits evicted), so it needs saving.
-    pub fn select(&mut self, id: EntryId) -> Option<Arc<Content>> {
-        let (content, _evicted) = self.history.promote(id)?;
+    /// Moves an entry to the front to be served again, as the change at `tick`: returns its
+    /// content for `Clipboard::serve`, whose outcome goes to [`Tracker::served`]. The history
+    /// changed (the order, and what the limits evicted), so it needs saving.
+    pub fn select(&mut self, id: EntryId, tick: u64) -> Option<Arc<Content>> {
+        let (content, _evicted) = self.history.promote(id, tick)?;
         self.settle();
         Some(content)
+    }
+
+    /// The next tick on the hybrid clock, for a change made now (docs/sharing.md, "Order").
+    pub fn next_tick(&mut self, now_ms: u64) -> u64 {
+        self.history.next_tick(now_ms)
+    }
+
+    /// A tick another machine used: this machine's next ones are later.
+    pub fn observe(&mut self, tick: u64) {
+        self.history.observe(tick);
+    }
+
+    /// Whether a copy is being captured: a change from a peer waits for it (docs/sharing.md,
+    /// "Order").
+    #[must_use]
+    pub fn capturing(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// The clipboard emptied, by its owner or by a peer: nothing is current, and a restart puts
+    /// nothing back; history keeps every entry. Returns whether that changed what is saved.
+    pub fn emptied(&mut self) -> bool {
+        self.current = None;
+        !std::mem::replace(&mut self.cleared, true)
+    }
+
+    /// Records a copy a peer announced ([`History::record_received`]): its entry's id, or `None`
+    /// if it was deleted since.
+    pub fn received(
+        &mut self,
+        content: Arc<Content>,
+        source: Source,
+        copied_at_ms: u64,
+        tick: u64,
+    ) -> Option<EntryId> {
+        let recorded = self.history.record_received(content, source, copied_at_ms, tick)?;
+        self.settle();
+        self.history.get(recorded.id).map(Entry::id)
+    }
+
+    /// Replaces an entry's content with the same copy, more of it held (a target fetched).
+    /// Returns `None` if the entry is gone.
+    pub fn fill(&mut self, id: EntryId, content: Arc<Content>) -> Option<()> {
+        let _evicted = self.history.update(id, content, false)?;
+        self.settle();
+        self.history.get(id).map(|_| ())
+    }
+
+    /// Remembers a deletion, so an older announcement of it is refused ([`History::was_forgotten`]).
+    pub fn remember_forgotten(&mut self, digest: [u8; 32], tick: u64) {
+        self.history.remember_forgotten(digest, tick);
     }
 
     /// Records whether serving `id` (after [`Tracker::select`] or at a restore) took the
