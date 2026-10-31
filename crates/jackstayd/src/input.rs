@@ -49,8 +49,9 @@ pub enum State {
     Off(String),
     /// Running, but no neighbour can be crossed to (or drive this machine) yet, and why.
     Waiting(String),
-    /// The primary, with its pointer here.
-    Here,
+    /// The primary, with its pointer here; and the peer that did not answer the last crossing
+    /// to it, if none has been answered since.
+    Here { unanswered: Option<PublicKey> },
     /// The primary, with its pointer on `peer`.
     On { peer: PublicKey, locked: bool },
     /// A secondary, waiting for its primary, or driven by it.
@@ -233,6 +234,8 @@ fn x(e: impl std::fmt::Display) -> String {
 
 fn run(start: Start, shared: &Mutex<Published>) -> Result<(), String> {
     let Start { plumbing, config, display, link, .. } = start;
+    // Which display a rival must be on to fight ours.
+    let ours = display.clone().or_else(|| std::env::var("DISPLAY").ok());
     let mut display = Display::connect(display.as_deref()).map_err(x)?;
     let cleared = display.clear_xtest().map_err(x)?;
     if cleared > 0 {
@@ -256,7 +259,7 @@ fn run(start: Start, shared: &Mutex<Published>) -> Result<(), String> {
         // Not while the pointer is on a peer: reading every process's name would stall its motion.
         if rival_checked.is_none_or(|t| t.elapsed() >= RIVAL_CHECK_EVERY) && !worker.driving() {
             rival_checked = Some(Instant::now());
-            let now = crate::coexist::input_rival(std::path::Path::new("/proc"));
+            let now = crate::coexist::input_rival(std::path::Path::new("/proc"), ours.as_deref());
             if now.is_some() && rival.is_none() {
                 worker.sleep(&mut display)?;
             } else if now.is_none() && rival.is_some() {
@@ -403,7 +406,7 @@ impl Worker {
                 Where::On { peer, locked } => State::On { peer, locked },
                 Where::Here | Where::Crossing(_) => match &self.unresolved {
                     Some(why) => State::Waiting(why.clone()),
-                    None => State::Here,
+                    None => State::Here { unanswered: p.unanswered() },
                 },
             },
             Role::Secondary(Some(primary), s) => {
@@ -424,9 +427,11 @@ impl Worker {
                 self.act(display, out)?;
                 display.set_barriers(&[]).map_err(x)?;
             }
-            Role::Secondary(_, s) => {
-                let out = s.end();
+            Role::Secondary(primary, s) => {
+                let primary = *primary;
+                let out = s.give_back();
                 display.inject(&out, &self.map).map_err(x)?;
+                self.tell_primary(primary, &out);
             }
         }
         log("input: off while a rival runs");
@@ -602,11 +607,7 @@ impl Worker {
                     _ => Vec::new(),
                 };
                 display.inject(&actions, &self.map).map_err(x)?;
-                for a in actions {
-                    if let jackstay_input::Action::Leave { span, side, fraction } = a {
-                        self.link.send(key, session, Message::Leave { span, side, fraction });
-                    }
-                }
+                self.tell_primary(Some(key), &actions);
                 Ok(())
             }
             Role::Secondary(..) => Ok(()),
@@ -701,7 +702,13 @@ impl Worker {
             // Measured from the crossing at the latest: an idle session is heard only every
             // second, and its faster pings start with the span.
             let since = *self.on_since.get_or_insert_with(Instant::now);
-            let out = p.freshness(l.heard.age().min(since.elapsed()));
+            let mut out = p.freshness(l.heard.age().min(since.elapsed()));
+            if out.is_empty() {
+                out = p.answer_due(Instant::now());
+                if !out.is_empty() {
+                    log(&format!("input: {} did not take the crossing", peer.fingerprint()));
+                }
+            }
             self.act(display, out)?;
         } else {
             self.on_since = None;
@@ -725,6 +732,24 @@ impl Worker {
         Ok(())
     }
 
+    /// Sends the primary what a secondary's actions say it must hear, on the session kept.
+    fn tell_primary(&self, primary: Option<PublicKey>, actions: &[jackstay_input::Action]) {
+        let Some(key) = primary else { return };
+        let Some(session) = self.sessions.get(&key).map(|l| l.session) else { return };
+        for a in actions {
+            let message = match *a {
+                jackstay_input::Action::Leave { span, side, fraction } => {
+                    Message::Leave { span, side, fraction }
+                }
+                jackstay_input::Action::Entered { span, keymap } => {
+                    Message::Entered { span, keymap }
+                }
+                _ => continue,
+            };
+            self.link.send(key, session, message);
+        }
+    }
+
     /// Does what the primary says, in order.
     fn act(&mut self, display: &mut Display, todo: Vec<Do<PublicKey>>) -> Result<(), String> {
         for d in todo {
@@ -737,7 +762,7 @@ impl Worker {
                         ([0; 32], 0)
                     };
                     if let Role::Primary(p) = &mut self.role {
-                        let out = p.grabbed(took, modifiers, locks);
+                        let out = p.grabbed(took, modifiers, locks, Instant::now());
                         self.act(display, out)?;
                     }
                 }

@@ -1,4 +1,6 @@
-use jackstayd::coexist::{input_rival, input_rival_named, is_clipman, panel_lists_clipman};
+use jackstayd::coexist::{
+    input_rival, input_rival_named, is_clipman, panel_lists_clipman, same_display,
+};
 
 #[test]
 fn clipman_is_recognised_as_a_process_or_a_panel_plugin() {
@@ -46,9 +48,41 @@ fn a_rival_is_found_among_processes() {
         std::fs::create_dir_all(proc.join(pid)).unwrap_or_else(|e| panic!("{e}"));
         std::fs::write(proc.join(pid).join("comm"), comm).unwrap_or_else(|e| panic!("{e}"));
     }
-    assert_eq!(input_rival(&proc), Some("synergys"));
+    assert_eq!(input_rival(&proc, None), Some("synergys"));
+    // Its environment unreadable: it counts, whatever our display.
+    assert_eq!(input_rival(&proc, Some(":0")), Some("synergys"));
     std::fs::remove_dir_all(proc.join("42")).unwrap_or_else(|e| panic!("{e}"));
     // Not a process: "self" is a link in the real /proc.
-    assert_eq!(input_rival(&proc), None);
+    assert_eq!(input_rival(&proc, None), None);
     let _ = std::fs::remove_dir_all(&proc);
+}
+
+#[test]
+fn a_rival_on_another_display_is_none_of_ours() {
+    let proc = std::env::temp_dir().join(format!("jackstay-proc-display-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&proc);
+    let dir = proc.join("42");
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(dir.join("comm"), "deskflow-core\n").unwrap_or_else(|e| panic!("{e}"));
+    let environ =
+        |env: &[u8]| std::fs::write(dir.join("environ"), env).unwrap_or_else(|e| panic!("{e}"));
+    environ(b"HOME=/home/u\0DISPLAY=:1\0SHELL=/bin/sh\0");
+    assert_eq!(input_rival(&proc, Some(":0")), None);
+    assert_eq!(input_rival(&proc, Some(":1.0")), Some("deskflow-core"));
+    // Without our display, or without its own, it counts.
+    assert_eq!(input_rival(&proc, None), Some("deskflow-core"));
+    environ(b"HOME=/home/u\0XDISPLAY=:1\0");
+    assert_eq!(input_rival(&proc, Some(":0")), Some("deskflow-core"));
+    let _ = std::fs::remove_dir_all(&proc);
+}
+
+#[test]
+fn displays_are_compared_without_their_screen() {
+    assert!(same_display(":0", ":0.0"));
+    assert!(same_display("unix:0", ":0.1"));
+    assert!(same_display("host:10.0", "host:10"));
+    assert!(!same_display(":0", ":1"));
+    assert!(!same_display(":1", ":10"));
+    assert!(!same_display("host:0", ":0"));
+    assert!(!same_display("", ":0"));
 }

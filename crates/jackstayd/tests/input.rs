@@ -288,20 +288,30 @@ fn the_return_key_and_switch_move_the_pointer() {
     assert_eq!(ask(&rig.b.home, Request::SwitchHome), Response::Error(Error::InputOff));
 }
 
-/// A program by another name: Synergy's, as far as the process list says.
-fn named(name: &str) -> (PathBuf, Child) {
-    let dir = std::env::temp_dir().join(format!("jackstay-rival-{}", std::process::id()));
+/// A program by another name: Synergy's, as far as the process list says; on `display` if one is
+/// given, or on none, which every daemon here counts. A shell, looping: `sleep` here is uutils',
+/// which under another name exits at once, a zombie whose environment cannot be read.
+fn named(name: &str, display: Option<&str>) -> (PathBuf, Child) {
+    let dir = std::env::temp_dir().join(format!(
+        "jackstay-rival-{}-{}",
+        std::process::id(),
+        display.unwrap_or("none")
+    ));
     ok(std::fs::create_dir_all(&dir));
     let path = dir.join(name);
-    ok(std::fs::copy("/bin/sleep", &path));
-    let child = ok(Command::new(&path).arg("60").spawn());
-    (dir, child)
+    ok(std::fs::copy("/bin/bash", &path));
+    let mut command = Command::new(&path);
+    command.args(["-c", "while :; do sleep 1; done"]).env_remove("DISPLAY");
+    if let Some(d) = display {
+        command.env("DISPLAY", d);
+    }
+    (dir, ok(command.spawn()))
 }
 
 #[test]
 fn input_is_off_while_synergy_runs() {
     let _alone = RIVAL.write().unwrap_or_else(PoisonError::into_inner);
-    let (dir, mut synergys) = named("synergys");
+    let (dir, mut synergys) = named("synergys", None);
     let rig = {
         let name = hostname();
         let sides = format!("left = \"{name}\"\nright = \"{name}\"\n");
@@ -447,4 +457,53 @@ fn loss_toward_b_alone_while_idle_leaves_b_ready() {
     soon("a down on B", SOON, || b.key_down(38));
     a.key(38, false);
     soon("a up on B", SOON, || !b.key_down(38));
+}
+
+/// The owner's first crossing: Synergy's successor still ran on xiphos, which therefore took no
+/// input, and athena stayed grabbed with nothing driven; once it stopped, keys still did not
+/// reach xiphos, which had dropped athena's keymap with the rest.
+#[test]
+fn a_crossing_b_cannot_take_comes_back_and_its_keys_work_once_it_can() {
+    let _turn = no_rival();
+    let rig = owners();
+    let (a, b) = (Hands::on(&rig.a.x), Hands::on(&rig.b.x));
+    // On B's display only: A, and every other test's daemons, pay it no attention.
+    let (dir, mut rival) = named("deskflow-core", Some(&rig.b.x.display));
+    input_in(&rig.b, InputState::Off, Duration::from_secs(12));
+    assert_eq!(input(&rig.a).state, InputState::Here);
+    assert_eq!(ask(&rig.a.home, Request::Switch { peer: hostname() }), Response::Ok);
+    // Taken back within its 300 ms of no answer, and said why.
+    std::thread::sleep(Duration::from_secs(1));
+    let back = input(&rig.a);
+    let why = format!("{} did not take the last crossing", hostname());
+    assert_eq!((back.state, back.detail.as_str()), (InputState::Here, why.as_str()));
+    let _ = rival.kill();
+    let _ = rival.wait();
+    input_in(&rig.b, InputState::Secondary, Duration::from_secs(12));
+    cross_left(&rig, &a, 1500);
+    a.key(38, true);
+    soon("a down on B", SOON, || b.key_down(38));
+    a.key(38, false);
+    soon("a up on B", SOON, || !b.key_down(38));
+    assert_eq!(input(&rig.a).detail, "");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_rival_starting_on_b_mid_crossing_gives_the_pointer_back() {
+    let _turn = no_rival();
+    let rig = owners();
+    let (a, b) = (Hands::on(&rig.a.x), Hands::on(&rig.b.x));
+    cross_left(&rig, &a, 1500);
+    a.key(38, true);
+    soon("a down on B", SOON, || b.key_down(38));
+    let (dir, mut rival) = named("synergyc", Some(&rig.b.x.display));
+    // B looks every 10 s, lets go of what it holds, and tells A, which still hears it.
+    soon("A home", Duration::from_secs(12), || input(&rig.a).state == InputState::Here);
+    assert!(!b.key_down(38));
+    assert_eq!(input(&rig.b).state, InputState::Off);
+    a.key(38, false);
+    let _ = rival.kill();
+    let _ = rival.wait();
+    let _ = std::fs::remove_dir_all(dir);
 }

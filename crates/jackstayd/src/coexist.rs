@@ -117,9 +117,11 @@ pub fn input_rival_named(comm: &[u8]) -> Option<&'static str> {
 }
 
 /// The first process in `proc` (normally `/proc`) that is one of [`INPUT_RIVALS`], whoever runs
-/// it.
+/// it, unless its environment shows it on an X display other than `display` (ours): one on
+/// another display grabs nothing of ours. One whose environment cannot be read, or names no
+/// display, counts.
 #[must_use]
-pub fn input_rival(proc: &Path) -> Option<&'static str> {
+pub fn input_rival(proc: &Path, display: Option<&str>) -> Option<&'static str> {
     let entries = fs::read_dir(proc).ok()?;
     entries.filter_map(Result::ok).find_map(|e| {
         let is_pid = e
@@ -129,6 +131,34 @@ pub fn input_rival(proc: &Path) -> Option<&'static str> {
         if !is_pid {
             return None;
         }
-        input_rival_named(&fs::read(e.path().join("comm")).unwrap_or_default())
+        let rival = input_rival_named(&fs::read(e.path().join("comm")).unwrap_or_default())?;
+        let theirs = fs::read(e.path().join("environ")).ok().and_then(|env| displayed(&env));
+        match (display, theirs) {
+            (Some(ours), Some(theirs)) if !same_display(ours, &theirs) => None,
+            _ => Some(rival),
+        }
     })
+}
+
+/// `DISPLAY` in a process's environment (`/proc/PID/environ`).
+fn displayed(environ: &[u8]) -> Option<String> {
+    environ
+        .split(|&b| b == 0)
+        .find_map(|v| v.strip_prefix(b"DISPLAY="))
+        .map(|d| String::from_utf8_lossy(d).into_owned())
+}
+
+/// Whether two `DISPLAY` values name one display: the screen number does not count, and "unix"
+/// is no host.
+#[must_use]
+pub fn same_display(a: &str, b: &str) -> bool {
+    fn display(d: &str) -> Option<(&str, &str)> {
+        let (host, rest) = d.rsplit_once(':')?;
+        let number = rest.split_once('.').map_or(rest, |(n, _)| n);
+        Some((if host == "unix" { "" } else { host }, number))
+    }
+    match (display(a), display(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => a == b,
+    }
 }

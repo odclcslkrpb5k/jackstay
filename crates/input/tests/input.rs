@@ -209,6 +209,7 @@ fn enter_presses_only_the_held_modifiers_and_sets_the_locks() {
             Action::MoveTo { x: 3439, y: 1200 },
             Action::Locks { caps: true, num: false },
             Action::Key { keycode: 50, down: true },
+            Action::Entered { span: 1, keymap: true },
         ]
     );
     // Its release on athena, forwarded, releases it here.

@@ -113,6 +113,19 @@ starts with no backlog and no drain. The primary also sends `Keymap` before its 
 session; until it arrives the secondary injects no key at all, since a keycode's meaning here is
 unknown.
 
+**Every `Enter` is answered.** A secondary that takes the span answers `Entered` with the span id
+and whether it holds the primary's keymap; without it, the primary sends `Keymap` again. A
+primary that has no answer within 300 ms takes the pointer back (an `Exit`, as any return), and
+`jackstay status` says the peer did not take the last crossing; the barrier crosses to that peer
+again no sooner than 3 s later, so a push against the edge does not grab and let go over and
+over, while `jackstay switch` tries at once. Whatever keeps a secondary from taking input (a
+rival running there, a drain, a configuration that does not name this primary), the primary
+never stays grabbed with nothing driven. A secondary that stops taking input mid-span (a rival
+started) releases what it holds and sends `Leave` where the pointer came in. *Seen on the owner's
+machines, 2026-10-31:* xiphos still ran `deskflow-core`, took no input, and athena stayed grabbed
+until the return key; once it stopped, keys still did not reach xiphos, which had dropped the
+keymap sent before that first crossing.
+
 ## Primary
 
 - **Barriers.** An XFixes pointer barrier lies on each segment of each side that has a
@@ -245,7 +258,7 @@ unknown.
 
 Stream 0 (docs/link.md, "Streams"), in order, so a click never overtakes the motion before it.
 New `proto::link` kinds, each with its own limit; the link protocol version becomes 2 (both
-machines update together, as for control v3).
+machines update together, as for control v3), and 3 with `Entered`.
 
 | Kind | Way | Payload |
 |---|---|---|
@@ -258,6 +271,7 @@ machines update together, as for control v3).
 | `Leave` | secondary → primary | span, side, edge fraction (u16) |
 | `Exit` | primary → secondary | span; also the end of what arrives late after silence (Spans) |
 | `Lock` | primary → secondary | span, on (u8): the lock key locked the pointer to the secondary |
+| `Entered` | secondary → primary | span, keymap (u8): the span is taken, and the primary's keymap held or not |
 
 Decoding refuses a side, button, keycode, lock bit or monitor count out of range; a monitor with
 no area or past 32767; a keymap running past keycode 255; an up/down or modifier flag other than 0
@@ -273,7 +287,9 @@ Input sharing refuses to start while a process named `synergy`, `synergys`, `syn
 `input-leaps` or `input-leapc` runs (plan §5.6; athena runs `synergy` and `synergys`,
 *measured*), says so in `jackstay status`, and checks again every 10 s, so stopping Synergy is
 enough to start it. Synergy's own barriers and grabs would otherwise fight ours. The clipboard is
-unaffected.
+unaffected. A rival whose environment names another X display than ours is ignored: it grabs
+nothing of ours (and the tests run one rival per Xvfb). One whose environment cannot be read
+(another user's), or names no display, counts.
 
 ## In the daemon
 
@@ -470,3 +486,14 @@ Each control's removal planted, and the tests run.
 - A secondary drains only after silence, and the design is that a secondary is never the faster
   pinger, so it suspects only when it has heard nothing from its primary: a flag for which kind
   of silence was built, planted, survived, and removed as unreachable.
+
+### Dogfooding 1, 2026-10-31
+
+The owner's first crossings, athena to xiphos.
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | xiphos still ran `deskflow-core`, so it took no input, but its layout said it could; athena grabbed and stayed grabbed with nothing driven, until the return key | `Entered` answers every `Enter`; no answer within 300 ms takes the pointer back, and status says why (Spans) |
+| 2 | Once it stopped, keys did not reach xiphos: the keymap went out before the first crossing, while xiphos dropped everything, and was never sent again | `Entered` says whether the keymap is held; without it, the primary sends it again |
+| 3 | A rival starting on the secondary mid-span left the primary grabbed the same way | The secondary releases what it holds and sends `Leave` |
+| 4 | The tests ran a rival only on the primary, and the fake rival (a copy of uutils' multi-call `sleep`) exited at once: it was seen only as a zombie | Rivals are scoped to their X display, so a test runs one on B alone; the fake rival is a looping shell. Each of the three fixes removed, its test fails |

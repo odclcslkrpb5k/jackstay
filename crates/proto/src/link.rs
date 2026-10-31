@@ -7,8 +7,8 @@
 use crate::{DecodeError, FRAME_HEADER_LEN, LimitError, Reader};
 
 /// The link protocol version this code speaks; a peer's [`Message::Hello`] must carry the same.
-/// 2 added input sharing's kinds.
-pub const VERSION: u16 = 2;
+/// 2 added input sharing's kinds; 3 added [`Message::Entered`].
+pub const VERSION: u16 = 3;
 /// The longest machine name in a [`Message::Hello`], in bytes.
 pub const MAX_NAME_LEN: usize = 255;
 /// The shortest interval a [`Message::Ping`] may announce, in milliseconds.
@@ -191,6 +191,12 @@ pub enum Message {
         span: u32,
         on: bool,
     },
+    /// Input, secondary to primary: the secondary took the span `Enter` opened, and holds the
+    /// primary's keymap or not. A primary that has no answer soon takes the pointer back.
+    Entered {
+        span: u32,
+        keymap: bool,
+    },
 }
 
 const HELLO: u8 = 1;
@@ -209,6 +215,7 @@ const KEY: u8 = 13;
 const LEAVE: u8 = 14;
 const EXIT: u8 = 15;
 const LOCK: u8 = 16;
+const ENTERED: u8 = 17;
 
 const MONITOR_LEN: u32 = 8;
 const KEY_ENTRY_LEN: u32 = 9;
@@ -228,7 +235,7 @@ fn max_payload(kind: u8) -> Option<u32> {
         MOTION => Some(12),
         PING | BUTTON | KEY => Some(6),
         LEAVE => Some(7),
-        LOCK => Some(5),
+        LOCK | ENTERED => Some(5),
         _ => None,
     }
 }
@@ -354,6 +361,11 @@ fn encode_input(message: &Message, p: &mut Vec<u8>) -> Result<u8, LimitError> {
             p.extend_from_slice(&span.to_be_bytes());
             p.push(u8::from(*on));
             LOCK
+        }
+        Message::Entered { span, keymap } => {
+            p.extend_from_slice(&span.to_be_bytes());
+            p.push(u8::from(*keymap));
+            ENTERED
         }
         // Every other kind is encoded by `encode`.
         Message::Hello { .. }
@@ -543,6 +555,7 @@ pub fn decode(buf: &[u8]) -> Result<Option<(Message, usize)>, DecodeError> {
         }
         EXIT => Message::Exit { span: r.u32()? },
         LOCK => Message::Lock { span: r.u32()?, on: flag(&mut r)? },
+        ENTERED => Message::Entered { span: r.u32()?, keymap: flag(&mut r)? },
         other => return Err(DecodeError::UnknownKind(other)),
     };
     r.finish()?;

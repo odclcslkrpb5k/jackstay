@@ -35,12 +35,20 @@ pub enum Action {
         side: Side,
         fraction: u16,
     },
+    /// Tell the primary the span is taken (send [`jackstay_proto::link::Message::Entered`]).
+    Entered {
+        span: u32,
+        keymap: bool,
+    },
 }
 
 /// The span the pointer is on this machine for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Span {
     id: u32,
+    /// Where it came in.
+    side: Side,
+    fraction: u16,
     pointer: Pointer,
     /// For each of the primary's keycodes held, this machine's keycode it was pressed as: a
     /// release goes to the same key even if the keymaps changed in between.
@@ -151,6 +159,8 @@ impl Secondary {
         out.push(Action::Locks { caps: locks & LOCK_CAPS != 0, num: locks & LOCK_NUM != 0 });
         let mut s = Span {
             id: span,
+            side,
+            fraction,
             pointer,
             keys: vec![None; 256],
             buttons: Set::default(),
@@ -164,6 +174,7 @@ impl Secondary {
             }
         }
         self.span = Some(s);
+        out.push(Action::Entered { span, keymap: self.primary_keymap.is_some() });
         out
     }
 
@@ -234,6 +245,17 @@ impl Secondary {
     /// held is released.
     pub fn end(&mut self) -> Vec<Action> {
         self.span.take().map(|mut s| release(&mut s)).unwrap_or_default()
+    }
+
+    /// This machine can no longer be driven (a rival started): the span ends, and the primary is
+    /// told the pointer left where it came in, or it would go on sending to nothing.
+    pub fn give_back(&mut self) -> Vec<Action> {
+        let Some(mut s) = self.span.take() else { return Vec::new() };
+        let mut out = release(&mut s);
+        if !s.left {
+            out.push(Action::Leave { span: s.id, side: s.side, fraction: s.fraction });
+        }
+        out
     }
 }
 

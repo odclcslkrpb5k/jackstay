@@ -27,5 +27,7 @@ mod secondary;
 pub use keys::{Keymap, Set, Syms, Translation};
 pub use layout::{BadLayout, Edge, Layout, Rect};
 pub use pointer::{Pointer, Sides, Step};
-pub use primary::{ATTEMPT_EVERY, Do, Hotkey, Primary, STALE_AFTER, Where};
+pub use primary::{
+    ANSWER_WITHIN, ATTEMPT_EVERY, Do, Hotkey, Primary, RETRY_UNANSWERED, STALE_AFTER, Where,
+};
 pub use secondary::{Action, Secondary};

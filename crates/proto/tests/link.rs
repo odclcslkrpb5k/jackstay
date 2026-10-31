@@ -24,7 +24,7 @@ fn bytes(m: &Message) -> Vec<u8> {
 fn the_layout_is_as_documented() {
     assert_eq!(
         bytes(&Message::Hello { version: VERSION, run: 0x0102, name: "ab".into() }),
-        [0, 0, 0, 13, 1, 0, 2, 0, 0, 0, 0, 0, 0, 1, 2, 2, b'a', b'b']
+        [0, 0, 0, 13, 1, 0, 3, 0, 0, 0, 0, 0, 0, 1, 2, 2, b'a', b'b']
     );
     assert_eq!(
         bytes(&Message::Ping { seq: 7, interval_ms: 1000 }),
@@ -82,6 +82,10 @@ fn the_layout_is_as_documented() {
     );
     assert_eq!(bytes(&Message::Exit { span: 5 }), [0, 0, 0, 4, 15, 0, 0, 0, 5]);
     assert_eq!(bytes(&Message::Lock { span: 5, on: true }), [0, 0, 0, 5, 16, 0, 0, 0, 5, 1]);
+    assert_eq!(
+        bytes(&Message::Entered { span: 5, keymap: false }),
+        [0, 0, 0, 5, 17, 0, 0, 0, 5, 0]
+    );
 }
 
 #[test]
@@ -104,6 +108,7 @@ fn a_frame_beyond_its_kinds_limit_is_refused_from_the_header() {
         (14, 7),
         (15, 4),
         (16, 5),
+        (17, 5),
     ];
     for (kind, max) in kinds {
         let mut at = max.to_be_bytes().to_vec();
@@ -120,7 +125,7 @@ fn a_frame_beyond_its_kinds_limit_is_refused_from_the_header() {
 #[test]
 fn an_unknown_kind_is_refused_from_the_header() {
     assert_eq!(decode(&[0, 0, 0, 0, 0]), Err(DecodeError::UnknownKind(0)));
-    assert_eq!(decode(&[0, 0, 0, 0, 17]), Err(DecodeError::UnknownKind(17)));
+    assert_eq!(decode(&[0, 0, 0, 0, 18]), Err(DecodeError::UnknownKind(18)));
     assert_eq!(decode(&[0, 0, 0, 0, 64]), Err(DecodeError::UnknownKind(64)));
 }
 
@@ -334,6 +339,7 @@ fn input_messages_are_limited_both_ways() {
     assert_eq!(decode(&frame(12, &[0, 0, 0, 1, 1, 2])), Err(DecodeError::BadFlag(2)));
     assert_eq!(decode(&frame(13, &[0, 0, 0, 1, 66, 255])), Err(DecodeError::BadFlag(255)));
     assert_eq!(decode(&frame(16, &[0, 0, 0, 1, 2])), Err(DecodeError::BadFlag(2)));
+    assert_eq!(decode(&frame(17, &[0, 0, 0, 1, 2])), Err(DecodeError::BadFlag(2)));
 }
 
 fn arb_side() -> impl Strategy<Value = Side> {
@@ -384,6 +390,7 @@ fn arb_input() -> impl Strategy<Value = Message> {
             .prop_map(|(span, side, fraction)| Message::Leave { span, side, fraction }),
         any::<u32>().prop_map(|span| Message::Exit { span }),
         (any::<u32>(), any::<bool>()).prop_map(|(span, on)| Message::Lock { span, on }),
+        (any::<u32>(), any::<bool>()).prop_map(|(span, keymap)| Message::Entered { span, keymap }),
     ]
 }
 

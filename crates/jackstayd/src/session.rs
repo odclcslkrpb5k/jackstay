@@ -449,13 +449,19 @@ impl Session {
             truncate(&printable(&named.unwrap_or_else(|| key.fingerprint())), 64)
         };
         let primary =
-            matches!(self.input.state(), State::Here | State::On { .. } | State::Waiting(_));
+            matches!(self.input.state(), State::Here { .. } | State::On { .. } | State::Waiting(_));
         let response = match request {
             Request::Input => {
                 let (state, peer, detail) = match self.input.state() {
                     State::Off(why) => (InputState::Off, String::new(), why),
                     State::Waiting(why) => (InputState::Waiting, String::new(), why),
-                    State::Here => (InputState::Here, String::new(), String::new()),
+                    State::Here { unanswered: None } => {
+                        (InputState::Here, String::new(), String::new())
+                    }
+                    State::Here { unanswered: Some(peer) } => {
+                        let why = format!("{} did not take the last crossing", name(peer));
+                        (InputState::Here, String::new(), why)
+                    }
                     State::On { peer, locked } => {
                         let state = if locked { InputState::Locked } else { InputState::On };
                         (state, name(peer), String::new())

@@ -3,7 +3,10 @@
 
 use std::time::{Duration, Instant};
 
-use jackstay_input::{Action, Do, Hotkey, Keymap, Layout, Primary, Secondary, Sides, Where};
+use jackstay_input::{
+    ANSWER_WITHIN, Action, Do, Hotkey, Keymap, Layout, Primary, RETRY_UNANSWERED, Secondary, Sides,
+    Where,
+};
 use jackstay_proto::link::{KeyEntry, Message, Monitor, Side};
 use proptest::prelude::*;
 
@@ -92,7 +95,7 @@ fn ready() -> (Primary<u8>, Instant) {
 fn crossed(y: i32) -> (Primary<u8>, Instant) {
     let (mut p, now) = ready();
     assert_eq!(p.barrier(Side::Left, 0, y, -256, 0, now), vec![Do::Grab]);
-    p.grabbed(true, [0; 32], 0);
+    p.grabbed(true, [0; 32], 0, now);
     (p, now)
 }
 
@@ -127,7 +130,7 @@ fn a_crossing_sends_the_keymap_once_then_enter_and_parks_the_pointer() {
     let (mut p, now) = ready();
     p.barrier(Side::Left, 0, 2000, -256, 0, now);
     let modifiers = shift_held();
-    let out = p.grabbed(true, modifiers, 1);
+    let out = p.grabbed(true, modifiers, 1, now);
     let fraction = athena().edge(Side::Left).fraction(2000);
     // The exit ends a drain the secondary may be in after a silence only it noticed.
     assert!(
@@ -151,7 +154,7 @@ fn a_crossing_sends_the_keymap_once_then_enter_and_parks_the_pointer() {
     p.key(SCROLL_LOCK, true);
     assert_eq!(p.position(), Where::Here);
     p.barrier(Side::Left, 0, 2000, -256, 0, now + Duration::from_secs(1));
-    let out = p.grabbed(true, [0; 32], 0);
+    let out = p.grabbed(true, [0; 32], 0, now);
     assert!(
         matches!(sent(&out)[..], [Message::Exit { span: 1 }, Message::Enter { span: 2, .. }]),
         "{out:?}"
@@ -162,7 +165,7 @@ fn a_crossing_sends_the_keymap_once_then_enter_and_parks_the_pointer() {
 fn a_refused_grab_stays_here_and_attempts_are_limited() {
     let (mut p, now) = ready();
     assert_eq!(p.barrier(Side::Left, 0, 100, -256, 0, now), vec![Do::Grab]);
-    nothing(&p.grabbed(false, [0; 32], 0));
+    nothing(&p.grabbed(false, [0; 32], 0, now));
     assert_eq!(p.position(), Where::Here);
     // Hundreds of hits a second while a menu holds a grab: one attempt per 50 ms.
     nothing(&p.barrier(Side::Left, 0, 100, -256, 0, now + Duration::from_millis(49)));
@@ -229,7 +232,7 @@ fn the_lock_key_keeps_the_pointer_on_the_peer() {
 fn shift_held_at_the_crossing_counts_for_the_lock_key() {
     let (mut p, now) = ready();
     p.barrier(Side::Left, 0, 10, -256, 0, now);
-    p.grabbed(true, shift_held(), 0);
+    p.grabbed(true, shift_held(), 0, now);
     assert_eq!(sent(&p.key(SCROLL_LOCK, true)), vec![&Message::Lock { span: 1, on: true }]);
 }
 
@@ -304,7 +307,7 @@ fn a_session_ended_or_replaced_brings_the_pointer_home() {
     p.message(XIPHOS, SESSION + 1, &Message::Layout { monitors: xiphos().wire() });
     assert_eq!(p.barrier(Side::Left, 0, 10, -256, 0, later), vec![Do::Grab]);
     // The keymap goes again on the new session.
-    let out = p.grabbed(true, [0; 32], 0);
+    let out = p.grabbed(true, [0; 32], 0, now);
     let fresh = matches!(
         sent(&out)[..],
         [Message::Keymap { .. }, Message::Exit { .. }, Message::Enter { .. }]
@@ -321,16 +324,16 @@ fn a_grab_that_takes_after_the_session_ended_is_let_go() {
     let (mut p, now) = ready();
     p.barrier(Side::Left, 0, 10, -256, 0, now);
     p.ended(XIPHOS, SESSION);
-    assert_eq!(p.grabbed(true, [0; 32], 0), vec![Do::Ungrab]);
+    assert_eq!(p.grabbed(true, [0; 32], 0, now), vec![Do::Ungrab]);
     assert_eq!(p.position(), Where::Here);
 }
 
 #[test]
 fn switch_crosses_at_the_middle_of_the_facing_edge_and_back() {
-    let (mut p, _) = ready();
+    let (mut p, now) = ready();
     nothing(&p.switch_to(OTHER));
     assert_eq!(p.switch_to(XIPHOS), vec![Do::Grab]);
-    let out = p.grabbed(true, [0; 32], 0);
+    let out = p.grabbed(true, [0; 32], 0, now);
     let enter = Message::Enter {
         span: 1,
         side: Side::Right,
@@ -393,7 +396,7 @@ proptest! {
             Keymap::new(8, &syms),
         );
         p.barrier(Side::Left, 0, y, -256, 0, now);
-        deliver(&mut s, &p.grabbed(true, [0; 32], 0));
+        deliver(&mut s, &p.grabbed(true, [0; 32], 0, now));
         let actions = deliver(&mut s, &p.motion(256, 0));
         let Some(Action::Leave { span, side, fraction }) = actions.last().copied() else {
             panic!("{actions:?}")
@@ -410,7 +413,7 @@ fn a_grab_that_takes_after_the_peer_went_silent_is_let_go() {
     let (mut p, now) = ready();
     p.barrier(Side::Left, 0, 10, -256, 0, now);
     p.suspect(XIPHOS, SESSION, true);
-    assert_eq!(p.grabbed(true, [0; 32], 0), vec![Do::Ungrab]);
+    assert_eq!(p.grabbed(true, [0; 32], 0, now), vec![Do::Ungrab]);
     assert_eq!(p.position(), Where::Here);
 }
 
@@ -420,4 +423,93 @@ fn motion_too_large_to_send_is_cut_to_the_largest_that_is() {
     let out = p.motion(i32::MAX, i32::MIN);
     let largest = jackstay_proto::link::MAX_MOTION;
     assert_eq!(sent(&out), vec![&Message::Motion { span: 1, dx: largest, dy: -largest }]);
+}
+
+#[test]
+fn a_crossing_unanswered_is_taken_back_and_not_retried_at_once() {
+    let (mut p, now) = crossed(2000);
+    nothing(&p.answer_due(now + ANSWER_WITHIN));
+    assert_eq!(p.position(), Where::On { peer: XIPHOS, locked: false });
+    let late = now + ANSWER_WITHIN + Duration::from_millis(1);
+    let out = p.answer_due(late);
+    let exit = Do::Send { peer: XIPHOS, session: SESSION, message: Message::Exit { span: 1 } };
+    assert_eq!(
+        out,
+        [exit, Do::Warp { x: 1, y: 2000 }, Do::Ungrab, Do::Active { peer: XIPHOS, on: false }]
+    );
+    assert_eq!(p.position(), Where::Here);
+    assert_eq!(p.unanswered(), Some(XIPHOS));
+    // A push against the edge waits before trying the peer again; `jackstay switch` does not.
+    nothing(&p.barrier(Side::Left, 0, 2000, -256, 0, late + RETRY_UNANSWERED / 2));
+    let again = late + RETRY_UNANSWERED;
+    assert_eq!(p.barrier(Side::Left, 0, 2000, -256, 0, again), vec![Do::Grab]);
+    let (mut p, _) = crossed(2000);
+    p.answer_due(late);
+    assert_eq!(p.switch_to(XIPHOS), vec![Do::Grab]);
+}
+
+#[test]
+fn an_answered_crossing_stays_and_clears_what_went_unanswered() {
+    let (mut p, now) = crossed(2000);
+    p.answer_due(now + ANSWER_WITHIN * 2);
+    assert_eq!(p.unanswered(), Some(XIPHOS));
+    assert_eq!(p.switch_to(XIPHOS), vec![Do::Grab]);
+    p.grabbed(true, [0; 32], 0, now);
+    // An answer for another span is no answer.
+    nothing(&p.message(XIPHOS, SESSION, &Message::Entered { span: 1, keymap: true }));
+    nothing(&p.message(XIPHOS, SESSION, &Message::Entered { span: 2, keymap: true }));
+    assert_eq!(p.unanswered(), None);
+    nothing(&p.answer_due(now + ANSWER_WITHIN * 10));
+    assert_eq!(p.position(), Where::On { peer: XIPHOS, locked: false });
+}
+
+#[test]
+fn a_peer_without_our_keymap_gets_it_again() {
+    // xiphos dropped the keymap sent before the first crossing (a rival ran there): its answer
+    // says so, and without the keymap again no key would reach it.
+    let (mut p, _) = crossed(2000);
+    let out = p.message(XIPHOS, SESSION, &Message::Entered { span: 1, keymap: false });
+    let (first, keys) = keymap();
+    assert_eq!(sent(&out), [&Message::Keymap { first, keys }]);
+}
+
+#[test]
+fn a_secondary_answers_enter_and_says_whether_it_has_the_keymap() {
+    let (mut p, now) = ready();
+    let syms = vec![jackstay_input::Syms { level1: 0, level2: 0 }; 248];
+    let mut s = Secondary::new(xiphos(), Sides::default(), Keymap::new(8, &syms));
+    nothing(&p.switch_to(OTHER));
+    p.switch_to(XIPHOS);
+    let out = p.grabbed(true, [0; 32], 0, now);
+    assert_eq!(deliver(&mut s, &out).last(), Some(&Action::Entered { span: 1, keymap: true }));
+    let mut s = Secondary::new(xiphos(), Sides::default(), Keymap::new(8, &syms));
+    assert_eq!(
+        s.enter(2, Side::Left, 0, &[0; 32], 0).last(),
+        Some(&Action::Entered { span: 2, keymap: false })
+    );
+}
+
+#[test]
+fn a_secondary_that_can_no_longer_be_driven_gives_the_pointer_back() {
+    let syms = vec![jackstay_input::Syms { level1: 0, level2: 0 }; 248];
+    let mut s = Secondary::new(
+        xiphos(),
+        Sides::default().with(Side::Left).with(Side::Right),
+        Keymap::new(8, &syms),
+    );
+    assert_eq!(s.give_back(), []);
+    s.enter(3, Side::Right, 9000, &[0; 32], 0);
+    s.button(3, 1, true);
+    assert_eq!(
+        s.give_back(),
+        [
+            Action::Button { button: 1, down: false },
+            Action::Leave { span: 3, side: Side::Right, fraction: 9000 },
+        ]
+    );
+    assert!(!s.active());
+    // Once it left, the primary already took the pointer back.
+    s.enter(4, Side::Right, 9000, &[0; 32], 0);
+    s.motion(4, 100_000 * 256, 0);
+    assert_eq!(s.give_back(), []);
 }

@@ -313,7 +313,8 @@ fn print_input(i: &InputStatus) {
     match i.state {
         InputState::Off => println!("input: off ({detail})"),
         InputState::Waiting => println!("input: waiting ({detail})"),
-        InputState::Here => println!("input: the pointer is here"),
+        InputState::Here if detail.is_empty() => println!("input: the pointer is here"),
+        InputState::Here => println!("input: the pointer is here ({detail})"),
         InputState::On => println!("input: the pointer is on {peer}"),
         InputState::Locked => println!("input: the pointer is locked to {peer}"),
         InputState::Secondary => println!("input: {peer} can drive this machine"),

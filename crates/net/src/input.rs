@@ -73,5 +73,6 @@ pub fn is_input(m: &Message) -> bool {
             | Message::Leave { .. }
             | Message::Exit { .. }
             | Message::Lock { .. }
+            | Message::Entered { .. }
     )
 }

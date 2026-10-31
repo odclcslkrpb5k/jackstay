@@ -565,7 +565,7 @@ impl Display {
                     self.fake(kind, keycode, 0, 0)?;
                 }
                 Action::Locks { caps, num } => self.set_locks(caps, num, map)?,
-                Action::Leave { .. } => {}
+                Action::Leave { .. } | Action::Entered { .. } => {}
             }
         }
         self.conn.flush().map_err(x)

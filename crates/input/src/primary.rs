@@ -17,6 +17,13 @@ pub const ATTEMPT_EVERY: Duration = Duration::from_millis(50);
 /// While on a peer, the session's last frame older than this ends the span, whatever the link
 /// thread says (docs/input.md, "Freshness, whatever the link thread says").
 pub const STALE_AFTER: Duration = Duration::from_millis(300);
+/// A crossing the peer has not answered with `Entered` this soon is taken back: a peer that
+/// cannot be driven (a rival runs there, or it is not set up as this one's secondary) must not
+/// leave this machine grabbed with nothing driven.
+pub const ANSWER_WITHIN: Duration = Duration::from_millis(300);
+/// After a crossing to a peer went unanswered, the barrier crosses to it again no sooner than
+/// this: a push against the edge would grab and let go every [`ANSWER_WITHIN`] otherwise.
+pub const RETRY_UNANSWERED: Duration = Duration::from_secs(3);
 /// The keysyms of the two Shift keys, for the hotkeys that need Shift.
 const SHIFT_L: u32 = 0xffe1;
 const SHIFT_R: u32 = 0xffe2;
@@ -103,6 +110,8 @@ struct Span<K> {
     park: (i32, i32),
     drift: (i64, i64),
     locked: bool,
+    /// When `Enter` went out, until the peer answers it.
+    asked: Option<Instant>,
     /// The keys held here, as far as this span saw them go down and up.
     held: Set,
     /// Hotkeys pressed: their release is not sent either.
@@ -122,6 +131,9 @@ pub struct Primary<K> {
     /// The last span id used: each crossing takes the next.
     last_span: u32,
     last_attempt: Option<Instant>,
+    /// The peer that did not answer the last crossing to it, and when it was taken back, until a
+    /// crossing is answered.
+    unanswered: Option<(K, Instant)>,
 }
 
 fn index(side: Side) -> usize {
@@ -182,6 +194,7 @@ impl<K: Copy + Eq + Hash> Primary<K> {
             span: None,
             last_span: 0,
             last_attempt: None,
+            unanswered: None,
         }
     }
 
@@ -311,6 +324,24 @@ impl<K: Copy + Eq + Hash> Primary<K> {
         self.silent(peer, session)
     }
 
+    /// The pointer is taken back from a peer that has not answered the crossing within
+    /// [`ANSWER_WITHIN`].
+    pub fn answer_due(&mut self, now: Instant) -> Vec<Do<K>> {
+        let Some(s) = &self.span else { return Vec::new() };
+        if s.asked.is_none_or(|t| now.saturating_duration_since(t) <= ANSWER_WITHIN) {
+            return Vec::new();
+        }
+        self.unanswered = Some((s.peer, now));
+        self.go_home(true)
+    }
+
+    /// The peer that did not answer the last crossing to it, if no crossing has been answered
+    /// since.
+    #[must_use]
+    pub fn unanswered(&self) -> Option<K> {
+        self.unanswered.map(|(k, _)| k)
+    }
+
     /// A message from `peer`.
     pub fn message(&mut self, peer: K, session: u64, message: &Message) -> Vec<Do<K>> {
         let Some(p) = self.peers.get_mut(&peer).filter(|p| p.session == Some(session)) else {
@@ -322,6 +353,7 @@ impl<K: Copy + Eq + Hash> Primary<K> {
                 Vec::new()
             }
             Message::Leave { span, side, fraction } => self.leave(peer, *span, *side, *fraction),
+            Message::Entered { span, keymap } => self.entered(peer, *span, *keymap),
             // Only a secondary sends the rest; a primary ignores them.
             _ => Vec::new(),
         }
@@ -341,6 +373,11 @@ impl<K: Copy + Eq + Hash> Primary<K> {
             return Vec::new();
         }
         let Some(peer) = self.neighbour(side).filter(|k| self.ready(*k)) else { return Vec::new() };
+        if self.unanswered.is_some_and(|(k, at)| {
+            k == peer && now.saturating_duration_since(at) < RETRY_UNANSWERED
+        }) {
+            return Vec::new();
+        }
         self.attempt(Pending { peer, side, at: (x, y) }, now)
     }
 
@@ -382,9 +419,15 @@ impl<K: Copy + Eq + Hash> Primary<K> {
         if self.span.is_some() { self.go_home(true) } else { Vec::new() }
     }
 
-    /// X's answer to [`Do::Grab`]; with the modifier keys held and the locks on, read after the
-    /// grab took.
-    pub fn grabbed(&mut self, took: bool, modifiers: [u8; 32], locks: u8) -> Vec<Do<K>> {
+    /// X's answer to [`Do::Grab`] at `now`; with the modifier keys held and the locks on, read
+    /// after the grab took.
+    pub fn grabbed(
+        &mut self,
+        took: bool,
+        modifiers: [u8; 32],
+        locks: u8,
+        now: Instant,
+    ) -> Vec<Do<K>> {
         let Some(pending) = self.pending.take() else {
             // Nothing asked for it any longer (the session ended meanwhile).
             return if took { vec![Do::Ungrab] } else { Vec::new() };
@@ -436,6 +479,7 @@ impl<K: Copy + Eq + Hash> Primary<K> {
             park,
             drift: (0, 0),
             locked: false,
+            asked: Some(now),
             held: Set::from_bitmap(&modifiers),
             swallowed: Set::default(),
         });
@@ -520,6 +564,18 @@ impl<K: Copy + Eq + Hash> Primary<K> {
         } else {
             None
         }
+    }
+
+    /// The secondary took the span; without our keymap (lost while it could not take input),
+    /// it gets it again, or no key would reach it.
+    fn entered(&mut self, peer: K, span: u32, keymap: bool) -> Vec<Do<K>> {
+        let Some(s) = self.span.as_mut().filter(|s| s.peer == peer && s.id == span) else {
+            return Vec::new();
+        };
+        s.asked = None;
+        self.unanswered = None;
+        let session = s.session;
+        if keymap { Vec::new() } else { self.send_keymap(peer, session).into_iter().collect() }
     }
 
     /// The secondary says the pointer left it through its `side` at `fraction`: it comes back

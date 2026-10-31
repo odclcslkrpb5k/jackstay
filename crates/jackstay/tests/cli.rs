@@ -516,7 +516,7 @@ fn status_says_where_the_pointer_is() {
     for (state, says) in [
         (InputState::Off, "input: off (synergys is running)\n"),
         (InputState::Waiting, "input: waiting (synergys is running)\n"),
-        (InputState::Here, "input: the pointer is here\n"),
+        (InputState::Here, "input: the pointer is here (synergys is running)\n"),
         (InputState::On, "input: the pointer is on xiphos [2J\n"),
         (InputState::Locked, "input: the pointer is locked to xiphos [2J\n"),
         (InputState::Secondary, "input: xiphos [2J can drive this machine\n"),
@@ -534,6 +534,11 @@ fn status_says_where_the_pointer_is() {
         assert_eq!(code, Some(0));
         assert!(out.ends_with(says), "{out}");
     }
+    // Here, with nothing to say about the last crossing.
+    let input = InputStatus { state: InputState::Here, peer: String::new(), detail: String::new() };
+    let answers = vec![status, Response::Peers(link(Vec::new())), Response::Input(input)];
+    let (_, out, _) = exchange(&["status"], answers);
+    assert!(out.ends_with("input: the pointer is here\n"), "{out}");
     let (code, out, _) =
         exchange(&["switch", "xiphos"], vec![Response::Error(Error::NotNeighbour)]);
     assert_eq!((code, out.as_str()), (Some(1), ""));

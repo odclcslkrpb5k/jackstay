@@ -175,7 +175,8 @@ is QUIC's client, the only one that may change its address without the link drop
 byte as version 3 did.
 
 Version 5 adds input sharing (docs/input.md, "In the daemon"): `Input` (its state: off or waiting
-and why, the pointer here or on a peer, or this machine a secondary and whether it is driven now),
+and why, the pointer here (with, in the detail, the peer that did not take the last crossing, if
+none has since) or on a peer, or this machine a secondary and whether it is driven now),
 `Switch { peer }` (the pointer to that neighbour, entering at the middle of the edge facing this
 machine) and `SwitchHome`; a switch is refused with `InputOff` on a machine that is not running as
 the primary, and `NotNeighbour` for a peer that is not in `[input]`. A client of version 2 to 4 is
