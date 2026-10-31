@@ -21,6 +21,7 @@
 )]
 
 pub mod address;
+mod clip;
 mod engine;
 pub mod identity;
 mod input;
@@ -38,6 +39,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 pub use address::Address;
+pub use clip::{Clip, FetchFailed, is_shared};
 pub use identity::{Identity, IdentityError, PublicKey};
 pub use input::{Heard, Input, Sink, is_input};
 pub use peers::{Peer, PeersError};
@@ -216,6 +218,8 @@ pub enum Event {
         fingerprint: String,
         saved: Result<(), UnpairError>,
     },
+    /// Clipboard sharing's streams (docs/sharing.md, "Streams").
+    Clip(Clip),
 }
 
 /// Why a peer was not unpaired.
@@ -235,6 +239,7 @@ pub(crate) enum Command {
     Unpair(PublicKey),
     SetActive(PublicKey, bool),
     Send { key: PublicKey, session: u64, message: jackstay_proto::link::Message },
+    Clip { key: PublicKey, session: u64, out: clip::ClipOut },
     Shutdown,
 }
 
@@ -264,6 +269,7 @@ pub struct Handle {
     commands: mpsc::UnboundedSender<Command>,
     thread: Option<JoinHandle<()>>,
     public: PublicKey,
+    clip: Arc<clip::Shared>,
 }
 
 impl Handle {
@@ -294,6 +300,41 @@ impl Handle {
     /// Sends an input message ([`Sender::send`]).
     pub fn send(&self, key: PublicKey, session: u64, message: jackstay_proto::link::Message) {
         self.sender().send(key, session, message);
+    }
+
+    /// Sends an `Announce`, `Emptied` or `Forget` ([`is_shared`]; any other is not sent) to the
+    /// peer with `key`, on a stream of its own, if `session` is still the one kept with it.
+    pub fn share(&self, key: PublicKey, session: u64, message: jackstay_proto::link::Message) {
+        if is_shared(&message) {
+            let out = clip::ClipOut::Share(message);
+            let _ = self.commands.send(Command::Clip { key, session, out });
+        }
+    }
+
+    /// Fetches the target `name` of the entry `digest`, `size` bytes, from the peer with `key`
+    /// on `session`; answered with [`Clip::Fetched`] under `fetch`, the caller's own id. `size`
+    /// is allocated whole: the caller holds it to its limits.
+    pub fn fetch(
+        &self,
+        key: PublicKey,
+        session: u64,
+        fetch: u64,
+        digest: jackstay_proto::sharing::Sha256,
+        name: jackstay_proto::sharing::Name,
+        size: u64,
+    ) {
+        let out = clip::ClipOut::Fetch { fetch, digest, name, size };
+        let _ = self.commands.send(Command::Clip { key, session, out });
+    }
+
+    /// Stops a fetch: its stream is stopped, and it is not reported.
+    pub fn cancel_fetch(&self, fetch: u64) {
+        self.clip.cancel(fetch);
+    }
+
+    /// Answers [`Clip::Wanted`]: the target's bytes, or `None` if not held.
+    pub fn answer(&self, request: u64, bytes: Option<Arc<[u8]>>) {
+        self.clip.answer(request, bytes);
     }
 
     /// What input sharing's thread sends and marks sessions active with.
@@ -376,11 +417,13 @@ pub fn start(
         return Err(StartError::Peers(PeersError::OwnKey));
     }
     let (commands, receiver) = mpsc::unbounded_channel();
+    let clip = Arc::new(clip::Shared::default());
     // Made here, so a failure is the start's, and the link is off, rather than the thread's end.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(StartError::Thread)?;
+    let shared = Arc::clone(&clip);
     let thread = std::thread::Builder::new()
         .name("link".to_owned())
         .spawn(move || {
@@ -390,10 +433,9 @@ pub fn start(
                 identity,
                 peers,
                 receiver,
-                Box::new(events),
-                Arc::new(input),
+                engine::Outlets { events: Box::new(events), input: Arc::new(input), clip: shared },
             );
         })
         .map_err(StartError::Thread)?;
-    Ok(Handle { commands, thread: Some(thread), public })
+    Ok(Handle { commands, thread: Some(thread), public, clip })
 }

@@ -114,7 +114,11 @@ session; until it arrives the secondary injects no key at all, since a keycode's
 unknown.
 
 **Every `Enter` is answered.** A secondary that takes the span answers `Entered` with the span id
-and whether it holds the primary's keymap; without it, the primary sends `Keymap` again. A
+and whether it holds the primary's keymap; without it, the primary sends `Keymap` again at once.
+Until a secondary has said it holds the keymap, the primary sends it before every `Enter`, so a
+key typed before the answer comes back is never dropped for want of it (found by the two-daemon
+test under load, 2026-10-31: a press right after the crossing reached xiphos before the keymap
+sent again). A
 primary that has no answer within 300 ms takes the pointer back (an `Exit`, as any return), and
 `jackstay status` says the peer did not take the last crossing; the barrier crosses to that peer
 again no sooner than 3 s later, so a push against the edge does not grab and let go over and

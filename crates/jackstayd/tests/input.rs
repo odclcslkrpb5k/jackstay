@@ -193,7 +193,8 @@ fn the_pointer_crosses_out_and_back_on_the_owners_layouts() {
     let rig = owners();
     let (a, b) = (Hands::on(&rig.a.x), Hands::on(&rig.b.x));
     cross_left(&rig, &a, 2000);
-    assert_eq!(input(&rig.b).state, InputState::Driven);
+    // B hears the crossing a moment after A makes it.
+    input_in(&rig.b, InputState::Driven, SOON);
     // Into xiphos's right side, one to one below its dead zones: 2000 is 3200 there.
     soon("B's pointer at the crossing", SOON, || {
         let (x, y) = b.pointer();

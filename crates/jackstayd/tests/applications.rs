@@ -138,14 +138,20 @@ impl App {
         matches!(status, Ok(Response::Status(s)) if s.owns_clipboard)
     }
 
-    /// What a quit that never finished left behind: its windows still up mean the keys were
-    /// lost or a dialog stopped it; none mean it is exiting slowly with the daemon not serving.
-    fn left_behind(&self) -> String {
-        let windows = Command::new("xdotool")
+    /// How many visible windows the process has, if `xdotool` could tell.
+    fn windows(&self) -> Option<usize> {
+        Command::new("xdotool")
             .args(["search", "--onlyvisible", "--pid", &self.child.id().to_string()])
             .env("DISPLAY", &self.display)
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().count());
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().count())
+    }
+
+    /// What a quit that never finished left behind: its windows still up mean the keys were
+    /// lost or a dialog stopped it; none mean it is exiting slowly with the daemon not serving.
+    fn left_behind(&self) -> String {
+        let windows = self.windows();
         let status = Client::connect(&self.control, Duration::from_secs(5))
             .and_then(|mut c| c.ask(&Request::Status));
         format!("visible windows: {windows:?}; the daemon: {status:?}")
@@ -160,11 +166,20 @@ impl Owner for App {
             // Its answer may never come: LibreOffice is going.
             Quit::Office(pipe) => drop(office(&self.display, pipe, &["quit"])),
         }
-        // Gone as far as the clipboard goes once the daemon serves in its place: a process can
-        // linger after its windows close (Firefox, under load, for more than 30 s), and the
-        // group is killed when the test is done with it.
+        // Gone as far as the clipboard goes once the daemon serves in its place. A process can
+        // linger after its windows close, still owning the clipboard (Firefox, under load, for
+        // more than 30 s: twice a masked plant, 2026-10-29 and -31); with no window left for
+        // 10 s it is ended, as a crash would end it, and the daemon must take over all the same.
         let deadline = began + Duration::from_secs(30);
+        let mut lingering = false;
         while ok(self.child.try_wait()).is_none() && !self.daemon_serves() {
+            if !lingering && began.elapsed() > Duration::from_secs(10) && self.windows() == Some(0)
+            {
+                eprintln!("{}: no windows left after 10 s; ending it", self.name);
+                let group = format!("-{}", self.child.id());
+                let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
+                lingering = true;
+            }
             assert!(
                 Instant::now() < deadline,
                 "{} did not quit ({})",

@@ -6,7 +6,7 @@ clipboard sharing must do; this says how, and where it departs from the plan (ma
 link (docs/link.md) and on the selection engine (docs/selection.md).
 
 Status: **design, revised after red-team pass 1** (findings and resolutions at the end); slice 1
-(`proto`) built. Code facts are as read on 2026-10-31 at 2c9e386.
+(`proto`) and slice 2 (`net`) built. Code facts are as read on 2026-10-31 at 2c9e386.
 
 ## What exists to build on
 
@@ -103,17 +103,30 @@ Status: **design, revised after red-team pass 1** (findings and resolutions at t
 
 - Each `Announce`, `Emptied` and `Forget` goes on a **unidirectional stream** of its own,
   finished after the message. Each `Fetch` opens a **bidirectional stream**, answered on it. A
-  fetcher abandoning a fetch stops the stream (`STOP_SENDING`); the announcer resets it when the
-  entry goes.
+  fetcher abandoning a fetch stops the stream (`STOP_SENDING`, by dropping it); the announcer
+  answers not held when the entry is gone, or when the daemon has not answered within 5 s.
+- Clipboard streams are taken only once the engine keeps the session; until then quinn holds
+  them, at most its stream limit. A stream that does not carry exactly one of the kinds it may
+  (a uni stream: `Announce`, `Emptied` or `Forget`; a bidi stream: `Fetch`) closes the
+  connection, as a wrong message on stream 0 does.
+- A fetch reports once: the bytes, not held, wrong (more or fewer bytes than the announced size,
+  or no `Answer` first), or lost (the session ended, also while it ran). One cancelled is never
+  reported.
 - Order across streams is not kept, and every message is safe out of order: changes carry ticks,
   a `Forget` is remembered (Forget) so an `Announce` arriving after it is refused, and an
   `Announce` for a digest already held only adds what is missing.
 - **Input comes first** (plan target 2 over the bulk of target 1).
-  - One fetch at a time per peer, and at most 256 KiB of clipboard bytes unacknowledged per
-    connection: the receiver sets clipboard streams' receive window to 256 KiB, and the sender
-    writes a fetch in 64 KiB pieces. On a 100 Mbit/s link a full window is 20 ms of queue that
-    stream 0 can wait behind; on gigabit, 2 ms. quinn's stream priority (stream 0 highest) only
-    orders what quinn still holds, and is kept as well.
+  - One fetch at a time per peer (the daemon's rule), and at most 256 KiB of a stream's bytes
+    unacknowledged, 512 KiB of the connection's (quinn's `stream_receive_window`,
+    `receive_window` and `send_window`); the sender writes a target in 64 KiB pieces. On a 100
+    Mbit/s link a full window is 21 ms of queue that stream 0 can wait behind; on a gigabit, 2
+    ms. quinn's stream priority (stream 0 highest, clipboard streams lowest) only orders what quinn
+    still holds, and is kept as well. *Measured* (`net`'s tests, a relay holding 100 Mbit/s with 50
+    ms of queue): during a 32 MiB fetch, which takes 2.8 s, motion arrives in 20 ms at the median
+    and 36 ms at p99; with quinn's default windows the queue fills, and the gate (median under 30
+    ms, p99 under 50) fails. Idle, motion is under a millisecond. The owner's machines share a
+    gigabit switch (2026-10-31): there the window is 2 ms of queue, and slow or lossy links are
+    not designed for.
   - At most 16 clipboard streams open each way per session (quinn's stream limits, plus stream
     0); messages beyond wait for a slot. At most 64 announcements are held unprocessed; beyond
     that the oldest are dropped, and the journal says so.
@@ -121,8 +134,10 @@ Status: **design, revised after red-team pass 1** (findings and resolutions at t
 - **Through the daemon.** The link thread hands each message to the clipboard thread on the
   channel its events use (`net::Event::Clip`), fetched bytes whole as `Arc<[u8]>` (one 64 MiB
   buffer at most, one fetch at a time); the clipboard thread asks the link to announce, empty,
-  forget and fetch (`Handle::clip`). This replaces docs/link.md's "never copying a whole target on
-  the link thread": the copy is the one buffer, handed over.
+  forget and fetch (`Handle::share`, `fetch`, `cancel_fetch`, `answer`). This replaces
+  docs/link.md's "never copying a whole target on the link thread": the copy is the one buffer,
+  handed over. `Clip::Up` and `Clip::Down` say when a session with a peer is kept and ends; a
+  message is sent only on the session kept now.
 
 ## Capture and announce
 
@@ -249,8 +264,8 @@ A request for a pending target **waits**:
 
 1. `proto`: the clipboard kinds, Latin-1 names, link version 4; `announce.rs` and `frame.rs`
    (and their `decode` fuzz target) removed; the link fuzz corpus regrown. **Built.**
-2. `net`: clipboard streams, windows, limits, tasks, `Event::Clip` and `Handle::clip`; the
-   relay's bandwidth limit; relay tests and the latency gate under load.
+2. `net`: clipboard streams, windows, limits, tasks, `Event::Clip` and the handle's calls; a
+   relay with a bandwidth limit; the latency gate under load. **Built.**
 3. `selection`: deferred replies, `Remote` targets, `Wanted`, `update` in place.
 4. `clip` and `store`: `Source::Peer`, `Remote`, the digest, the clock, placing by tick, the
    index's version 2, the forgets.
@@ -281,3 +296,11 @@ given finding 1; fetching everything is right, given bounds (finding 8).
 | 12 | `clear-history` staying local contradicts §5.2; unpairing and the forgets' overflow were undefined; secrets now persist on every machine | Marked **Departs**; unpairing keeps history; the last 1000; the README says it |
 | 13 | An older received entry went to the front of history | Placed by tick |
 | 14 | No test for the above | Each has a test above |
+
+### Slice 2 plants, 2026-10-31
+
+Each control removed, and `net`'s clipboard tests run: the windows (the latency gate fails), the
+check for bytes past the size, reporting fetches lost with their session, sending only on the
+session kept: caught. Survives, accepted: not reporting a fetch cancelled in the instant it
+finished (a race of microseconds between the daemon's thread and the link's; without it, a
+cancelled fetch could be reported once).

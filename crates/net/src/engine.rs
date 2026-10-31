@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep_until, timeout};
 
+use crate::clip::{self, Clip, Shared};
 use crate::identity::{Identity, PublicKey};
 use crate::input::Sink;
 use crate::pairing::{self, PairCommand, PairOut};
@@ -35,16 +36,23 @@ const RESUMED: Duration = Duration::from_secs(1);
 /// leaving it.
 const SHUTDOWN_WAIT: Duration = Duration::from_millis(500);
 
+/// Where the link's news goes: the daemon's events, input sharing's reports, and what clipboard
+/// sharing's handle shares with the tasks.
+pub(crate) struct Outlets {
+    pub events: Box<dyn FnMut(Event) + Send>,
+    pub input: Sink,
+    pub clip: Arc<Shared>,
+}
+
 pub(crate) fn run(
     runtime: tokio::runtime::Runtime,
     config: Config,
     identity: Identity,
     peers: Vec<Peer>,
     commands: mpsc::UnboundedReceiver<Command>,
-    events: Box<dyn FnMut(Event) + Send>,
-    input: Sink,
+    outlets: Outlets,
 ) {
-    runtime.block_on(Engine::new(config, identity, peers, events, input).run(commands));
+    runtime.block_on(Engine::new(config, identity, peers, outlets).run(commands));
     runtime.shutdown_timeout(SHUTDOWN_WAIT);
 }
 
@@ -152,6 +160,9 @@ struct Engine {
     bucket: Bucket,
     events: Box<dyn FnMut(Event) + Send>,
     input: Sink,
+    clip: Arc<Shared>,
+    clips: mpsc::UnboundedSender<Clip>,
+    clips_rx: mpsc::UnboundedReceiver<Clip>,
     tasks: JoinSet<()>,
     internal: mpsc::UnboundedSender<Internal>,
     internal_rx: mpsc::UnboundedReceiver<Internal>,
@@ -178,14 +189,10 @@ fn sleep_gap() -> Option<Duration> {
 }
 
 impl Engine {
-    fn new(
-        config: Config,
-        identity: Identity,
-        peers: Vec<Peer>,
-        events: Box<dyn FnMut(Event) + Send>,
-        input: Sink,
-    ) -> Engine {
+    fn new(config: Config, identity: Identity, peers: Vec<Peer>, outlets: Outlets) -> Engine {
+        let Outlets { events, input, clip } = outlets;
         let (internal, internal_rx) = mpsc::unbounded_channel();
+        let (clips, clips_rx) = mpsc::unbounded_channel();
         let (reports, reports_rx) = mpsc::unbounded_channel();
         let own = identity.public();
         let now = Instant::now();
@@ -210,6 +217,9 @@ impl Engine {
             bucket: Bucket { tokens: HANDSHAKES_PER_SECOND, at: now },
             events,
             input,
+            clip,
+            clips,
+            clips_rx,
             tasks: JoinSet::new(),
             internal,
             internal_rx,
@@ -462,6 +472,8 @@ impl Engine {
             reports: self.reports.clone(),
             commands,
             input: Arc::clone(&self.input),
+            clips: self.clips.clone(),
+            clip: Arc::clone(&self.clip),
         }));
     }
 
@@ -593,6 +605,7 @@ impl Engine {
         if let Some(s) = self.sessions.get(&id) {
             let _ = s.to.send(ToSession::Kept);
         }
+        (self.events)(Event::Clip(Clip::Up { key, session: id }));
         if self.active.contains(&key)
             && let Some(s) = self.sessions.get(&id)
         {
@@ -613,6 +626,7 @@ impl Engine {
             slot.current = None;
             slot.suspect = false;
             slot.rtt = None;
+            (self.events)(Event::Clip(Clip::Down { key, session: id }));
             match ended {
                 Ended::Refused(r) => {
                     slot.refused = Some(r);
@@ -663,6 +677,17 @@ impl Engine {
                     && let Some(s) = self.sessions.get(&session)
                 {
                     let _ = s.to.send(ToSession::Send(message));
+                }
+            }
+            Command::Clip { key, session, out } => {
+                if self.slots.get(&key).and_then(|s| s.current) == Some(session)
+                    && let Some(s) = self.sessions.get(&session)
+                {
+                    let _ = s.to.send(ToSession::Clip(out));
+                } else if let clip::ClipOut::Fetch { fetch, .. } = out {
+                    // A fetch on a session gone is lost at once, not left waiting.
+                    let result = Err(crate::FetchFailed::Lost);
+                    (self.events)(Event::Clip(Clip::Fetched { fetch, result }));
                 }
             }
             Command::Shutdown => {}
@@ -831,6 +856,7 @@ impl Engine {
                 },
                 Some((id, report)) = self.reports_rx.recv() => self.on_report(id, &report),
                 Some(internal) = self.internal_rx.recv() => self.on_internal(internal),
+                Some(c) = self.clips_rx.recv() => (self.events)(Event::Clip(c)),
                 incoming = accept => {
                     if let Some(i) = incoming {
                         self.on_incoming(i);

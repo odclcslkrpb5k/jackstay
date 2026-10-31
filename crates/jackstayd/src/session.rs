@@ -617,7 +617,9 @@ impl Session {
                         self.clients.resolve(c, &response);
                     }
                 }
-                jackstay_net::Event::Status(_) => {}
+                // Status is the link's own; clipboard sharing is not wired yet (docs/sharing.md,
+                // slice 5): a peer's fetch is answered "not held" after the link's 5 s.
+                jackstay_net::Event::Status(_) | jackstay_net::Event::Clip(_) => {}
             }
         }
     }

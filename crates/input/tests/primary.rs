@@ -126,7 +126,7 @@ fn no_crossing_until_the_peer_is_linked_and_its_layout_known() {
 }
 
 #[test]
-fn a_crossing_sends_the_keymap_once_then_enter_and_parks_the_pointer() {
+fn a_crossing_sends_the_keymap_until_held_then_enter_and_parks_the_pointer() {
     let (mut p, now) = ready();
     p.barrier(Side::Left, 0, 2000, -256, 0, now);
     let modifiers = shift_held();
@@ -148,15 +148,27 @@ fn a_crossing_sends_the_keymap_once_then_enter_and_parks_the_pointer() {
     assert!(out.contains(&Do::Warp { x: 1280, y: 2160 }), "{out:?}");
     assert_eq!(out.last(), Some(&Do::Active { peer: XIPHOS, on: true }));
     assert_eq!(p.position(), Where::On { peer: XIPHOS, locked: false });
-    // Back by the return key (Shift up first: with it, Scroll Lock locks), and across again: no
-    // second keymap on the same session.
+    // Back by the return key (Shift up first: with it, Scroll Lock locks), and across again:
+    // the keymap again, since xiphos never said it holds it (it may have dropped it).
     p.key(SHIFT, false);
     p.key(SCROLL_LOCK, true);
     assert_eq!(p.position(), Where::Here);
     p.barrier(Side::Left, 0, 2000, -256, 0, now + Duration::from_secs(1));
     let out = p.grabbed(true, [0; 32], 0, now);
     assert!(
-        matches!(sent(&out)[..], [Message::Exit { span: 1 }, Message::Enter { span: 2, .. }]),
+        matches!(
+            sent(&out)[..],
+            [Message::Keymap { .. }, Message::Exit { span: 1 }, Message::Enter { span: 2, .. }]
+        ),
+        "{out:?}"
+    );
+    // Once it says it holds it, no more on this session.
+    p.message(XIPHOS, SESSION, &Message::Entered { span: 2, keymap: true });
+    p.key(SCROLL_LOCK, true);
+    p.barrier(Side::Left, 0, 2000, -256, 0, now + Duration::from_secs(2));
+    let out = p.grabbed(true, [0; 32], 0, now);
+    assert!(
+        matches!(sent(&out)[..], [Message::Exit { span: 2 }, Message::Enter { span: 3, .. }]),
         "{out:?}"
     );
 }

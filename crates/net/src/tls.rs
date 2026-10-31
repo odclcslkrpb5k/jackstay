@@ -163,6 +163,15 @@ fn transport(timings: &Timings) -> Arc<quinn::TransportConfig> {
     t.keep_alive_interval(Some(timings.keep_alive));
     // An idle timeout too long for QUIC's varint is no timeout at all; ours are seconds.
     t.max_idle_timeout(quinn::IdleTimeout::try_from(timings.idle_timeout).ok());
+    // Clipboard sharing never fills the queue input waits behind (docs/sharing.md, "Streams"):
+    // a stream's unacknowledged bytes stay under 256 KiB, the connection's under 512 KiB, and a
+    // peer opens at most 16 clipboard streams each way at once (stream 0 is the 17th
+    // bidirectional one).
+    t.stream_receive_window(quinn::VarInt::from_u32(256 * 1024));
+    t.receive_window(quinn::VarInt::from_u32(512 * 1024));
+    t.send_window(512 * 1024);
+    t.max_concurrent_uni_streams(quinn::VarInt::from_u32(16));
+    t.max_concurrent_bidi_streams(quinn::VarInt::from_u32(17));
     Arc::new(t)
 }
 

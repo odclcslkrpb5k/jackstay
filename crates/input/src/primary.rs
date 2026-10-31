@@ -83,8 +83,10 @@ struct Peer {
     suspect: bool,
     /// Its layout arrived on this session: its input side is running.
     layout: bool,
-    /// Our keymap went out on this session.
-    keymap_sent: bool,
+    /// The peer said, answering a crossing on this session, that it holds our keymap. Until
+    /// then the keymap goes out before every `Enter`: a peer that dropped it (a rival ran there)
+    /// would otherwise drop the keys typed before its answer brought it again.
+    keymap_held: bool,
 }
 
 /// A grab asked for, on the way to `peer`.
@@ -248,7 +250,7 @@ impl<K: Copy + Eq + Hash> Primary<K> {
     pub fn keymap(&mut self, first: u8, keys: Vec<KeyEntry>) -> Vec<Do<K>> {
         self.keymap = (first, keys);
         for p in self.peers.values_mut() {
-            p.keymap_sent = false;
+            p.keymap_held = false;
         }
         let Some(s) = &self.span else { return Vec::new() };
         let (peer, session) = (s.peer, s.session);
@@ -256,8 +258,7 @@ impl<K: Copy + Eq + Hash> Primary<K> {
     }
 
     fn send_keymap(&mut self, peer: K, session: u64) -> Option<Do<K>> {
-        let p = self.peers.get_mut(&peer)?;
-        p.keymap_sent = true;
+        self.peers.get(&peer)?;
         let (first, keys) = self.keymap.clone();
         Some(Do::Send { peer, session, message: Message::Keymap { first, keys } })
     }
@@ -440,7 +441,7 @@ impl<K: Copy + Eq + Hash> Primary<K> {
             return vec![Do::Ungrab];
         };
         let mut out = Vec::new();
-        if self.peers.get(&pending.peer).is_some_and(|p| !p.keymap_sent) {
+        if self.peers.get(&pending.peer).is_some_and(|p| !p.keymap_held) {
             out.extend(self.send_keymap(pending.peer, session));
         }
         // Ends a drain the secondary may be in since a silence this side never noticed (it heard
@@ -567,7 +568,7 @@ impl<K: Copy + Eq + Hash> Primary<K> {
     }
 
     /// The secondary took the span; without our keymap (lost while it could not take input),
-    /// it gets it again, or no key would reach it.
+    /// it gets it again at once, and before every crossing until it says it holds it.
     fn entered(&mut self, peer: K, span: u32, keymap: bool) -> Vec<Do<K>> {
         let Some(s) = self.span.as_mut().filter(|s| s.peer == peer && s.id == span) else {
             return Vec::new();
@@ -575,7 +576,14 @@ impl<K: Copy + Eq + Hash> Primary<K> {
         s.asked = None;
         self.unanswered = None;
         let session = s.session;
-        if keymap { Vec::new() } else { self.send_keymap(peer, session).into_iter().collect() }
+        if keymap {
+            if let Some(p) = self.peers.get_mut(&peer) {
+                p.keymap_held = true;
+            }
+            Vec::new()
+        } else {
+            self.send_keymap(peer, session).into_iter().collect()
+        }
     }
 
     /// The secondary says the pointer left it through its `side` at `fraction`: it comes back

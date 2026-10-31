@@ -12,6 +12,7 @@ use rustls::pki_types::CertificateDer;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until, timeout};
 
+use crate::clip::{Clip, ClipOut, Shared, Streams};
 use crate::identity::PublicKey;
 use crate::input::{Heard, Input, Sink, is_input};
 use crate::{Refusal, Timings};
@@ -175,6 +176,8 @@ pub(crate) enum ToSession {
     Kept,
     /// An input message to send.
     Send(Message),
+    /// Clipboard sharing's, on streams of their own.
+    Clip(ClipOut),
     Bye,
 }
 
@@ -200,6 +203,8 @@ pub(crate) struct Args {
     pub reports: mpsc::UnboundedSender<(u64, Report)>,
     pub commands: mpsc::UnboundedReceiver<ToSession>,
     pub input: Sink,
+    pub clips: mpsc::UnboundedSender<Clip>,
+    pub clip: Arc<Shared>,
 }
 
 /// What this session tells input sharing ([`Input`]): nothing until the engine keeps it, then
@@ -315,6 +320,15 @@ async fn handshake(a: &Args) -> Result<(Stream, PublicKey, u64), Ended> {
     }
 }
 
+/// The round trip of the ping `answered` answers, if it is one still remembered; it and every
+/// older one are done with.
+fn pong(sent: &mut VecDeque<(u32, Instant)>, answered: u32) -> Option<Duration> {
+    let i = sent.iter().position(|(s, _)| *s == answered)?;
+    let rtt = sent.get(i).map(|(_, at)| at.elapsed());
+    sent.drain(..=i);
+    rtt
+}
+
 async fn live(a: &mut Args, mut stream: Stream, to_input: &mut ToInput) -> Ended {
     let report = {
         let (reports, id) = (a.reports.clone(), a.id);
@@ -332,6 +346,8 @@ async fn live(a: &mut Args, mut stream: Stream, to_input: &mut ToInput) -> Ended
     // Until the peer's first ping says otherwise, expect its idle interval.
     let mut theirs = a.timings.idle_ping;
     let mut suspect = false;
+    let mut streams =
+        Streams::new(a.conn.clone(), a.key, a.id, a.clips.clone(), Arc::clone(&a.clip));
     loop {
         // Silent for three of the peer's intervals; or, sooner when we are the faster pinger, our
         // oldest ping since we last heard anything unanswered for three of ours.
@@ -354,6 +370,7 @@ async fn live(a: &mut Args, mut stream: Stream, to_input: &mut ToInput) -> Ended
                         return stream_ended(&a.conn, &e);
                     }
                 }
+                Some(ToSession::Clip(o)) => streams.out(o),
                 Some(ToSession::Bye) | None => {
                     stream.bye().await;
                     a.conn.close(close::BYE, b"");
@@ -380,12 +397,8 @@ async fn live(a: &mut Args, mut stream: Stream, to_input: &mut ToInput) -> Ended
                         }
                     }
                     Message::Pong { seq: answered } => {
-                        if let Some(i) = sent.iter().position(|(s, _)| *s == answered) {
-                            if let Some((_, at)) = sent.get(i) {
-                                report(Report::Rtt(at.elapsed()));
-                            }
-                            // This one and every older one are done with.
-                            sent.drain(..=i);
+                        if let Some(rtt) = pong(&mut sent, answered) {
+                            report(Report::Rtt(rtt));
                         }
                     }
                     Message::Bye => {
@@ -416,6 +429,7 @@ async fn live(a: &mut Args, mut stream: Stream, to_input: &mut ToInput) -> Ended
                 report(Report::Suspect(true));
                 to_input.suspect(true);
             }
+            e = streams.serve(to_input.kept) => return e,
             e = a.conn.closed() => return ended(&e),
         }
     }
