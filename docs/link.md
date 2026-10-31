@@ -145,7 +145,7 @@ see the refusal), so the dialer writes `Hello` at once, and the answerer replies
 - **Clipboard (M5)** traffic never travels on stream 0, announcements included (they carry
   targets up to 64 KiB). Each announcement and each transfer has its own stream, and the
   clipboard's unacknowledged bytes are kept well below the connection's send window, so stream 0
-  always has room.
+  always has room. The details are docs/sharing.md, "Streams".
 - The first message on stream 0, both ways, is `Hello { version, run, name }`: the protocol
   version (it must equal ours, beyond the ALPN check), the run id, and the machine's hostname. The name is for display
   only, and is shown with control and non-printing characters replaced, as sources are

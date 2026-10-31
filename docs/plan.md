@@ -397,6 +397,10 @@ removed or moved), and edges between a machine's own monitors are never barriers
 
 ### 5.4 Clipboard sharing
 
+**Superseded in part (M5 design, 2026-10-31):** docs/sharing.md claims the clipboard at once, not
+on the pointer's arrival, fetches every entry whole in the background, and keeps `clear-history`
+local, by the owner's decision; the rest stands as refined there.
+
 Clipboard is symmetric: any machine may copy and any may paste.
 
 - When an entry is captured on machine A, A announces it to every peer: an id, its targets and

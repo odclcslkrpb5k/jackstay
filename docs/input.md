@@ -375,6 +375,11 @@ wheel scrolls on xiphos; crossings near xiphos's top, against Synergy's habit. A
 (2026-10-29): xiphos has a US layout without `caps:super`, a 500 ms repeat delay, and no pointer
 device of its own.
 
+*Owner's report, 2026-10-31,* after the dogfooding fixes below: motion "performs at least as well
+as Synergy"; the trackball's wheel "works great on xiphos"; xiphos's top monitor does not cross on
+its edges, as expected (athena is beside xiphos's lower monitors only). Still to measure: the
+added latency p99 on the LAN, and whether athena's processed motion is accelerated.
+
 ## Slices
 
 1. The `input` crate (layouts, edges, fractions, virtual pointer, spans, held state), the
