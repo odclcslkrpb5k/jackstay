@@ -6,8 +6,8 @@ clipboard sharing must do; this says how, and where it departs from the plan (ma
 link (docs/link.md) and on the selection engine (docs/selection.md).
 
 Status: **design, revised after red-team pass 1** (findings and resolutions at the end); slice 1
-(`proto`), slice 2 (`net`), slice 3 (`selection`) and slice 4 (`clip`, `store`) built; slice 5's
-daemon logic (5a) and interfaces (5b) built, its two-daemon tests to come. Code facts are as read on 2026-10-31 at 2c9e386.
+(`proto`), slice 2 (`net`), slice 3 (`selection`) and slice 4 (`clip`, `store`) built; slice 5 built
+(5a the daemon's logic, 5b its interfaces, 5c the two-daemon tests). Code facts are as read on 2026-10-31 at 2c9e386.
 
 ## What exists to build on
 
@@ -282,7 +282,16 @@ A request for a pending target **waits**:
      still to come); `jackstay list` and the popup say "from xiphos"; `jackstay status` says
      whether sharing runs, is paused, or has targets still to come; the control fuzz corpus
      regrown (225 to 256 inputs, 180 s).
-   - 5c: the two-daemon tests.
+   - 5c: the two-daemon tests (`crates/jackstayd/tests/clipboard.rs`). **Built:** text both
+     ways and an image alone; a 16 MiB image pasted while it arrives (5 ms each way), and refused
+     at its deadline, never in part, when the link goes mid-fetch; a slow owner's copy kept, and
+     the newer of the two the clipboard on both; copies on both sides of a lost link ending with
+     the later; a delete reaching a pinned copy, and a machine that was away; a tool copying the
+     clipboard back on one machine making no loop; an owner giving the clipboard up emptying it
+     on both. Tested only on the daemon's state machine (`tests/sharing.rs`), where the order of
+     messages can be chosen: a delete overtaking its announcement, an entry deleted while it is
+     fetched, a waiting paste moving its fetch first. A requestor that gives up after 1 s
+     (Firefox) is not tested: what it sees is the same refusal, sooner.
 6. Acceptance on the owner's LAN; the owner uninstalls Synergy (plan §6, M5).
 
 ## As built (5a)
@@ -381,3 +390,14 @@ caught. Survived, and removed as redundant: checking inline bytes against their 
 Each control removed, and its crate's tests run: the summary's `from_peer`, `Entries` carrying it,
 `List` leaving it out (version 5's clients), the CLI's "from" and the popup's, and `jackstay status`
 asking about sharing: all caught.
+
+### Slice 5c plants, 2026-10-31
+
+Each control removed, and the two-daemon tests run: holding a peer's change while a capture
+runs, applying a peer's empty clipboard, replaying forgets on a new session, an equal digest
+being no change, a received forget deleting the entry, `Clipboard::update` serving a fetched
+target in place, and the order of changes: all caught. Writing them found one fault in the test's
+own slow owner, none in the daemon: it stopped when it lost the clipboard, leaving a paste it had
+been asked for unanswered (an `xclip` waiting for ever); applications answer what they were asked,
+and so does it now. The journal now says when a peer's change becomes the clipboard, waits for a
+capture here, or arrives older than it and goes to history only.

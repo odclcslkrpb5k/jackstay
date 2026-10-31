@@ -644,6 +644,7 @@ impl Sharing {
         }
         if tracker.capturing() {
             if change.newer_than(self.held.as_ref()) {
+                log("a change from a peer waits for the copy being captured here");
                 self.held = Some(change);
             }
             return;
@@ -652,13 +653,18 @@ impl Sharing {
     }
 
     fn apply(&mut self, tracker: &mut Tracker, change: Change, out: &mut Vec<Do>) {
+        let who = change.origin.fingerprint();
         match change.digest {
-            None => out.push(Do::Empty),
+            None => {
+                log(&format!("{who}: the clipboard emptied"));
+                out.push(Do::Empty);
+            }
             Some(d) => {
                 let Some(id) = tracker.history().find_digest(&d) else { return };
                 if tracker.select(id, change.tick).is_none() {
                     return;
                 }
+                log(&format!("{who}: {} is the clipboard", short(&d)));
                 out.push(Do::Serve(id));
                 out.push(Do::Save);
             }
@@ -668,10 +674,12 @@ impl Sharing {
 
     /// The change held while a capture ran, if it is still the newer.
     fn apply_held(&mut self, tracker: &mut Tracker, out: &mut Vec<Do>) {
-        if let Some(held) = self.held.take()
-            && held.newer_than(self.state.as_ref())
-        {
-            self.apply(tracker, held, out);
+        if let Some(held) = self.held.take() {
+            if held.newer_than(self.state.as_ref()) {
+                self.apply(tracker, held, out);
+            } else {
+                log("a change from a peer, older than the copy captured meanwhile: history only");
+            }
         }
     }
 
