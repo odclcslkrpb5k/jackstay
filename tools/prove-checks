@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Proves each gate control still bites: plants one bug per control in a copy of the tree and
 # asserts that ./check fails, and fails at that control's step (TS-5 for checkers, CP-3).
-# Run inside the dev container: ./dev tools/prove-checks [plant-name...]
+# Run inside the dev container: ./dev tools/prove-checks [--shard K/N] [plant-name...]
+#
+# One copy serves every plant, in turn: before each, only the files that differ from the tree are
+# rewritten (and whatever a plant added is removed), so cargo rebuilds only what the plant, or
+# its undoing, touched. The copy and its build cache stay under .cache/plants for the next run.
+# A single copy at a single path never shares its target directory with another tree (TS-8).
 # shellcheck disable=SC2329 # each plant_* function is called by name, below
 set -euo pipefail
 IFS=$'\n\t'
@@ -46,6 +51,10 @@ plant_lockfile_drift() {
 }
 plant_unformatted() {
   printf '\npub fn   planted( ) {}\n' >> crates/proto/src/lib.rs
+}
+# The daemon's tests are a step of their own, after the rest.
+plant_failing_daemon_test() {
+  printf '\n#[test]\nfn planted() {\n    assert_eq!(1, 2);\n}\n' >> crates/jackstayd/tests/paths.rs
 }
 plant_failing_test() {
   printf '\n#[test]\nfn planted() {\n    assert_eq!(1, 2);\n}\n' >> crates/proto/tests/sharing.rs
@@ -96,6 +105,9 @@ plant_empty_fuzz_corpus() {
   rm -f crates/proto/fuzz/corpus/link/*
 }
 
+# The plants that run tests (failing_test, empty_fuzz_corpus, empty_store_fuzz_corpus, and
+# failing_daemon_test, which runs all of them) sit at indices 10, 13, 15 and 16, so
+# `--shard K/4` gives each a shard of its own.
 # name | the gate step it must fail at | an extended regex its log must match, so a plant that
 # fails for some other reason (no network, an unrelated advisory) is not counted as proof
 plants=(
@@ -113,14 +125,59 @@ plants=(
   "unquoted_shell_variable|shell scripts (shellcheck)|SC2086"
   "broken_install|install script|autostart entry: Exec not set"
   "empty_fuzz_corpus|tests|only 0 link corpus inputs"
-  "empty_store_fuzz_corpus|tests|only 0 clipman corpus inputs"
   "broken_store_fuzz_target|fuzz targets build (crates/store/fuzz)|mismatched types"
+  "empty_store_fuzz_corpus|tests|only 0 clipman corpus inputs"
+  "failing_daemon_test|tests (the daemon)|test planted \.\.\. FAILED"
   "advisory_in_dependency|dependencies (cargo-deny, whole graph)|RUSTSEC-2020-0071"
   "advisory_in_dev_dependency|dependencies (cargo-deny, whole graph)|RUSTSEC-2020-0071"
   "disallowed_license_in_dev_dependency|dependencies (cargo-deny, whole graph)|license = \"MPL-2.0\""
 )
 
+shard=""
+if [[ "${1:-}" == --shard ]]; then
+  shard=${2:?--shard needs K/N}
+  shift 2
+  if ! [[ "$shard" =~ ^([0-9]+)/([0-9]+)$ ]] \
+    || (( BASH_REMATCH[1] < 1 || BASH_REMATCH[1] > BASH_REMATCH[2] )); then
+    printf 'bad shard: %s\n' "$shard"
+    exit 2
+  fi
+fi
 selected=("$@")
+# Plant i (from 0) belongs to shard (i mod N) + 1: every plant to exactly one shard.
+in_shard() {
+  [[ -z "$shard" ]] && return 0
+  local k=${shard%/*} n=${shard#*/}
+  (( $1 % n == k - 1 ))
+}
+
+copy="$work/tree"
+# Makes the copy hold exactly the tree's tracked files, as a repository with all of them staged.
+# A file is rewritten only if it differs, so it keeps its time otherwise and cargo sees no change.
+sync_copy() {
+  local f
+  local -A tracked=()
+  mkdir -p "$copy"
+  [[ -d "$copy/.git" ]] || git -C "$copy" init --quiet
+  # What a plant made and git does not track (ignored files, the copy's own .cache, stay).
+  git -C "$copy" clean -fdq
+  while IFS= read -r -d '' f; do
+    tracked[$f]=1
+    if ! cmp -s -- "$f" "$copy/$f"; then
+      mkdir -p -- "$copy/$(dirname -- "$f")"
+      cp -- "$f" "$copy/$f"
+    fi
+  done < <(git ls-files -z)
+  # What a plant added and staged, or the tree no longer tracks.
+  while IFS= read -r -d '' f; do
+    [[ -n "${tracked[$f]:-}" ]] || rm -f -- "$copy/$f"
+  done < <(git -C "$copy" ls-files -z)
+  # And the directories that left empty: a crate directory without its manifest breaks the
+  # workspace's `crates/*`.
+  find "$copy" -mindepth 1 \( -path "$copy/.git" -o -path "$copy/.cache" \) -prune \
+    -o -type d -empty -print0 | xargs -0 -r rmdir -p --ignore-fail-on-non-empty 2>/dev/null || true
+  git -C "$copy" add --all
+}
 is_selected() {
   local s
   (( ${#selected[@]} == 0 )) && return 0
@@ -135,35 +192,37 @@ done
 
 failures=0
 ran=0
+index=-1
 for entry in "${plants[@]}"; do
+  index=$((index + 1))
   name=${entry%%|*}
   rest=${entry#*|}
   want=${rest%%|*}
   reason=${rest#*|}
-  is_selected "$name" || continue
+  if ! is_selected "$name" || ! in_shard "$index"; then continue; fi
   ran=$((ran + 1))
-  copy="$work/$name"
-  rm -rf "$copy"
-  mkdir -p "$copy"
-  git ls-files -z | xargs -0 cp --parents -t "$copy"
+  log="$work/$name.log"
+  sync_copy
   (cd "$copy" && "plant_$name")
-  # The gate reads tracked files (git ls-files), so the copy is a repository with the plant staged.
-  (cd "$copy" && git init --quiet && git add --all)
+  # The gate reads tracked files (git ls-files), so the plant is staged.
+  git -C "$copy" add --all
   set +e
-  (cd "$copy" && ./check) > "$copy.log" 2>&1
+  (cd "$copy" && ./check) > "$log" 2>&1
   status=$?
   set -e
-  got=$(grep '^== ' "$copy.log" | tail -1 | sed 's/^== //' || true)
-  if (( status != 0 )) && [[ "$got" == "$want" ]] && grep -Eq "$reason" "$copy.log"; then
+  got=$(grep '^== ' "$log" | tail -1 | sed 's/^== //' || true)
+  if (( status != 0 )) && [[ "$got" == "$want" ]] && grep -Eq "$reason" "$log"; then
     printf 'ok    %-34s exit %d at "%s"\n' "$name" "$status" "$got"
   else
     printf 'FAIL  %-34s exit %d at "%s", wanted a failure at "%s" matching /%s/ (log: %s)\n' \
-      "$name" "$status" "$got" "$want" "$reason" "$copy.log"
+      "$name" "$status" "$got" "$want" "$reason" "$log"
     # CI keeps no files: what failed instead must show here.
-    grep -E 'panicked at|FAILED|^error' "$copy.log" | head -20 | sed 's/^/      /' || true
+    grep -E 'panicked at|FAILED|^error' "$log" | head -20 | sed 's/^/      /' || true
     failures=1
   fi
 done
 cd "$root"
+# The copy is left as the tree is, not as the last plant made it.
+sync_copy
 if (( ran == 0 )); then printf 'no plants ran\n'; exit 2; fi
 exit "$failures"

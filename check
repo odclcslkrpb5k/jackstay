@@ -111,9 +111,8 @@ for f in "${fuzz[@]}"; do
   step "format (fuzz targets, ${f%/Cargo.toml})" cargo fmt --manifest-path "$f" --check
 done
 step "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
-# Every test binary, past a failing one: a flaky test elsewhere then cannot hide a real failure
-# (a planted one, in prove-checks: CI, 2026-10-30).
-step "tests" cargo test --workspace --locked --no-fail-fast
+# The quick steps before the tests, which take minutes: a broken install or dependency fails in
+# seconds, and prove-checks' plants for them never wait for the tests.
 step "install script" install_script
 step "dependencies (cargo-deny, whole graph)" deny_whole_graph
 for f in "${fuzz[@]}"; do
@@ -121,4 +120,10 @@ for f in "${fuzz[@]}"; do
   step "dependencies (cargo-deny, fuzz targets, ${f%/Cargo.toml})" \
     cargo deny --manifest-path "$f" --config deny.toml --locked check
 done
+# Every test binary, past a failing one: a flaky test elsewhere then cannot hide a real failure
+# (a planted one, in prove-checks: CI, 2026-10-30). The daemon's own last: they take four of the
+# five minutes (two machines, the browsers and office suites), and a failure elsewhere stops the
+# gate before them.
+step "tests" cargo test --workspace --exclude jackstayd --locked --no-fail-fast
+step "tests (the daemon)" cargo test --package jackstayd --locked --no-fail-fast
 printf '\n== all checks passed\n'
