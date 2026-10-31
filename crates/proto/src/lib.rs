@@ -15,16 +15,16 @@
     clippy::unimplemented
 )]
 
-mod announce;
 pub mod control;
 mod error;
-mod frame;
 pub mod link;
 mod reader;
+pub mod sharing;
 
-pub use announce::{
-    Announce, EntryId, MAX_INLINE_LEN, MAX_TARGET_NAME_LEN, MAX_TARGETS, Target, TargetName,
-};
 pub use error::{DecodeError, LimitError};
-pub use frame::{FRAME_HEADER_LEN, MAX_PAYLOAD_LEN, Message, decode, encode};
 pub use reader::Reader;
+
+/// Frame header: payload length (u32, big-endian), then message kind (u8).
+pub const FRAME_HEADER_LEN: usize = 5;
+/// The largest payload a control frame may carry.
+pub const MAX_PAYLOAD_LEN: u32 = 1024 * 1024;

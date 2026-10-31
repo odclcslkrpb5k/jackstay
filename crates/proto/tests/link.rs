@@ -24,7 +24,7 @@ fn bytes(m: &Message) -> Vec<u8> {
 fn the_layout_is_as_documented() {
     assert_eq!(
         bytes(&Message::Hello { version: VERSION, run: 0x0102, name: "ab".into() }),
-        [0, 0, 0, 13, 1, 0, 3, 0, 0, 0, 0, 0, 0, 1, 2, 2, b'a', b'b']
+        [0, 0, 0, 13, 1, 0, 4, 0, 0, 0, 0, 0, 0, 1, 2, 2, b'a', b'b']
     );
     assert_eq!(
         bytes(&Message::Ping { seq: 7, interval_ms: 1000 }),
@@ -125,7 +125,7 @@ fn a_frame_beyond_its_kinds_limit_is_refused_from_the_header() {
 #[test]
 fn an_unknown_kind_is_refused_from_the_header() {
     assert_eq!(decode(&[0, 0, 0, 0, 0]), Err(DecodeError::UnknownKind(0)));
-    assert_eq!(decode(&[0, 0, 0, 0, 18]), Err(DecodeError::UnknownKind(18)));
+    assert_eq!(decode(&[0, 0, 0, 0, 23]), Err(DecodeError::UnknownKind(23)));
     assert_eq!(decode(&[0, 0, 0, 0, 64]), Err(DecodeError::UnknownKind(64)));
 }
 

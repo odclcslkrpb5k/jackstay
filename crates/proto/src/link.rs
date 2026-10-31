@@ -4,11 +4,12 @@
 //! payload limit, checked from the 5-byte header, so a peer can never make the receiver wait for,
 //! or buffer, more than the largest message of the kind it named.
 
+use crate::sharing::{self, Announce, Name, Sha256};
 use crate::{DecodeError, FRAME_HEADER_LEN, LimitError, Reader};
 
 /// The link protocol version this code speaks; a peer's [`Message::Hello`] must carry the same.
-/// 2 added input sharing's kinds; 3 added [`Message::Entered`].
-pub const VERSION: u16 = 3;
+/// 2 added input sharing's kinds; 3 added [`Message::Entered`]; 4 clipboard sharing's.
+pub const VERSION: u16 = 4;
 /// The longest machine name in a [`Message::Hello`], in bytes.
 pub const MAX_NAME_LEN: usize = 255;
 /// The shortest interval a [`Message::Ping`] may announce, in milliseconds.
@@ -197,6 +198,27 @@ pub enum Message {
         span: u32,
         keymap: bool,
     },
+    /// Clipboard sharing (docs/sharing.md, "Messages"): an entry that is the clipboard now, or
+    /// was, on a stream of its own.
+    Announce(Box<Announce>),
+    /// The clipboard was cleared at `tick`, or its owner gave it up.
+    Emptied {
+        tick: u64,
+    },
+    /// Delete these entries everywhere (1 to [`sharing::MAX_FORGETS`]).
+    Forget {
+        tick: u64,
+        digests: Vec<Sha256>,
+    },
+    /// Asks for one target of an announced entry, on a stream of its own.
+    Fetch {
+        digest: Sha256,
+        name: Name,
+    },
+    /// The answer to [`Message::Fetch`]: if `held`, the target's bytes follow, the stream's rest.
+    Answer {
+        held: bool,
+    },
 }
 
 const HELLO: u8 = 1;
@@ -236,7 +258,7 @@ fn max_payload(kind: u8) -> Option<u32> {
         PING | BUTTON | KEY => Some(6),
         LEAVE => Some(7),
         LOCK | ENTERED => Some(5),
-        _ => None,
+        _ => sharing::max_payload(kind),
     }
 }
 
@@ -367,14 +389,19 @@ fn encode_input(message: &Message, p: &mut Vec<u8>) -> Result<u8, LimitError> {
             p.push(u8::from(*keymap));
             ENTERED
         }
-        // Every other kind is encoded by `encode`.
+        // Every other kind is encoded by `encode` or `sharing::encode`.
         Message::Hello { .. }
         | Message::Ping { .. }
         | Message::Pong { .. }
         | Message::Bye
         | Message::Commit { .. }
         | Message::Reveal { .. }
-        | Message::Confirm => return Err(LimitError::UnknownCode { code: 0 }),
+        | Message::Confirm
+        | Message::Announce(_)
+        | Message::Emptied { .. }
+        | Message::Forget { .. }
+        | Message::Fetch { .. }
+        | Message::Answer { .. } => return Err(LimitError::UnknownCode { code: 0 }),
     })
 }
 
@@ -415,7 +442,10 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), LimitError> {
             REVEAL
         }
         Message::Confirm => CONFIRM,
-        _ => encode_input(message, &mut p)?,
+        _ => match sharing::encode(message, &mut p)? {
+            Some(kind) => kind,
+            None => encode_input(message, &mut p)?,
+        },
     };
     // Every payload above is within its kind's limit, so the u32 conversion cannot fail.
     let len = u32::try_from(p.len()).map_err(|_| LimitError::PayloadTooLarge { len: p.len() })?;
@@ -425,7 +455,7 @@ pub fn encode(message: &Message, out: &mut Vec<u8>) -> Result<(), LimitError> {
     Ok(())
 }
 
-fn u16_be(r: &mut Reader<'_>) -> Result<u16, DecodeError> {
+pub(crate) fn u16_be(r: &mut Reader<'_>) -> Result<u16, DecodeError> {
     let pair: [u8; 2] = r.take(2)?.try_into().map_err(|_| DecodeError::Truncated)?;
     Ok(u16::from_be_bytes(pair))
 }
@@ -439,7 +469,7 @@ fn bytes32(r: &mut Reader<'_>) -> Result<[u8; NONCE_LEN], DecodeError> {
 }
 
 /// A flag byte that must be 0 or 1, so that every frame has one encoding.
-fn flag(r: &mut Reader<'_>) -> Result<bool, DecodeError> {
+pub(crate) fn flag(r: &mut Reader<'_>) -> Result<bool, DecodeError> {
     match r.u8()? {
         0 => Ok(false),
         1 => Ok(true),
@@ -556,7 +586,7 @@ pub fn decode(buf: &[u8]) -> Result<Option<(Message, usize)>, DecodeError> {
         EXIT => Message::Exit { span: r.u32()? },
         LOCK => Message::Lock { span: r.u32()?, on: flag(&mut r)? },
         ENTERED => Message::Entered { span: r.u32()?, keymap: flag(&mut r)? },
-        other => return Err(DecodeError::UnknownKind(other)),
+        other => sharing::decode(other, &mut r)?.ok_or(DecodeError::UnknownKind(other))?,
     };
     r.finish()?;
     Ok(Some((message, used)))

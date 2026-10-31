@@ -5,8 +5,8 @@ clipboard sharing must do; this says how, and where it departs from the plan (ma
 **Departs**, each the owner's decision of 2026-10-31 or a red-team resolution). It rides on the
 link (docs/link.md) and on the selection engine (docs/selection.md).
 
-Status: **design, revised after red-team pass 1** (findings and resolutions at the end). Nothing
-built. Code facts are as read on 2026-10-31 at 2c9e386.
+Status: **design, revised after red-team pass 1** (findings and resolutions at the end); slice 1
+(`proto`) built. Code facts are as read on 2026-10-31 at 2c9e386.
 
 ## What exists to build on
 
@@ -84,16 +84,20 @@ built. Code facts are as read on 2026-10-31 at 2c9e386.
 | `Emptied` | any → peer | tick: the clipboard was cleared, or its owner gave it up |
 | `Forget` | any → peer | tick, then 1 to 1000 digests: delete these entries everywhere |
 | `Fetch` | peer → announcer | digest, target name |
-| `Data` | announcer → peer | the bytes, the stream's rest; or `Gone` (not held) |
+| `Answer` | announcer → peer | held (u8); if held, the target's bytes follow, the stream's rest |
 
 - **Inline.** An announcement carries targets of up to 64 KiB each, in the capture's order (text
   first), until 512 KiB in all. The frame's limit is 1 MiB.
-- Decoding refuses a name or type outside Latin-1 or past 4096 bytes, a format other than 8, 16
-  or 32, an inline length that differs from its size, a duplicate name, and a digest that does
-  not match the targets. The receiver refuses a target past its per-target limit as `TooLarge`.
-- `Data` has no size of its own: the fetcher knows it from the announcement, reads exactly that
-  many bytes into a buffer of that size, checks the SHA-256, and treats a stream that ends short,
-  runs long, or does not hash as failed.
+- Decoding refuses an empty name or type, one past 4096 bytes or holding NUL (every other byte
+  is a Latin-1 character), a format other than 8, 16 or 32, an inline target past 64 KiB (before
+  its bytes are read), more than 512 KiB inline in all, no targets, and a duplicate name. `proto`
+  does not hash: the **receiver** refuses an announcement whose digest does not match its targets,
+  or whose inline bytes do not match their SHA-256, and a target past its per-target limit
+  (`TooLarge`). An `Announce` past 1 MiB (255 targets with long names) is refused when built; the
+  sender leaves out targets from the end until it fits.
+- The bytes after `Answer { held }` have no size of their own: the fetcher knows it from the
+  announcement, reads exactly that many into a buffer of that size, checks the SHA-256, and
+  treats a stream that ends short, runs long, or does not hash as failed.
 
 ## Streams
 
@@ -147,10 +151,10 @@ built. Code facts are as read on 2026-10-31 at 2c9e386.
   as held: an entry of a screenshot alone is an entry. A pending target whose blob is already in
   the store (the same bytes copied before) is filled from it, not fetched.
 - **Fetching:** one at a time per peer, the clipboard's own entry first, smallest target first; a
-  paste waiting (Paste) preempts any other fetch, which goes back to the queue. A fetch ends
-  `Gone` or failed: the target becomes `NotKept { OwnerFailed }`; while the entry is the
-  clipboard, the next session retries it. An entry evicted or deleted while being fetched
-  cancels its fetch.
+  paste waiting (Paste) preempts any other fetch, which goes back to the queue. A fetch that
+  ends not held (`Answer { held: false }`) or failed leaves the target `NotKept { OwnerFailed }`;
+  while the entry is the clipboard, the next session retries it. An entry evicted or deleted
+  while being fetched cancels its fetch.
 - Received bytes count against the history's limits as local ones do (512 MiB, 64 MiB a target):
   copies from a peer can evict older local entries, as more local copies would.
 - If the change is newer than the clipboard state, the clipboard thread serves the entry, pending
@@ -219,7 +223,7 @@ A request for a pending target **waits**:
 - `net`, through the relay, which gains a **bandwidth limit with a queue** (a 100 Mbit/s link
   with 50 ms of buffer): an announcement and a fetch; a 32 MiB fetch under loss and delay; the
   link dropped mid-fetch (failure, nothing partial); a peer sending too many streams, an
-  announcement flood, and `Data` too long, too short or not matching its hash; and **motion
+  announcement flood, and fetched bytes too long, too short or not matching their hash; and **motion
   latency during a 32 MiB fetch on the limited link**, against the input latency gate.
 - `selection`: deferred replies through the fake port: answered when the data lands, refused at
   the deadline, MULTIPLE waiting, the requestor dying while it waits, the clipboard moving on
@@ -243,8 +247,8 @@ A request for a pending target **waits**:
 
 ## Slices
 
-1. `proto`: the clipboard kinds, Latin-1 names, digests, link version 4; `announce.rs` and
-   `frame.rs` removed; fuzz.
+1. `proto`: the clipboard kinds, Latin-1 names, link version 4; `announce.rs` and `frame.rs`
+   (and their `decode` fuzz target) removed; the link fuzz corpus regrown. **Built.**
 2. `net`: clipboard streams, windows, limits, tasks, `Event::Clip` and `Handle::clip`; the
    relay's bandwidth limit; relay tests and the latency gate under load.
 3. `selection`: deferred replies, `Remote` targets, `Wanted`, `update` in place.

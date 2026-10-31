@@ -24,15 +24,10 @@ pub enum LimitError {
     TooManyTargets {
         count: usize,
     },
-    DuplicateTarget {
-        name: crate::TargetName,
-    },
+    DuplicateTarget,
     NoTargets,
-    TargetNameEmpty,
-    TargetNameTooLong {
-        len: usize,
-    },
-    TargetNameNotPrintableAscii,
+    /// A target or type name empty, too long, or holding NUL.
+    BadName,
     InlineTooLarge {
         len: usize,
     },
@@ -90,10 +85,8 @@ impl fmt::Display for LimitError {
         match self {
             LimitError::TooManyTargets { count } => write!(f, "{count} targets"),
             LimitError::NoTargets => write!(f, "no targets"),
-            LimitError::DuplicateTarget { name } => write!(f, "duplicate target {}", name.as_str()),
-            LimitError::TargetNameEmpty => write!(f, "empty target name"),
-            LimitError::TargetNameTooLong { len } => write!(f, "target name of {len} bytes"),
-            LimitError::TargetNameNotPrintableAscii => write!(f, "target name not printable ASCII"),
+            LimitError::DuplicateTarget => write!(f, "a target named twice"),
+            LimitError::BadName => write!(f, "target name empty, too long or holding NUL"),
             LimitError::InlineTooLarge { len } => write!(f, "inline data of {len} bytes"),
             LimitError::InlineSizeMismatch { size, inline_len } => {
                 write!(f, "target size {size} but {inline_len} inline bytes")
