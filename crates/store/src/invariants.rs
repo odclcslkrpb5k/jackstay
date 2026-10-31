@@ -5,12 +5,13 @@
 use std::collections::HashSet;
 
 use crate::clipman;
-use crate::index::{SavedData, encode, parse};
+use crate::index::{SavedData, VERSION, encode, parse};
 
 /// Reading never fails on a whole record, never yields two entries with one id, an id at or above
-/// `next-id`, or an entry `Content::new` would refuse (nothing kept, a name twice); writing what was
-/// read reads back to it, whole; and an input read whole, with nothing dropped or raised, is the
-/// one spelling of what it holds, so writing it gives back the input.
+/// `next-id`, or an entry `Content::new` would refuse (nothing kept or to come, a name twice);
+/// writing what was read reads back to it, whole; and an input of this version read whole, with
+/// nothing dropped or raised, is the one spelling of what it holds, so writing it gives back the
+/// input (one of the version before is written as this one).
 ///
 /// # Errors
 /// What failed, for the fuzzer's report.
@@ -21,7 +22,11 @@ pub fn index(input: &[u8]) -> Result<bool, String> {
         if !ids.insert(e.id) || e.id.get() >= p.index.next_id {
             return Err(format!("entry id {} repeats or is not below next-id", e.id.get()));
         }
-        if !e.targets.iter().any(|t| matches!(t.data, SavedData::Kept { .. })) {
+        if !e
+            .targets
+            .iter()
+            .any(|t| matches!(t.data, SavedData::Kept { .. } | SavedData::Remote { .. }))
+        {
             return Err(format!("entry {} keeps nothing", e.id.get()));
         }
         let mut names = HashSet::new();
@@ -34,7 +39,8 @@ pub fn index(input: &[u8]) -> Result<bool, String> {
     if again.index != p.index || !again.dropped.is_empty() || !again.complete {
         return Err("written index reads back differently".to_owned());
     }
-    if p.complete && p.dropped.is_empty() && !p.next_id_raised && written != input {
+    let current = input.starts_with(format!("jackstay-index {VERSION}\n").as_bytes());
+    if current && p.complete && p.dropped.is_empty() && !p.next_id_raised && written != input {
         return Err("a whole index has another spelling".to_owned());
     }
     Ok(true)

@@ -1,0 +1,14 @@
+jackstay-index 2
+next-id 44
+tick 1761300000123
+cleared 0
+forgot 01010101010101010101010101010101ry 43 17630 1761200000000
+entry 43 176300000100 0 1761300000123x
+target UTF8_STRING kept  8 abababababababababababababababababababababababababababababababab
+target image/png remote image/png Y 33177600 ababbabababab23x
+target UTF8_png remote image/png Y 33177600 ababbabababababababababababababababababababababab
+ 176ababababababababab
+target image/png remote image/png Y 33177600 ababbabababab23x
+target UTF8_STRING kept  8 ababUTF8_STRING kept  8 abababababababababababababababababababababababababababababababab
+target image/png remote image/png Y 33177600 ababbabababababababababababababababababababababab
+end

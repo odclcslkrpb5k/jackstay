@@ -58,9 +58,13 @@ pub fn summary(entry: &Entry, current: bool) -> Summary {
         .content()
         .targets()
         .iter()
-        .filter(|t| matches!(t.data, TargetData::Kept(_)))
+        .filter(|t| matches!(t.data, TargetData::Kept(_) | TargetData::Remote(_)))
         .fold(0, |k, t| k | kind_of(t.name.as_str()));
-    let Source::Local { owner_class } = entry.source();
+    // A peer's name until control version 6 says where an entry came from (docs/sharing.md).
+    let source = match entry.source() {
+        Source::Local { owner_class } => owner_class.as_deref(),
+        Source::Peer { name, .. } => Some(name.as_str()),
+    };
     Summary {
         id: entry.id().get(),
         copied_at_ms: entry.copied_at_ms(),
@@ -68,8 +72,9 @@ pub fn summary(entry: &Entry, current: bool) -> Summary {
         current,
         kinds: Kinds(kinds),
         size: entry.content().kept_len(),
-        // Any client can set its WM_CLASS: it is shown only after the same cleaning as a preview.
-        source: owner_class.as_deref().map(|c| truncate(&printable(c), MAX_SOURCE_LEN)),
+        // Any client can set its WM_CLASS, and any peer its name: shown only after the same
+        // cleaning as a preview.
+        source: source.map(|c| truncate(&printable(c), MAX_SOURCE_LEN)),
         preview: text_start(entry).map(|t| preview(&t)).unwrap_or_default(),
     }
 }

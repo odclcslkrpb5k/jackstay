@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
-use jackstay_clip::{Content, Entry, EntryId, History, Kept, Limits, NotKept, Target, TargetData};
+use jackstay_clip::{
+    Content, Entry, EntryId, History, Kept, Limits, Remote, Saved, Target, TargetData,
+};
 use jackstay_store::{BlobHash, Index, SavedData, SavedEntry, SavedTarget, encode, parse};
 
 /// The longest index read; far beyond any history the limits allow.
@@ -27,6 +29,8 @@ const VERIFY_BATCH: usize = 8;
 pub struct Snapshot {
     pub entries: Vec<Entry>,
     pub next_id: u64,
+    pub clock: u64,
+    pub forgotten: Vec<([u8; 32], u64)>,
     pub cleared: bool,
 }
 
@@ -36,6 +40,8 @@ impl Snapshot {
         Snapshot {
             entries: history.entries().cloned().collect(),
             next_id: history.next_id(),
+            clock: history.clock(),
+            forgotten: history.forgotten().copied().collect(),
             cleared,
         }
     }
@@ -273,7 +279,12 @@ pub fn load(paths: &Paths, limits: Limits, per_target: u64) -> Result<Loaded, St
         present.extend(blobs);
     }
     // Parsing guarantees unique ids below next-id, so restoring cannot refuse.
-    let Ok((history, evicted)) = History::restore(limits, entries, parsed.index.next_id) else {
+    let saved = Saved {
+        next_id: parsed.index.next_id,
+        clock: parsed.index.clock,
+        forgotten: parsed.index.forgotten,
+    };
+    let Ok((history, evicted)) = History::restore(limits, entries, saved) else {
         return Ok(empty(report, present));
     };
     report.evicted = evicted.len();
@@ -288,6 +299,12 @@ fn read_entry(paths: &Paths, saved: &SavedEntry, per_target: u64) -> Option<Entr
                 let bytes = read_capped(&paths.blob(blob), per_target).ok()?;
                 TargetData::Kept(Kept::new(type_name.clone(), *format, bytes).ok()?)
             }
+            SavedData::Remote { type_name, format, size, sha256 } => TargetData::Remote(Remote {
+                type_name: type_name.clone(),
+                format: *format,
+                size: *size,
+                sha256: sha256.bytes(),
+            }),
             SavedData::NotKept(reason) => TargetData::NotKept(*reason),
         };
         targets.push(Target { name: t.name.clone(), data });
@@ -299,6 +316,7 @@ fn read_entry(paths: &Paths, saved: &SavedEntry, per_target: u64) -> Option<Entr
         saved.source.clone(),
         saved.copied_at_ms,
         saved.pinned,
+        saved.tick,
     );
     Some(entry)
 }
@@ -393,9 +411,12 @@ impl Store {
                         }
                     }
                     (TargetData::NotKept(reason), _) => SavedData::NotKept(*reason),
-                    // Nothing makes a target still to come before the daemon shares (sharing
-                    // slice 5); the index learns to keep one in slice 4 (docs/sharing.md).
-                    (TargetData::Remote(_), _) => SavedData::NotKept(NotKept::OwnerFailed),
+                    (TargetData::Remote(r), _) => SavedData::Remote {
+                        type_name: r.type_name.clone(),
+                        format: r.format,
+                        size: r.size,
+                        sha256: BlobHash::from_bytes(r.sha256),
+                    },
                     (TargetData::Kept(_), None) => continue,
                 };
                 targets.push(SavedTarget { name: t.name.clone(), data });
@@ -404,6 +425,7 @@ impl Store {
                 id: entry.id(),
                 copied_at_ms: entry.copied_at_ms(),
                 pinned: entry.pinned(),
+                tick: entry.tick(),
                 source: entry.source().clone(),
                 targets,
             });
@@ -427,7 +449,13 @@ impl Store {
             sync_dir(&self.paths.blobs()).map_err(at(Step::WriteBlob))?;
             self.durable.extend(needed_names.iter().copied());
         }
-        let index = Index { next_id: snapshot.next_id, cleared: snapshot.cleared, entries: saved };
+        let index = Index {
+            next_id: snapshot.next_id,
+            clock: snapshot.clock,
+            forgotten: snapshot.forgotten.clone(),
+            cleared: snapshot.cleared,
+            entries: saved,
+        };
         self.write_index(&index)?;
         if urgent { Ok(()) } else { self.unlink_unneeded(&needed_names) }
     }

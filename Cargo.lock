@@ -616,6 +616,7 @@ name = "jackstay-clip"
 version = "0.0.0"
 dependencies = [
  "proptest",
+ "sha2",
 ]
 
 [[package]]

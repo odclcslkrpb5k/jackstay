@@ -27,7 +27,13 @@ impl EntryId {
 pub enum Source {
     /// An application on this machine; its owner window's `WM_CLASS` class, when it had one.
     Local { owner_class: Option<String> },
+    /// Another machine, which announced it (docs/sharing.md): its key, and its name then, for
+    /// display only.
+    Peer { key: [u8; 32], name: String },
 }
+
+/// The most deletions remembered (docs/sharing.md, "Forget").
+pub const MAX_FORGOTTEN: usize = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -37,6 +43,9 @@ pub struct Entry {
     /// Milliseconds since the Unix epoch, UTC.
     copied_at_ms: u64,
     pinned: bool,
+    /// When it last became the clipboard, on the hybrid clock that orders every machine's
+    /// changes alike (docs/sharing.md, "Order").
+    tick: u64,
 }
 
 impl Entry {
@@ -48,8 +57,14 @@ impl Entry {
         source: Source,
         copied_at_ms: u64,
         pinned: bool,
+        tick: u64,
     ) -> Self {
-        Entry { id, content, source, copied_at_ms, pinned }
+        Entry { id, content, source, copied_at_ms, pinned, tick }
+    }
+
+    #[must_use]
+    pub fn tick(&self) -> u64 {
+        self.tick
     }
 
     #[must_use]
@@ -123,29 +138,48 @@ impl std::error::Error for RestoreError {}
 /// exception is an entry still being captured ([`History::record_partial`]), which may equal
 /// another until [`History::update`] completes it; the caller completes every capture, even one cut
 /// short, before recording the next copy.
+/// What a saved history holds besides its entries.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Saved {
+    pub next_id: u64,
+    /// The hybrid clock's last tick ([`History::clock`]).
+    pub clock: u64,
+    /// Deletions remembered, oldest first ([`History::forgotten`]).
+    pub forgotten: Vec<([u8; 32], u64)>,
+}
+
 #[derive(Debug)]
 pub struct History {
     entries: VecDeque<Entry>,
     limits: Limits,
     next_id: u64,
+    clock: u64,
+    forgotten: VecDeque<([u8; 32], u64)>,
 }
 
 impl History {
     #[must_use]
     pub fn new(limits: Limits) -> Self {
-        History { entries: VecDeque::new(), limits, next_id: 1 }
+        History {
+            entries: VecDeque::new(),
+            limits,
+            next_id: 1,
+            clock: 0,
+            forgotten: VecDeque::new(),
+        }
     }
 
     /// Rebuilds a saved history. Entries are newest first; limits are applied, and what they evict
-    /// is returned.
+    /// is returned. The clock is set past every entry's tick.
     ///
     /// # Errors
     /// A [`RestoreError`] if ids repeat or `next_id` would let one be reused.
     pub fn restore(
         limits: Limits,
         entries: Vec<Entry>,
-        next_id: u64,
+        saved: Saved,
     ) -> Result<(Self, Vec<Entry>), RestoreError> {
+        let Saved { next_id, clock, forgotten } = saved;
         let mut seen = HashSet::with_capacity(entries.len());
         if let Some(dup) = entries.iter().find(|e| !seen.insert(e.id)) {
             return Err(RestoreError::DuplicateId(dup.id));
@@ -155,7 +189,11 @@ impl History {
         {
             return Err(RestoreError::NextIdTooLow { next_id, highest });
         }
-        let mut history = History { entries: entries.into(), limits, next_id: next_id.max(1) };
+        let clock = entries.iter().map(|e| e.tick).fold(clock, u64::max);
+        let skip = forgotten.len().saturating_sub(MAX_FORGOTTEN);
+        let forgotten = forgotten.into_iter().skip(skip).collect();
+        let mut history =
+            History { entries: entries.into(), limits, next_id: next_id.max(1), clock, forgotten };
         let evicted = history.enforce_limits();
         Ok((history, evicted))
     }
@@ -164,6 +202,50 @@ impl History {
     #[must_use]
     pub fn next_id(&self) -> u64 {
         self.next_id
+    }
+
+    /// The hybrid clock's last tick: the largest this machine has used or seen.
+    #[must_use]
+    pub fn clock(&self) -> u64 {
+        self.clock
+    }
+
+    /// The next tick for a change made at wall-clock `now_ms` (docs/sharing.md, "Order"): later
+    /// than any tick used or seen, and the wall clock's when that is later still.
+    ///
+    /// # Panics
+    /// When the clock reaches `u64::MAX`, which a tick refused a day ahead of the wall clock can
+    /// never bring it near.
+    pub fn next_tick(&mut self, now_ms: u64) -> u64 {
+        let next = self.clock.checked_add(1).expect("the clock ran out").max(now_ms);
+        self.clock = next;
+        next
+    }
+
+    /// A tick another machine used: ours stay later.
+    pub fn observe(&mut self, tick: u64) {
+        self.clock = self.clock.max(tick);
+    }
+
+    /// Deletions remembered, oldest first: each entry's digest and the deletion's tick.
+    pub fn forgotten(&self) -> impl ExactSizeIterator<Item = &([u8; 32], u64)> {
+        self.forgotten.iter()
+    }
+
+    /// Remembers that the entry with `digest` was deleted at `tick`: an announcement of it no
+    /// newer is refused ([`History::was_forgotten`]). The last [`MAX_FORGOTTEN`] are kept.
+    pub fn remember_forgotten(&mut self, digest: [u8; 32], tick: u64) {
+        self.forgotten.retain(|(d, _)| *d != digest);
+        self.forgotten.push_back((digest, tick));
+        while self.forgotten.len() > MAX_FORGOTTEN {
+            self.forgotten.pop_front();
+        }
+    }
+
+    /// Whether an announcement of `digest` at `tick` comes from before its deletion.
+    #[must_use]
+    pub fn was_forgotten(&self, digest: &[u8; 32], tick: u64) -> bool {
+        self.forgotten.iter().any(|(d, t)| d == digest && tick <= *t)
     }
 
     /// Entries, newest first.
@@ -193,18 +275,48 @@ impl History {
     /// # Panics
     /// After 2^64 - 1 new entries, rather than reuse an id.
     pub fn record(&mut self, content: Arc<Content>, source: Source, copied_at_ms: u64) -> Recorded {
+        let tick = self.next_tick(copied_at_ms);
         if let Some(at) = self.entries.iter().position(|e| e.content.same_kept(&content))
             && let Some(mut entry) = self.entries.remove(at)
         {
             entry.source = source;
             entry.copied_at_ms = copied_at_ms;
+            entry.tick = tick;
             let id = entry.id;
             self.entries.push_front(entry);
             return Recorded { id, evicted: self.enforce_limits() };
         }
         let id = self.take_id();
-        self.entries.push_front(Entry { id, content, source, copied_at_ms, pinned: false });
+        self.entries.push_front(Entry { id, content, source, copied_at_ms, pinned: false, tick });
         Recorded { id, evicted: self.enforce_limits() }
+    }
+
+    /// Records a copy another machine announced at `tick`, placed among the entries by its tick,
+    /// so an older one never goes in front of the clipboard's. If the history already holds the
+    /// same thing, nothing changes and that entry's id is returned. Refused (`None`) if it was
+    /// deleted after it was announced ([`History::was_forgotten`]).
+    ///
+    /// # Panics
+    /// After 2^64 - 1 new entries, rather than reuse an id.
+    pub fn record_received(
+        &mut self,
+        content: Arc<Content>,
+        source: Source,
+        copied_at_ms: u64,
+        tick: u64,
+    ) -> Option<Recorded> {
+        if self.was_forgotten(&content.digest(), tick) {
+            return None;
+        }
+        self.observe(tick);
+        if let Some(id) = self.find(&content) {
+            return Some(Recorded { id, evicted: Vec::new() });
+        }
+        let id = self.take_id();
+        let at = self.entries.iter().position(|e| e.tick < tick).unwrap_or(self.entries.len());
+        let entry = Entry { id, content, source, copied_at_ms, pinned: false, tick };
+        self.entries.insert(at, entry);
+        Some(Recorded { id, evicted: self.enforce_limits() })
     }
 
     /// Records the first part of a copy still being captured: always a new entry at the front, since
@@ -218,8 +330,9 @@ impl History {
         source: Source,
         copied_at_ms: u64,
     ) -> Recorded {
+        let tick = self.next_tick(copied_at_ms);
         let id = self.take_id();
-        self.entries.push_front(Entry { id, content, source, copied_at_ms, pinned: false });
+        self.entries.push_front(Entry { id, content, source, copied_at_ms, pinned: false, tick });
         Recorded { id, evicted: self.enforce_limits() }
     }
 
@@ -248,6 +361,7 @@ impl History {
         let this = self.entries.iter_mut().find(|e| e.id == id)?;
         merged.source = this.source.clone();
         merged.copied_at_ms = this.copied_at_ms;
+        merged.tick = this.tick;
         merged.pinned |= this.pinned;
         let merged_id = merged.id;
         *this = merged;
@@ -270,7 +384,9 @@ impl History {
             return None;
         }
         let id = self.take_id();
-        self.entries.push_back(Entry { id, content, source, copied_at_ms, pinned: false });
+        // Older than anything here: its copy time, never past the clock.
+        let tick = copied_at_ms.min(self.clock);
+        self.entries.push_back(Entry { id, content, source, copied_at_ms, pinned: false, tick });
         Some(Recorded { id, evicted: self.enforce_limits() })
     }
 

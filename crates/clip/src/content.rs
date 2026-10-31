@@ -1,6 +1,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+
 /// The longest target or type name accepted, in bytes. The protocol allows 65535; real names are
 /// under 100 bytes, and a longer one is skipped by the adapter rather than stored.
 pub const MAX_NAME_LEN: usize = 4096;
@@ -121,6 +123,12 @@ impl Kept {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// The SHA-256 of the bytes: what a [`Remote`] target names them by.
+    #[must_use]
+    pub fn sha256(&self) -> [u8; 32] {
+        Sha256::digest(&self.bytes).into()
+    }
 }
 
 impl fmt::Debug for Kept {
@@ -207,13 +215,38 @@ impl Content {
         })
     }
 
-    /// Whether two copies hold the same thing: the same set of kept targets, with the same types,
-    /// formats and bytes, and the same targets still to come from a peer. Target order and the
-    /// reasons a target was not kept do not matter. A target still to come never equals one kept:
-    /// that takes its hash (docs/sharing.md, "Shape").
+    /// Whether two copies hold the same thing: the same targets held or to come, with the same
+    /// types, formats and bytes. A target to come equals one kept whose bytes have its SHA-256.
+    /// Target order and the reasons a target was not kept do not matter.
     #[must_use]
     pub fn same_kept(&self, other: &Content) -> bool {
-        self.held_sorted() == other.held_sorted()
+        let (a, b) = (self.held_sorted(), other.held_sorted());
+        a.len() == b.len()
+            && a.iter().zip(&b).all(|((na, da), (nb, db))| na == nb && same_data(da, db))
+    }
+
+    /// What names this copy on every machine (docs/sharing.md, "Shape"): the SHA-256 of its
+    /// held and coming targets in name order, each as its name, type, format and SHA-256. Equal
+    /// for two contents exactly when [`Content::same_kept`] holds (SHA-256 collisions aside).
+    #[must_use]
+    pub fn digest(&self) -> [u8; 32] {
+        let mut h = Sha256::new();
+        for (name, data) in self.held_sorted() {
+            let (type_name, format, sha) = match data {
+                TargetData::Kept(k) => (&k.type_name, k.format, k.sha256()),
+                TargetData::Remote(r) => (&r.type_name, r.format, r.sha256),
+                TargetData::NotKept(_) => continue,
+            };
+            for n in [name, type_name] {
+                let latin1 = n.to_latin1();
+                // Names are at most 4096 bytes.
+                h.update(u16::try_from(latin1.len()).unwrap_or(u16::MAX).to_be_bytes());
+                h.update(&latin1);
+            }
+            h.update([format.bits()]);
+            h.update(sha);
+        }
+        h.finalize().into()
     }
 
     fn held_sorted(&self) -> Vec<(&TargetName, &TargetData)> {
@@ -237,6 +270,20 @@ impl Content {
                 TargetData::Remote(_) | TargetData::NotKept(_) => None,
             })
             .fold(0, u64::saturating_add)
+    }
+}
+
+/// Whether two held targets hold the same bytes, one of them perhaps still to come.
+fn same_data(a: &TargetData, b: &TargetData) -> bool {
+    match (a, b) {
+        (TargetData::Kept(k), TargetData::Remote(r))
+        | (TargetData::Remote(r), TargetData::Kept(k)) => {
+            k.type_name == r.type_name
+                && k.format == r.format
+                && u64::try_from(k.bytes.len()).ok() == Some(r.size)
+                && k.sha256() == r.sha256
+        }
+        _ => a == b,
     }
 }
 

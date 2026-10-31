@@ -33,13 +33,14 @@ fn entry(id: u64, targets: Vec<SavedTarget>) -> SavedEntry {
         id: EntryId::new(id),
         copied_at_ms: 1_761_300_000_000,
         pinned: false,
+        tick: 1_761_300_000_000,
         source: Source::Local { owner_class: None },
         targets,
     }
 }
 
 fn index(entries: Vec<SavedEntry>) -> Index {
-    Index { next_id: 100, cleared: false, entries }
+    Index { next_id: 100, clock: 0, forgotten: vec![], cleared: false, entries }
 }
 
 fn parsed(bytes: &[u8]) -> Parsed {
@@ -59,14 +60,14 @@ fn the_format_is_as_documented() {
         name: name(b"image/png"),
         data: SavedData::NotKept(NotKept::TooLarge),
     });
-    let i = Index { next_id: 43, cleared: true, entries: vec![e] };
+    let i = Index { next_id: 43, clock: 0, forgotten: vec![], cleared: true, entries: vec![e] };
     let hash = BlobHash::of(b"hi").hex();
     assert_eq!(
         text(&i),
         format!(
-            "jackstay-index 1\nnext-id 43\ncleared 1\nentry 42 1761300000000 1\nsource local \
-             Firefox\ntarget UTF8_STRING kept UTF8_STRING 8 {hash}\ntarget image/png not-kept \
-             too-large\nend\n"
+            "jackstay-index 2\nnext-id 43\ntick 0\ncleared 1\nentry 42 1761300000000 1 \
+             1761300000000\nsource local Firefox\ntarget UTF8_STRING kept UTF8_STRING 8 \
+             {hash}\ntarget image/png not-kept too-large\nend\n"
         )
     );
     assert_eq!(
@@ -118,7 +119,7 @@ fn a_bad_header_refuses_the_file() {
     assert_eq!(parse(b""), Err(HeaderError::NotAnIndex));
     assert_eq!(parse(b"hello\n"), Err(HeaderError::NotAnIndex));
     assert_eq!(
-        parse(b"jackstay-index 2\nnext-id 1\ncleared 0\nend\n"),
+        parse(b"jackstay-index 3\nnext-id 1\ncleared 0\nend\n"),
         Err(HeaderError::UnknownVersion)
     );
     assert_eq!(
@@ -142,7 +143,13 @@ fn a_bad_header_refuses_the_file() {
     assert_eq!(
         p,
         Parsed {
-            index: Index { next_id: 7, cleared: true, entries: vec![] },
+            index: Index {
+                next_id: 7,
+                clock: 0,
+                forgotten: vec![],
+                cleared: true,
+                entries: vec![]
+            },
             dropped: vec![],
             complete: true,
             next_id_raised: false,
@@ -165,30 +172,36 @@ fn a_bad_record_is_dropped_and_the_rest_kept() {
         entry(2, vec![kept("UTF8_STRING", b"b")]),
         entry(1, vec![kept("UTF8_STRING", b"a")]),
     ]);
-    // Lines: 0-2 header; record n (from 1) is lines 3n, 3n+1, 3n+2; then end.
+    // Lines: 0-3 header; record n (from 1) is lines 3n+1, 3n+2, 3n+3; then end.
     let bad = [
-        (3, "entry 3 1761300000000"),
-        (3, "entry 03 1761300000000 0"),
-        (3, "entry 18446744073709551615 1 0"),
-        (3, "entry 3 1 2"),
-        (4, "source remote"),
-        (4, "source local a b"),
-        (4, "source local %FF"),
-        (4, "source local %e9"),
-        (4, "source local %41"),
-        (4, "source local a%"),
-        (4, "source local a%4"),
-        (4, "source local a\u{e9}"),
-        (4, "garbage"),
-        (4, ""),
-        (5, "target UTF8_STRING kept UTF8_STRING 7 00"),
-        (5, "target UTF8_STRING kept UTF8_STRING 08 00"),
-        (5, "target UTF8_STRING not-kept tired"),
-        (5, "target UTF8_STRING copied"),
-        (5, "target %00 not-kept too-large"),
-        (5, "target UTF8_STRING not-kept too-large"),
-        (5, "target  not-kept too-large"),
-        (5, "source local"),
+        (4, "entry 3 1761300000000"),
+        (4, "entry 03 1761300000000 0"),
+        (4, "entry 18446744073709551615 1 0"),
+        (4, "entry 3 1 2"),
+        (4, "entry 3 1 0 x"),
+        (4, "entry 3 1 0 01"),
+        (5, "source remote"),
+        (5, "source local a b"),
+        (5, "source local %FF"),
+        (5, "source local %e9"),
+        (5, "source local %41"),
+        (5, "source local a%"),
+        (5, "source local a%4"),
+        (5, "source local a\u{e9}"),
+        (5, "source peer zz x"),
+        (5, "source peer"),
+        (5, "garbage"),
+        (5, ""),
+        (6, "target UTF8_STRING kept UTF8_STRING 7 00"),
+        (6, "target UTF8_STRING kept UTF8_STRING 08 00"),
+        (6, "target UTF8_STRING not-kept tired"),
+        (6, "target UTF8_STRING copied"),
+        (6, "target %00 not-kept too-large"),
+        (6, "target UTF8_STRING not-kept too-large"),
+        (6, "target  not-kept too-large"),
+        (6, "target A remote A 8 x 00"),
+        (6, "target A remote A 8 1"),
+        (6, "source local"),
     ];
     for (line, replacement) in bad {
         let p = parsed(&with_line(&i, line, replacement));
@@ -262,10 +275,22 @@ fn a_cut_short_file_keeps_what_it_has_and_says_so() {
 
 #[test]
 fn next_id_is_raised_above_every_id_read() {
-    let i = Index { next_id: 2, cleared: false, entries: vec![entry(5, vec![kept("a", b"a")])] };
+    let i = Index {
+        next_id: 2,
+        clock: 0,
+        forgotten: vec![],
+        cleared: false,
+        entries: vec![entry(5, vec![kept("a", b"a")])],
+    };
     let p = parsed(&encode(&i));
     assert_eq!((p.index.next_id, p.next_id_raised), (6, true));
-    let i = Index { next_id: 50, cleared: false, entries: vec![entry(5, vec![kept("a", b"a")])] };
+    let i = Index {
+        next_id: 50,
+        clock: 0,
+        forgotten: vec![],
+        cleared: false,
+        entries: vec![entry(5, vec![kept("a", b"a")])],
+    };
     let p = parsed(&encode(&i));
     assert_eq!((p.index.next_id, p.next_id_raised), (50, false));
     // A dropped record's id counts too, so it is never issued again.
@@ -285,6 +310,8 @@ fn ids_from_disk_stay_far_from_the_end_of_ids() {
     assert_eq!((p.index.entries.len(), p.index.next_id), (1, MAX_ID));
     let i = Index {
         next_id: MAX_ID,
+        clock: 0,
+        forgotten: vec![],
         cleared: false,
         entries: vec![entry(MAX_ID, vec![kept("a", b"a")])],
     };
@@ -306,6 +333,9 @@ fn arb_target() -> impl Strategy<Value = SavedTarget> {
         (0u8..3).prop_map(|r| SavedData::NotKept(
             [NotKept::NotCanonical, NotKept::TooLarge, NotKept::OwnerFailed][usize::from(r)]
         )),
+        (arb_name(), any::<u64>(), any::<[u8; 4]>()).prop_map(|(type_name, size, b)| {
+            SavedData::Remote { type_name, format: Format::Bits8, size, sha256: BlobHash::of(&b) }
+        }),
     ];
     (arb_name(), data).prop_map(|(name, data)| SavedTarget { name, data })
 }
@@ -315,36 +345,39 @@ fn arb_entry() -> impl Strategy<Value = SavedEntry> {
         0u64..MAX_ID,
         any::<u64>(),
         any::<bool>(),
-        proptest::option::of(".{0,8}"),
+        (proptest::option::of(".{0,8}"), proptest::option::of(any::<[u8; 32]>())),
         proptest::collection::vec(arb_target(), 0..4),
         arb_name(),
+        any::<u64>(),
     )
-        .prop_map(|(id, copied_at_ms, pinned, owner_class, mut targets, kept_name)| {
-            targets.retain(|t| t.name != kept_name);
-            targets.push(SavedTarget {
-                name: kept_name,
-                data: SavedData::Kept {
-                    type_name: name(b"T"),
-                    format: Format::Bits8,
-                    blob: BlobHash::of(b""),
-                },
-            });
-            let mut seen = std::collections::HashSet::new();
-            targets.retain(|t| seen.insert(t.name.clone()));
-            SavedEntry {
-                id: EntryId::new(id),
-                copied_at_ms,
-                pinned,
-                source: Source::Local { owner_class },
-                targets,
-            }
-        })
+        .prop_map(
+            |(id, copied_at_ms, pinned, (owner_class, peer), mut targets, kept_name, tick)| {
+                targets.retain(|t| t.name != kept_name);
+                targets.push(SavedTarget {
+                    name: kept_name,
+                    data: SavedData::Kept {
+                        type_name: name(b"T"),
+                        format: Format::Bits8,
+                        blob: BlobHash::of(b""),
+                    },
+                });
+                let mut seen = std::collections::HashSet::new();
+                targets.retain(|t| seen.insert(t.name.clone()));
+                let source = match peer {
+                    Some(key) => Source::Peer { key, name: owner_class.unwrap_or_default() },
+                    None => Source::Local { owner_class },
+                };
+                SavedEntry { id: EntryId::new(id), copied_at_ms, pinned, tick, source, targets }
+            },
+        )
 }
 
 proptest! {
     #[test]
     fn every_valid_index_round_trips(
         next_id in 0..=MAX_ID,
+        clock in any::<u64>(),
+        forgotten in proptest::collection::vec((any::<[u8; 32]>(), any::<u64>()), 0..4),
         cleared in any::<bool>(),
         entries in proptest::collection::vec(arb_entry(), 0..6),
     ) {
@@ -352,7 +385,7 @@ proptest! {
         let entries: Vec<SavedEntry> = entries.into_iter().filter(|e| seen.insert(e.id)).collect();
         let highest = entries.iter().map(|e| e.id.get()).max();
         let next_id = highest.map_or(next_id, |h| next_id.max(h + 1));
-        let i = Index { next_id, cleared, entries };
+        let i = Index { next_id, clock, forgotten, cleared, entries };
         let bytes = encode(&i);
         prop_assert_eq!(parse(&bytes), Ok(Parsed { index: i.clone(), dropped: vec![], complete: true, next_id_raised: false }));
         prop_assert_eq!(invariants::index(&bytes), Ok(true));
@@ -365,4 +398,69 @@ proptest! {
         prop_assert_eq!(invariants::index(&file).err(), None);
         prop_assert_eq!(invariants::index(&bytes).err(), None);
     }
+}
+
+#[test]
+fn a_version_1_index_is_read_with_copy_times_as_ticks() {
+    let hash = BlobHash::of(b"hi").hex();
+    let v1 = format!(
+        "jackstay-index 1\nnext-id 43\ncleared 0\nentry 42 1761300000000 1\nsource local\n\
+         target UTF8_STRING kept UTF8_STRING 8 {hash}\nend\n"
+    );
+    let p = parsed(v1.as_bytes());
+    assert_eq!((p.dropped.len(), p.complete), (0, true));
+    let e = &p.index.entries[0];
+    assert_eq!((e.tick, p.index.clock, p.index.forgotten.len()), (1_761_300_000_000, 0, 0));
+    // Written again, it is version 2, and reads back the same.
+    let again = encode(&p.index);
+    assert!(again.starts_with(b"jackstay-index 2\n"));
+    assert_eq!(parsed(&again).index, p.index);
+    // Version 2's words are not version 1's: a peer there drops the record.
+    let peer = format!(
+        "jackstay-index 1\nnext-id 43\ncleared 0\nentry 42 1 0\nsource peer {hash} x\n\
+         target A kept A 8 {hash}\nend\n"
+    );
+    assert_eq!(parsed(peer.as_bytes()).dropped, vec![1]);
+    let v3 = b"jackstay-index 3\nnext-id 1\ncleared 0\nend\n";
+    assert_eq!(parse(v3), Err(HeaderError::UnknownVersion));
+}
+
+#[test]
+fn peers_targets_to_come_and_deletions_remembered_are_kept() {
+    let sha = BlobHash::of(b"png");
+    let mut e = entry(
+        7,
+        vec![SavedTarget {
+            name: name(b"image/png"),
+            data: SavedData::Remote {
+                type_name: name(b"image/png"),
+                format: Format::Bits8,
+                size: 33_177_600,
+                sha256: sha,
+            },
+        }],
+    );
+    e.source = Source::Peer { key: [0xab; 32], name: "xiphos box".into() };
+    e.tick = 9;
+    let i = Index {
+        next_id: 8,
+        clock: 12,
+        forgotten: vec![([1; 32], 5), ([2; 32], 6)],
+        cleared: false,
+        entries: vec![e],
+    };
+    let t = text(&i);
+    let (one, two, key) = ("01".repeat(32), "02".repeat(32), "ab".repeat(32));
+    assert!(t.contains(&format!("forgot {one} 5\nforgot {two} 6\nentry 7")), "{t}");
+    assert!(t.contains(&format!("source peer {key} xiphos%20box\n")), "{t}");
+    assert!(
+        t.contains(&format!("target image/png remote image/png 8 33177600 {}", sha.hex())),
+        "{t}"
+    );
+    let p = parsed(t.as_bytes());
+    assert_eq!((p.index, p.dropped), (i, vec![]));
+    // An unreadable deletion is dropped alone.
+    let bad = t.replacen("forgot 01", "forgot zz", 1);
+    let p = parsed(bad.as_bytes());
+    assert_eq!((p.index.forgotten.len(), p.dropped, p.index.entries.len()), (1, vec![0], 1));
 }

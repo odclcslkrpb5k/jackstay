@@ -95,9 +95,13 @@ not a document; `~/.local/state` is less often backed up than `~/.local/share`.
   would let a clear made now be undone by the next start that reads the old one. Files are created with `O_NOFOLLOW |
   O_EXCL` (temporary names) and mode `0600`, then renamed.
 - `blobs/<sha256 hex>`: one file per distinct kept target's bytes.
-- `index`: a version line, the next entry id, a `cleared` flag, then one record per entry, newest
-  first: id, copied-at, pinned, source, and per target its name and either `kept <type> <format>
-  <sha256>` or `not-kept <reason>`, then an `end` line. Every field percent-escaped in one
+- `index`: a version line, the next entry id, the clock's last tick, a `cleared` flag, the
+  deletions remembered (`forgot <digest> <tick>`), then one record per entry, newest first: id,
+  copied-at, pinned, tick, source (`local [class]` or `peer <key> <name>`), and per target its
+  name and either `kept <type> <format> <sha256>`, `remote <type> <format> <size> <sha256>` (still
+  to come from a peer) or `not-kept <reason>`, then an `end` line. Version 2 (clipboard sharing,
+  docs/sharing.md); a version-1 index is read, each entry's tick its copy time, and written back as
+  2. Every field percent-escaped in one
   canonical spelling; parsed with no-panic code and fuzzed (BD-1, TS-16). The format, with an
   example, is defined in `crates/store/src/index.rs`. Reading raises `next-id` above every id read,
   and says whether the file ended where a written index ends.

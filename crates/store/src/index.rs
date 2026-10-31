@@ -2,15 +2,25 @@
 //! kept target (docs/daemon.md, "Storage").
 //!
 //! ```text
-//! jackstay-index 1
-//! next-id 43
+//! jackstay-index 2
+//! next-id 44
+//! tick 1761300000123
 //! cleared 0
-//! entry 42 1761300000000 1
+//! forgot <64 hex digits> 1761200000000
+//! entry 43 1761300000100 0 1761300000123
+//! source peer <64 hex digits> xiphos
+//! target UTF8_STRING kept UTF8_STRING 8 <64 hex digits>
+//! target image/png remote image/png 8 33177600 <64 hex digits>
+//! entry 42 1761300000000 1 1761300000000
 //! source local Firefox
 //! target UTF8_STRING kept UTF8_STRING 8 <64 hex digits>
 //! target image/png not-kept too-large
 //! end
 //! ```
+//!
+//! Version 2 added the clock (`tick`, and each entry's last), the deletions remembered (`forgot`),
+//! a peer as a source, and targets still to come from one (`remote`), for clipboard sharing
+//! (docs/sharing.md). Version 1, without them, is read too: each entry's tick is its copy time.
 //!
 //! Every field is one token in the canonical escaping of `escape.rs`. Reading salvages what it can:
 //! a bad record is dropped and counted, and the rest are kept; only a bad header refuses the file.
@@ -22,8 +32,8 @@ use jackstay_clip::{EntryId, Format, NotKept, Source, TargetName};
 use crate::BlobHash;
 use crate::escape::{escape, unescape};
 
-/// The index format this code writes and reads.
-pub const VERSION: u64 = 1;
+/// The index format this code writes; it reads this and the one before.
+pub const VERSION: u64 = 2;
 
 /// Ids and `next-id` read from disk stay below this, so a damaged file can never bring
 /// [`jackstay_clip::History`] near the end of its ids, where it stops rather than reuse one.
@@ -36,6 +46,10 @@ const MAGIC: &[u8] = b"jackstay-index";
 pub struct Index {
     /// The id the next new entry will get.
     pub next_id: u64,
+    /// The hybrid clock's last tick (docs/sharing.md, "Order").
+    pub clock: u64,
+    /// Deletions remembered, oldest first: each entry's digest and the deletion's tick.
+    pub forgotten: Vec<([u8; 32], u64)>,
     /// Whether the clipboard was cleared after the newest entry was copied, so nothing is to be put
     /// back on it at start.
     pub cleared: bool,
@@ -49,6 +63,8 @@ pub struct SavedEntry {
     /// Milliseconds since the Unix epoch, UTC.
     pub copied_at_ms: u64,
     pub pinned: bool,
+    /// When it last became the clipboard, on the hybrid clock.
+    pub tick: u64,
     pub source: Source,
     pub targets: Vec<SavedTarget>,
 }
@@ -61,7 +77,18 @@ pub struct SavedTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SavedData {
-    Kept { type_name: TargetName, format: Format, blob: BlobHash },
+    Kept {
+        type_name: TargetName,
+        format: Format,
+        blob: BlobHash,
+    },
+    /// Still to come from a peer: its size and the SHA-256 of its bytes.
+    Remote {
+        type_name: TargetName,
+        format: Format,
+        size: u64,
+        sha256: BlobHash,
+    },
     NotKept(NotKept),
 }
 
@@ -110,14 +137,31 @@ pub fn encode(index: &Index) -> Vec<u8> {
     let mut lines = vec![
         format!("{} {VERSION}", String::from_utf8_lossy(MAGIC)),
         format!("next-id {}", index.next_id),
+        format!("tick {}", index.clock),
         format!("cleared {}", u8::from(index.cleared)),
     ];
+    for (digest, tick) in &index.forgotten {
+        lines.push(format!("forgot {} {tick}", BlobHash::from_bytes(*digest).hex()));
+    }
     for e in &index.entries {
-        lines.push(format!("entry {} {} {}", e.id.get(), e.copied_at_ms, u8::from(e.pinned)));
+        lines.push(format!(
+            "entry {} {} {} {}",
+            e.id.get(),
+            e.copied_at_ms,
+            u8::from(e.pinned),
+            e.tick
+        ));
         lines.push(match &e.source {
             Source::Local { owner_class: None } => "source local".to_owned(),
             Source::Local { owner_class: Some(class) } => {
                 format!("source local {}", escape(class.as_bytes()))
+            }
+            Source::Peer { key, name } => {
+                format!(
+                    "source peer {} {}",
+                    BlobHash::from_bytes(*key).hex(),
+                    escape(name.as_bytes())
+                )
             }
         });
         for t in &e.targets {
@@ -128,6 +172,12 @@ pub fn encode(index: &Index) -> Vec<u8> {
                     escape(&type_name.to_latin1()),
                     format.bits(),
                     blob.hex()
+                ),
+                SavedData::Remote { type_name, format, size, sha256 } => format!(
+                    "target {name} remote {} {} {size} {}",
+                    escape(&type_name.to_latin1()),
+                    format.bits(),
+                    sha256.hex()
                 ),
                 SavedData::NotKept(reason) => {
                     format!("target {name} not-kept {}", reason_token(*reason))
@@ -190,37 +240,49 @@ struct Record {
     number: usize,
     entry: Option<SavedEntry>,
     sourced: bool,
+    /// The file's version: 1 has no ticks, peers or remote targets.
+    version: u64,
 }
 
 impl Record {
-    fn start(seq: usize, fields: &[&[u8]]) -> Self {
-        let entry = match fields {
-            [id, at, pinned] => (|| {
-                let id = number(id).filter(|&id| id < MAX_ID)?;
-                Some(SavedEntry {
-                    id: EntryId::new(id),
-                    copied_at_ms: number(at)?,
-                    pinned: flag(pinned)?,
-                    source: Source::Local { owner_class: None },
-                    targets: Vec::new(),
-                })
-            })(),
-            _ => None,
-        };
-        Record { number: seq, entry, sourced: false }
+    fn start(seq: usize, fields: &[&[u8]], version: u64) -> Self {
+        let entry = (|| {
+            let (id, at, pinned, tick) = match (fields, version) {
+                ([id, at, pinned], 1) => (id, at, pinned, None),
+                ([id, at, pinned, tick], 2) => (id, at, pinned, Some(number(tick)?)),
+                _ => return None,
+            };
+            let id = number(id).filter(|&id| id < MAX_ID)?;
+            let copied_at_ms = number(at)?;
+            Some(SavedEntry {
+                id: EntryId::new(id),
+                copied_at_ms,
+                pinned: flag(pinned)?,
+                tick: tick.unwrap_or(copied_at_ms),
+                source: Source::Local { owner_class: None },
+                targets: Vec::new(),
+            })
+        })();
+        Record { number: seq, entry, sourced: false, version }
     }
 
     fn source(&mut self, fields: &[&[u8]]) {
-        let class = match fields {
-            [b"local"] if !self.sourced => Some(None),
-            [b"local", class] if !self.sourced => {
-                unescape(class).and_then(|c| String::from_utf8(c).ok()).map(Some)
-            }
+        let source = match fields {
+            _ if self.sourced => None,
+            [b"local"] => Some(Source::Local { owner_class: None }),
+            [b"local", class] => unescape(class)
+                .and_then(|c| String::from_utf8(c).ok())
+                .map(|c| Source::Local { owner_class: Some(c) }),
+            [b"peer", key, name] if self.version >= 2 => (|| {
+                let key = BlobHash::from_hex(key)?.bytes();
+                let name = String::from_utf8(unescape(name)?).ok()?;
+                Some(Source::Peer { key, name })
+            })(),
             _ => None,
         };
-        match (class, &mut self.entry) {
-            (Some(owner_class), Some(entry)) => {
-                entry.source = Source::Local { owner_class };
+        match (source, &mut self.entry) {
+            (Some(source), Some(entry)) => {
+                entry.source = source;
                 self.sourced = true;
             }
             _ => self.entry = None,
@@ -238,6 +300,16 @@ impl Record {
                 };
                 Some(SavedTarget { name: name(n)?, data })
             })(),
+            [n, b"remote", type_name, bits, size, hex] if self.version >= 2 => (|| {
+                let format = Format::from_bits(u8::try_from(number(bits)?).ok()?).ok()?;
+                let data = SavedData::Remote {
+                    type_name: name(type_name)?,
+                    format,
+                    size: number(size)?,
+                    sha256: BlobHash::from_hex(hex)?,
+                };
+                Some(SavedTarget { name: name(n)?, data })
+            })(),
             [n, b"not-kept", reason] => (|| {
                 Some(SavedTarget { name: name(n)?, data: SavedData::NotKept(reason_of(reason)?) })
             })(),
@@ -249,11 +321,14 @@ impl Record {
         }
     }
 
-    /// The entry, if the record is whole: a source, at least one kept target, no name twice, and an
-    /// id not already taken.
+    /// The entry, if the record is whole: a source, at least one target kept or to come, no name
+    /// twice, and an id not already taken.
     fn finish(self, ids: &mut HashSet<EntryId>) -> Result<SavedEntry, usize> {
         let Some(entry) = self.entry.filter(|_| self.sourced) else { return Err(self.number) };
-        let any_kept = entry.targets.iter().any(|t| matches!(t.data, SavedData::Kept { .. }));
+        let any_kept = entry
+            .targets
+            .iter()
+            .any(|t| matches!(t.data, SavedData::Kept { .. } | SavedData::Remote { .. }));
         let mut names = HashSet::with_capacity(entry.targets.len());
         let unique = entry.targets.iter().all(|t| names.insert(&t.name));
         if any_kept && unique && ids.insert(entry.id) { Ok(entry) } else { Err(self.number) }
@@ -279,25 +354,33 @@ fn close(
 /// `next_id` is raised above every id read, so a damaged header can never let an id be reused.
 ///
 /// # Errors
-/// A [`HeaderError`] if the first three lines are not an index header of this version.
+/// A [`HeaderError`] if the first lines are not an index header of this version or the one
+/// before.
 pub fn parse(bytes: &[u8]) -> Result<Parsed, HeaderError> {
     let (body, ends_with_newline) = match bytes.strip_suffix(b"\n") {
         Some(body) => (body, true),
         None => (bytes, false),
     };
     let mut lines = body.split(|&b| b == b'\n');
-    match tokens(lines.next().unwrap_or_default()).as_slice() {
-        [MAGIC, version] => {
-            if number(version) != Some(VERSION) {
-                return Err(HeaderError::UnknownVersion);
-            }
-        }
+    let version = match tokens(lines.next().unwrap_or_default()).as_slice() {
+        [MAGIC, version] => match number(version) {
+            Some(v @ (1 | VERSION)) => v,
+            _ => return Err(HeaderError::UnknownVersion),
+        },
         [MAGIC, ..] => return Err(HeaderError::Malformed),
         _ => return Err(HeaderError::NotAnIndex),
-    }
+    };
     let next_id = match tokens(lines.next().unwrap_or_default()).as_slice() {
         [b"next-id", n] => number(n).filter(|&n| n <= MAX_ID).ok_or(HeaderError::Malformed)?,
         _ => return Err(HeaderError::Malformed),
+    };
+    let clock = if version >= 2 {
+        match tokens(lines.next().unwrap_or_default()).as_slice() {
+            [b"tick", n] => number(n).ok_or(HeaderError::Malformed)?,
+            _ => return Err(HeaderError::Malformed),
+        }
+    } else {
+        0
     };
     let cleared = match tokens(lines.next().unwrap_or_default()).as_slice() {
         [b"cleared", c] => flag(c).ok_or(HeaderError::Malformed)?,
@@ -313,6 +396,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, HeaderError> {
     let mut trailing = false;
     // The highest id on any entry line, readable or not, so a dropped record's id is not reused.
     let mut highest: Option<u64> = None;
+    let mut forgotten = Vec::new();
     for line in lines {
         if ended {
             trailing = true;
@@ -325,7 +409,18 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, HeaderError> {
                 let id = rest.first().and_then(|id| number(id)).filter(|&id| id < MAX_ID);
                 highest = highest.max(id);
                 count = count.saturating_add(1);
-                record = Some(Record::start(count, rest));
+                record = Some(Record::start(count, rest, version));
+            }
+            // Before the first entry; one unreadable is dropped alone.
+            (Some((&b"forgot", [hex, tick])), None) if version >= 2 => {
+                match (BlobHash::from_hex(hex), number(tick)) {
+                    (Some(d), Some(t)) => forgotten.push((d.bytes(), t)),
+                    _ => {
+                        if !dropped.contains(&0) {
+                            dropped.push(0);
+                        }
+                    }
+                }
             }
             (Some((&b"source", rest)), Some(r)) => r.source(rest),
             (Some((&b"target", rest)), Some(r)) => r.target(rest),
@@ -347,7 +442,7 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, HeaderError> {
     }
     let above = highest.and_then(|h| h.checked_add(1)).unwrap_or(0);
     Ok(Parsed {
-        index: Index { next_id: next_id.max(above), cleared, entries },
+        index: Index { next_id: next_id.max(above), clock, forgotten, cleared, entries },
         dropped,
         complete: ended && ends_with_newline && !trailing,
         next_id_raised: above > next_id,

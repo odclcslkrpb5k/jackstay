@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use jackstay_clip::{
-    Content, Entry, EntryId, Format, Kept, NotKept, Source, Target, TargetData, TargetName,
+    Content, Entry, EntryId, Format, Kept, NotKept, Remote, Source, Target, TargetData, TargetName,
 };
 use jackstay_proto::control::{Kinds, MAX_PREVIEW_CHARS, MAX_SOURCE_LEN};
 use jackstayd::summary::summary;
@@ -23,6 +23,7 @@ fn entry(targets: Vec<Target>, class: Option<&str>) -> Entry {
         Source::Local { owner_class: class.map(str::to_owned) },
         5,
         true,
+        5,
     )
 }
 
@@ -77,4 +78,19 @@ fn a_preview_holds_its_characters_however_wide_and_kinds_combine() {
     );
     assert_eq!(s.preview.chars().count(), MAX_PREVIEW_CHARS);
     assert_eq!(s.kinds, Kinds(Kinds::TEXT), "two text targets are one kind");
+}
+
+#[test]
+fn a_copy_from_a_peer_names_the_peer_and_counts_what_is_to_come() {
+    let coming =
+        Remote { type_name: name("image/png"), format: Format::Bits8, size: 9, sha256: [0; 32] };
+    let content = Arc::new(
+        Content::new(vec![Target { name: name("image/png"), data: TargetData::Remote(coming) }])
+            .unwrap_or_else(|e| panic!("{e}")),
+    );
+    let peer = Source::Peer { key: [1; 32], name: "xiphos\u{1b}[2J".into() };
+    let s = summary(&Entry::new(EntryId::new(3), content, peer, 5, false, 5), false);
+    assert_eq!(s.source.as_deref(), Some("xiphos [2J"));
+    assert_eq!(s.size, 0);
+    assert_ne!(s.kinds.0, 0);
 }

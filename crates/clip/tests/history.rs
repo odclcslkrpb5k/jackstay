@@ -2,8 +2,8 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use jackstay_clip::{
-    Content, ContentError, Entry, EntryId, Format, History, Kept, Limits, MAX_NAME_LEN, NotKept,
-    Remote, RestoreError, Source, Target, TargetData, TargetName,
+    Content, ContentError, Entry, EntryId, Format, History, Kept, Limits, MAX_FORGOTTEN,
+    MAX_NAME_LEN, NotKept, Remote, RestoreError, Saved, Source, Target, TargetData, TargetName,
 };
 use proptest::prelude::*;
 
@@ -208,23 +208,24 @@ fn delete_and_clear() {
 
 #[test]
 fn restore_continues_ids_and_refuses_reuse() {
-    let newer = Entry::new(EntryId::new(7), text("new"), local(), 2, false);
-    let older = Entry::new(EntryId::new(3), text("old"), local(), 1, true);
+    let newer = Entry::new(EntryId::new(7), text("new"), local(), 2, false, 2);
+    let older = Entry::new(EntryId::new(3), text("old"), local(), 1, true, 1);
     let saved = vec![newer.clone(), older];
-    let (mut h, evicted) = ok(History::restore(limits(10, 1_000), saved.clone(), 8));
+    let next = |next_id| Saved { next_id, ..Saved::default() };
+    let (mut h, evicted) = ok(History::restore(limits(10, 1_000), saved.clone(), next(8)));
     assert_none_evicted(&evicted);
     assert_eq!(texts(&h), ["new", "old"]);
     assert_eq!(h.next_id(), 8);
     assert_eq!(h.record(text("next"), local(), 3).id, EntryId::new(8));
     assert_eq!(
-        History::restore(limits(10, 1_000), saved.clone(), 7).err(),
+        History::restore(limits(10, 1_000), saved.clone(), next(7)).err(),
         Some(RestoreError::NextIdTooLow { next_id: 7, highest: 7 })
     );
     assert_eq!(
-        History::restore(limits(10, 1_000), vec![newer.clone(), newer], 9).err(),
+        History::restore(limits(10, 1_000), vec![newer.clone(), newer], next(9)).err(),
         Some(RestoreError::DuplicateId(EntryId::new(7)))
     );
-    let (h, evicted) = ok(History::restore(limits(1, 1_000), saved, 8));
+    let (h, evicted) = ok(History::restore(limits(1, 1_000), saved, next(8)));
     assert_none_evicted(&evicted);
     assert_eq!(texts(&h), ["new", "old"]);
 }
@@ -546,4 +547,105 @@ fn targets_still_to_come_count_as_held_but_never_as_kept_bytes() {
     assert!(!text_and_image.same_kept(&fetched));
     let again = ok(Content::new(vec![remote("image/png", 3), kept("UTF8_STRING", b"a")]));
     assert!(text_and_image.same_kept(&again));
+}
+
+#[test]
+fn ticks_follow_the_wall_clock_and_never_go_back() {
+    let mut h = History::new(limits(10, 1_000));
+    assert_eq!(h.next_tick(1_000), 1_000);
+    // A clock set back: the next tick is still later.
+    assert_eq!(h.next_tick(900), 1_001);
+    h.observe(5_000);
+    assert_eq!(h.next_tick(1_200), 5_001);
+    // A copy takes a tick; copying it again moves it on.
+    let a = h.record(text("a"), local(), 6_000).id;
+    assert_eq!(some(h.get(a)).tick(), 6_000);
+    let _ = h.record(text("b"), local(), 6_000);
+    let _ = h.record(text("a"), local(), 6_000);
+    assert_eq!(some(h.get(a)).tick(), 6_002);
+    assert_eq!(h.clock(), 6_002);
+}
+
+#[test]
+fn a_received_copy_goes_where_its_tick_puts_it() {
+    let mut h = History::new(limits(10, 1_000));
+    let _ = h.record(text("old"), local(), 1_000);
+    let _ = h.record(text("new"), local(), 3_000);
+    let peer = Source::Peer { key: [9; 32], name: "xiphos".into() };
+    // Made between the two: placed between them, not in front of the clipboard's.
+    let mid = some(h.record_received(text("mid"), peer.clone(), 1_900, 2_000)).id;
+    assert_eq!(texts(&h), ["new", "mid", "old"]);
+    assert_eq!(some(h.get(mid)).source(), &peer);
+    // Newest of all: in front; the clock follows it.
+    let _ = h.record_received(text("newest"), peer.clone(), 4_000, 9_000);
+    assert_eq!(texts(&h), ["newest", "new", "mid", "old"]);
+    assert_eq!(h.clock(), 9_000);
+    // Already held: nothing moves, and its id is given.
+    let again = some(h.record_received(text("old"), peer.clone(), 1, 10_000));
+    assert_eq!(texts(&h), ["newest", "new", "mid", "old"]);
+    assert_eq!(Some(again.id), h.find(&text("old")));
+    // Deleted after it was announced: refused; announced again later: kept.
+    let gone = text("gone");
+    h.remember_forgotten(gone.digest(), 11_000);
+    assert!(h.record_received(Arc::clone(&gone), peer.clone(), 1, 10_500).is_none());
+    assert!(h.record_received(Arc::clone(&gone), peer.clone(), 1, 11_000).is_none());
+    assert!(h.record_received(gone, peer, 1, 11_001).is_some());
+}
+
+#[test]
+fn deletions_are_remembered_up_to_a_thousand() {
+    let mut h = History::new(limits(10, 1_000));
+    for i in 0..=MAX_FORGOTTEN {
+        let mut digest = [0u8; 32];
+        digest[..8].copy_from_slice(&(i as u64).to_be_bytes());
+        h.remember_forgotten(digest, i as u64);
+    }
+    assert_eq!(h.forgotten().len(), MAX_FORGOTTEN);
+    // The oldest went first.
+    assert!(!h.was_forgotten(&[0; 32], 0));
+    let mut last = [0u8; 32];
+    last[..8].copy_from_slice(&(MAX_FORGOTTEN as u64).to_be_bytes());
+    assert!(h.was_forgotten(&last, 3));
+    // Saved and restored with the clock.
+    let saved = Saved { next_id: 1, clock: 77, forgotten: h.forgotten().copied().collect() };
+    let (r, _) = ok(History::restore(limits(10, 1_000), vec![], saved));
+    assert_eq!((r.clock(), r.forgotten().len()), (77, MAX_FORGOTTEN));
+}
+
+#[test]
+fn a_digest_names_what_is_held_and_matches_it_still_to_come() {
+    let fetched = Content::new(vec![kept("UTF8_STRING", b"a"), kept("image/png", b"png")]);
+    let fetched = ok(fetched);
+    let sha = match &fetched.targets()[1].data {
+        TargetData::Kept(k) => k.sha256(),
+        _ => panic!(),
+    };
+    let coming =
+        Remote { type_name: name("image/png"), format: Format::Bits8, size: 3, sha256: sha };
+    let to_come = ok(Content::new(vec![
+        Target { name: name("image/png"), data: TargetData::Remote(coming) },
+        kept("UTF8_STRING", b"a"),
+        Target { name: name("TEXT"), data: TargetData::NotKept(NotKept::NotCanonical) },
+    ]));
+    assert!(to_come.same_kept(&fetched));
+    assert_eq!(to_come.digest(), fetched.digest());
+    assert_ne!(text("a").digest(), fetched.digest());
+    assert_ne!(text("a").digest(), text("b").digest());
+}
+
+#[test]
+fn a_restored_clock_is_past_every_entry_it_holds() {
+    // A version-1 index has no clock: its entries' ticks are their copy times.
+    let e = Entry::new(
+        EntryId::new(1),
+        text("a"),
+        local(),
+        1_761_300_000_000,
+        false,
+        1_761_300_000_000,
+    );
+    let saved = Saved { next_id: 2, clock: 0, forgotten: Vec::new() };
+    let (mut h, _) = ok(History::restore(limits(10, 1_000), vec![e], saved));
+    assert_eq!(h.clock(), 1_761_300_000_000);
+    assert!(h.next_tick(5) > 1_761_300_000_000);
 }

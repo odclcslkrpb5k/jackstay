@@ -26,6 +26,17 @@ impl BlobHash {
         Some(BlobHash(bytes.try_into().ok()?))
     }
 
+    /// A SHA-256 already known, such as a remote target's or an entry's digest.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        BlobHash(bytes)
+    }
+
+    #[must_use]
+    pub fn bytes(&self) -> [u8; 32] {
+        self.0
+    }
+
     /// The file name: 64 lowercase hex digits.
     #[must_use]
     pub fn hex(&self) -> String {

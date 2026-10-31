@@ -1,0 +1,8 @@
+jackstay-index 2
+next-id 2
+tick 0
+cleared 1
+entry 1 5 1 5
+source local Firefox
+target image/png remote image/png 32 4 abababababababababababababababababababababababababababababababab
+target TEXT not-kept 

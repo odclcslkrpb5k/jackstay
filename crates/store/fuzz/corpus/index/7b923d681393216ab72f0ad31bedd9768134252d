@@ -1,0 +1,19 @@
+jackstay-index 2
+next-id 2
+tick 0
+cleared 1
+entry 1 5 1 5
+source local Fircfox
+target image/png remote image/png 16 4 abababababababababababababababababababababababababababababababab
+target Te/png remote image/png 16 4 abababababababababababababababababababababababababababababababab
+target TEXT not-kept noêt-ca’‘–œ“ùenackstay-indexk 0
+cleared 1
+ce-id 2
+tick 0
+cleared 1
+entry 1 5 1  1 5
+source local Firefox
+target e/png remote image/png 16 4 abababababababababababababababababababababababababababababababab
+target TEXT notet TEXT t-kept not-canonical
+end
+d

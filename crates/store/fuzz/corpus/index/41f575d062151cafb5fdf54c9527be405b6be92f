@@ -1,0 +1,9 @@
+jackstay-index 2
+next-id 2
+tick 0
+cleared 1
+entry 1 1 5
+source local Fy 1 5 1 5
+source local Firefox
+target image/png remope image/png 75 4 abababababa&abababababab`bababababababababababababababababababab
+target Tg remope image/png 32 4 ababababaababababababababa

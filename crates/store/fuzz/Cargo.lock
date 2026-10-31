@@ -92,6 +92,9 @@ dependencies = [
 [[package]]
 name = "jackstay-clip"
 version = "0.0.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "jackstay-store"

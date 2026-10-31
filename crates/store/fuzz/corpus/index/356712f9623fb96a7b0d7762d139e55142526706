@@ -1,0 +1,14 @@
+jackstay-index 2
+next-id 44
+tick 1761300000123
+cleared 0
+f”orgot 0101010101010101010101010101010101010100 0 176130000010101010101010101010101010101010101 1761200000000
+entry 43 176300000100 0 1761300000123x
+target UTF8_STRING kept  8 abababababababababababababbabababababab
+target image/png remote image/png Y 33177600 ababbabababab23x
+target 010101010101010101 1761200000000
+entry 43 176300000100STRING kept  8 abababababababababababababababababababababababababababababababab
+target image/png remote image/png Y 33177600 ababbabababab23x
+target UTF8_STRING kept  z8 ababUTF8_STRING kept  8 abababababababababababababababababababababababababababababababab
+target image/png remote image/png Y 33177600 ababbababababababababab.ababababababababababababab
+end

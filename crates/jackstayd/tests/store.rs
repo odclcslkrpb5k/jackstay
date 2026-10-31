@@ -7,8 +7,8 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use jackstay_clip::{
-    Content, Entry, EntryId, Format, History, Kept, Limits, NotKept, Source, Target, TargetData,
-    TargetName,
+    Content, Entry, EntryId, Format, History, Kept, Limits, NotKept, Remote, Source, Target,
+    TargetData, TargetName,
 };
 use jackstay_store::BlobHash;
 use jackstayd::store::{Loaded, Paths, Reply, Request, Snapshot, Store, load, run};
@@ -78,15 +78,18 @@ fn blobs(dir: &Path) -> Vec<String> {
 }
 
 fn same(a: &History, b: &History) {
-    let view = |h: &History| -> Vec<(EntryId, Content, bool, u64, Source)> {
+    let view = |h: &History| -> Vec<(EntryId, Content, bool, u64, u64, Source)> {
         h.entries()
             .map(|e| {
-                (e.id(), (**e.content()).clone(), e.pinned(), e.copied_at_ms(), e.source().clone())
+                let content = (**e.content()).clone();
+                (e.id(), content, e.pinned(), e.copied_at_ms(), e.tick(), e.source().clone())
             })
             .collect()
     };
     assert!(view(a) == view(b), "histories differ");
     assert_eq!(a.next_id(), b.next_id());
+    assert_eq!(a.clock(), b.clock());
+    assert!(a.forgotten().eq(b.forgotten()));
 }
 
 #[test]
@@ -109,6 +112,32 @@ fn a_saved_history_loads_back_as_it_was() {
         let mode = ok(fs::metadata(&f)).permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "{}", f.display());
     }
+}
+
+#[test]
+fn a_copy_from_a_peer_with_a_target_to_come_loads_back_as_it_was() {
+    let dir = state_dir();
+    let mut h = history(&[("local", None)]);
+    let coming = Remote {
+        type_name: name("image/png"),
+        format: Format::Bits8,
+        size: 33_177_600,
+        sha256: [5; 32],
+    };
+    let shared = Arc::new(ok(Content::new(vec![Target {
+        name: name("image/png"),
+        data: TargetData::Remote(coming),
+    }])));
+    let peer = Source::Peer { key: [7; 32], name: "xiphos".into() };
+    let at = h.clock() + 10;
+    assert!(h.record_received(shared, peer, 2_000, at).is_some());
+    h.remember_forgotten([9; 32], 3);
+    let mut store = Store::new(Paths::new(dir.clone()), &loaded(&dir));
+    ok(store.save(&Snapshot::of(&h, false), false));
+    let back = loaded(&dir);
+    same(&back.history, &h);
+    // A target to come has no blob.
+    assert_eq!(blobs(&dir).len(), 1);
 }
 
 #[test]

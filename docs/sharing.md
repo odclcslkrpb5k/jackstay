@@ -6,7 +6,7 @@ clipboard sharing must do; this says how, and where it departs from the plan (ma
 link (docs/link.md) and on the selection engine (docs/selection.md).
 
 Status: **design, revised after red-team pass 1** (findings and resolutions at the end); slice 1
-(`proto`), slice 2 (`net`) and slice 3 (`selection`) built. Code facts are as read on 2026-10-31 at 2c9e386.
+(`proto`), slice 2 (`net`), slice 3 (`selection`) and slice 4 (`clip`, `store`) built. Code facts are as read on 2026-10-31 at 2c9e386.
 
 ## What exists to build on
 
@@ -270,7 +270,8 @@ A request for a pending target **waits**:
    `clip::TargetData::Remote` (its digest and storage are slice 4's; until then the store saves
    one as not kept, and nothing makes one before slice 5).
 4. `clip` and `store`: `Source::Peer`, `Remote`, the digest, the clock, placing by tick, the
-   index's version 2, the forgets.
+   index's version 2, the forgets. **Built.** A re-select takes its tick in slice 5, with the
+   daemon's sharing; until then it keeps the one it had.
 5. The daemon: announce, receive, fetch, serve, re-select, empty, forget, replay on a new session,
    the loop guard; control version 6, the CLI, the popup, the README; the two-daemon tests.
 6. Acceptance on the owner's LAN; the owner uninstalls Synergy (plan §6, M5).
@@ -313,3 +314,12 @@ Each control removed, and the selection engine's sharing tests run: refusing at 
 tick, refusing when the clipboard moves on (caught once the test's next entry had the same target
 on its way), waiting for a `MULTIPLE`'s pending targets, serving an update without claiming again,
 forgetting a requestor whose window went: all caught.
+
+### Slice 4 plants, 2026-10-31
+
+Each control removed, and `clip`'s and `store`'s tests run: a deletion refusing an announcement of
+its own tick, placing a received copy by its tick, refusing one deleted, a version-1 entry's tick
+as its copy time, a peer source only in version 2, a target to come equal to the same bytes kept,
+and a restored clock past every entry's tick (caught once a test restored a version-1 history):
+all caught. The index's fuzz corpus was seeded with version 2's lines and regrown (1404 to 1670
+inputs, 180 s).
