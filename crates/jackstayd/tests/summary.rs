@@ -47,7 +47,7 @@ fn a_summary_shows_kinds_size_source_and_a_clean_preview() {
         Kinds(Kinds::TEXT | Kinds::IMAGE | Kinds::RICH_TEXT | Kinds::FILES | Kinds::OTHER)
     );
     assert_eq!(s.size, 12 + 3 + 3 + 4 + 1);
-    assert_eq!(s.source.as_deref(), Some("Firefox"));
+    assert_eq!((s.source.as_deref(), s.from_peer), (Some("Firefox"), false));
     assert_eq!(s.preview, "héllo world");
 }
 
@@ -90,7 +90,7 @@ fn a_copy_from_a_peer_names_the_peer_and_counts_what_is_to_come() {
     );
     let peer = Source::Peer { key: [1; 32], name: "xiphos\u{1b}[2J".into() };
     let s = summary(&Entry::new(EntryId::new(3), content, peer, 5, false, 5), false);
-    assert_eq!(s.source.as_deref(), Some("xiphos [2J"));
+    assert_eq!((s.source.as_deref(), s.from_peer), (Some("xiphos [2J"), true));
     assert_eq!(s.size, 0);
     assert_ne!(s.kinds.0, 0);
 }

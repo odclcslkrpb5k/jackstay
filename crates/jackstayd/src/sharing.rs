@@ -245,6 +245,12 @@ impl Sharing {
         self.paused_until.is_some_and(|until| now < until)
     }
 
+    /// Targets of entries from peers still to come: queued or being fetched.
+    #[must_use]
+    pub fn to_come(&self) -> usize {
+        self.wants.len().saturating_add(usize::from(self.running.is_some()))
+    }
+
     /// When [`Sharing::tick`] is next needed.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Instant> {

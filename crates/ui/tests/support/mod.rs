@@ -87,6 +87,7 @@ pub fn entry(id: u64, preview: &str, current: bool) -> Summary {
         size: preview.len() as u64,
         source: Some("Firefox".to_owned()),
         preview: preview.to_owned(),
+        from_peer: false,
     }
 }
 
@@ -147,7 +148,7 @@ impl Daemon {
         let asked = self.asked.lock().map(|a| a.clone()).unwrap_or_default();
         asked
             .into_iter()
-            .filter(|r| !matches!(r, Request::List { .. } | Request::Thumbnail { .. }))
+            .filter(|r| !matches!(r, Request::Entries { .. } | Request::Thumbnail { .. }))
             .collect()
     }
 
@@ -165,7 +166,7 @@ impl Daemon {
 
     pub fn lists(&self) -> usize {
         let asked = self.asked.lock().map(|a| a.clone()).unwrap_or_default();
-        asked.iter().filter(|r| matches!(r, Request::List { .. })).count()
+        asked.iter().filter(|r| matches!(r, Request::Entries { .. })).count()
     }
 }
 
@@ -191,9 +192,9 @@ pub fn serve(
         input.drain(..used);
         let answer = match &request {
             Request::Hello { .. } => Response::Welcome { version: VERSION },
-            Request::List { .. } => {
+            Request::Entries { .. } => {
                 let e = entries.lock().map(|e| e.clone()).unwrap_or_default();
-                Response::List { total: u32::try_from(e.len()).unwrap_or(0), entries: e }
+                Response::Entries { total: u32::try_from(e.len()).unwrap_or(0), entries: e }
             }
             Request::Delete { id } => {
                 if *delete == Response::Ok

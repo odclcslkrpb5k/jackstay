@@ -13,6 +13,7 @@ fn summary(preview: &str, kinds: u8, size: u64, source: Option<&str>) -> Summary
         size,
         source: source.map(str::to_owned),
         preview: preview.to_owned(),
+        from_peer: false,
     }
 }
 
@@ -35,6 +36,12 @@ fn a_row_is_one_clean_line_with_its_size_and_source() {
     assert_eq!(row(&summary("a", Kinds::TEXT, 3 << 20, None), None).detail, "3 MiB");
     assert_eq!(row(&summary("a", Kinds::TEXT, 1 << 20, None), None).detail, "1 MiB");
     assert_eq!(row(&summary("a", Kinds::TEXT, 1024, None), None).detail, "1 KiB");
+}
+
+#[test]
+fn a_row_from_another_machine_says_which() {
+    let s = Summary { from_peer: true, ..summary("a", Kinds::TEXT, 10, Some("xiphos\u{1b}")) };
+    assert_eq!(row(&s, None).detail, "10 B · from xiphos ");
 }
 
 #[test]

@@ -23,9 +23,10 @@ Jackstay is intended to replace both [Synergy](https://symless.com/synergy) and
 Early development. Working now: the clipboard manager (`jackstayd`), its history popup, tray
 icon and settings window (`jackstay-ui`) and the `jackstay` command: CLIPBOARD copies kept after
 their application quits and restored after a restart, a searchable history at the pointer or from
-the tray, clearing, pinning, and xfce4-clipman's history imported. Not yet: sharing between
-machines (M3 to M5). See [the plan](docs/plan.md), [the daemon](docs/daemon.md) and
-[the desktop side](docs/ui.md).
+the tray, clearing, pinning, and xfce4-clipman's history imported; paired machines linked, the
+keyboard and mouse shared between them, and the clipboard shared (being finished, milestone M5).
+See [the plan](docs/plan.md), [the daemon](docs/daemon.md), [the desktop side](docs/ui.md),
+[input sharing](docs/input.md) and [clipboard sharing](docs/sharing.md).
 
 ## Install
 
@@ -64,7 +65,7 @@ jackstay pin ID          # keep it through clears and limits (unpin ID to undo)
 jackstay delete ID
 jackstay clear           # clear the clipboard and delete what was on it, unless pinned
 jackstay clear-history   # delete every unpinned entry and clear the clipboard
-jackstay status
+jackstay status          # the history, the link, input and clipboard sharing
 jackstay popup           # the history at the pointer: type to search, Enter to paste
 jackstay settings        # limits, the popup's hotkey, starting at login (also in the tray's menu)
 jackstay pair HOST       # pair with another machine (run it there too, naming this one)
@@ -75,6 +76,26 @@ Nothing copied is filtered or hidden: a copied password is kept like anything el
 `jackstay clear` is how to get rid of it. The settings window writes
 `~/.config/jackstay/config.toml` ([keys](docs/daemon.md#configuration)), which can also be edited
 by hand; the journal is `journalctl --user -u jackstayd`.
+
+### Clipboard sharing
+
+A copy on one paired machine becomes the clipboard on the other at once, and joins its history;
+`jackstay list` and the popup say which machine it came from. Large copies (images) follow in the
+background, and a paste of one still on its way waits up to 3 s for it.
+
+- **Every copy, passwords included, is kept on every paired machine's disk.** Deleting an entry
+  (`jackstay delete`) deletes it on every machine, pinned or not, including one that was away,
+  when it next connects. `jackstay clear` clears the clipboard everywhere and deletes its entry
+  everywhere, unless it is pinned here. `jackstay clear-history` empties the history on this
+  machine only (and the clipboard everywhere).
+- A password manager that clears the clipboard clears it everywhere; history keeps the entry, as
+  on one machine.
+- Another tool that copies the clipboard's owner (CopyQ, a VM's clipboard agent) causes no loop;
+  if more than 10 copies a second are made anyway, sharing stops sending copies for 10 s and
+  `jackstay status` says so.
+- Unpairing keeps the other machine's entries in history.
+- Going back to a Jackstay from before clipboard sharing loses the history: the older version
+  cannot read the newer history file, moves it aside and starts empty.
 
 ## Uninstall
 

@@ -257,6 +257,7 @@ fn big_list() -> Response {
         size: 1,
         source: None,
         preview: "x".repeat(MAX_PREVIEW_CHARS),
+        from_peer: false,
     };
     Response::List { total: 0, entries: (0..).take(MAX_LIST).map(entry).collect() }
 }

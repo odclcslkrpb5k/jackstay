@@ -38,7 +38,7 @@ pub enum Done {
 impl Job {
     fn request(self) -> Request {
         match self {
-            Job::List => Request::List { offset: 0, limit: SHOWN },
+            Job::List => Request::Entries { offset: 0, limit: SHOWN },
             Job::Select(id) => Request::Select { id },
             Job::Delete(id) => Request::Delete { id },
             Job::Pin(id, pinned) => Request::Pin { id, pinned },
@@ -92,7 +92,7 @@ fn run(socket: &Path, client: &mut Option<Client>, job: Job) -> Done {
 
 fn answer(job: Job, response: Response) -> Done {
     match (job, response) {
-        (Job::List, Response::List { total, entries }) => Done::Listed { total, entries },
+        (Job::List, Response::Entries { total, entries }) => Done::Listed { total, entries },
         (Job::Thumbnail(asked), Response::Thumbnail { id, thumbnail }) if id == asked => {
             Done::Thumbnail(id, thumbnail)
         }

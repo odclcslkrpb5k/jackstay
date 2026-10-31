@@ -17,6 +17,14 @@ fn copies_are_kept_listed_and_outlive_their_owner() {
     let d = Daemon::start(&x, &home);
     let owner = copy(&x, "first copy");
     eventually("the copy in the history", || previews(&home) == ["first copy"]);
+    // A version 6 client's list says where each entry came from; sharing answers.
+    match ask(&home, Request::Entries { offset: 0, limit: 10 }) {
+        Response::Entries { total: 1, entries } => {
+            assert_eq!(entries.iter().map(|e| e.from_peer).collect::<Vec<_>>(), [false]);
+        }
+        other => panic!("not entries: {other:?}"),
+    }
+    assert!(matches!(ask(&home, Request::Sharing), Response::Sharing(_)));
     kill(owner);
     eventually("the copy kept alive", || paste(&x).as_deref() == Some("first copy"));
     let second = copy(&x, "second\tcopy\nwith lines");

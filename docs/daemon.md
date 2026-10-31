@@ -190,8 +190,13 @@ and why, the pointer here (with, in the detail, the peer that did not take the l
 none has since) or on a peer, or this machine a secondary and whether it is driven now),
 `Switch { peer }` (the pointer to that neighbour, entering at the middle of the edge facing this
 machine) and `SwitchHome`; a switch is refused with `InputOff` on a machine that is not running as
-the primary, and `NotNeighbour` for a peer that is not in `[input]`. A client of version 2 to 4 is
-still greeted, in its own version: each version only adds requests.
+the primary, and `NotNeighbour` for a peer that is not in `[input]`.
+
+Version 6 adds clipboard sharing (docs/sharing.md): `Entries { offset, limit }`, `List`'s answer
+with whether each entry came from another machine (its source then that machine's name), and
+`Sharing` (whether it runs, whether announcing copies is paused, and how many targets from peers
+are still to come). `List` still answers byte for byte as version 5 did. A client of version 2 to
+5 is still greeted, in its own version: each version only adds requests.
 
 `jackstay` is the thin CLI over it: `status`, `list`, `select`, `delete`, `pin`, `unpin`, `clear`,
 `clear-history`, `import-clipman`, `peers`, `pair`, `unpair`, `switch`.

@@ -43,8 +43,11 @@ pub fn row(entry: &Summary, image: Option<(u32, u32)>) -> Row {
         detail.push("pinned".to_owned());
     }
     detail.push(size(entry.size));
-    if let Some(source) = &entry.source {
-        detail.push(printable(source));
+    match &entry.source {
+        // The machine it was copied on (docs/sharing.md).
+        Some(machine) if entry.from_peer => detail.push(format!("from {}", printable(machine))),
+        Some(source) => detail.push(printable(source)),
+        None => {}
     }
     Row {
         id: entry.id,

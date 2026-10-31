@@ -7,7 +7,7 @@ link (docs/link.md) and on the selection engine (docs/selection.md).
 
 Status: **design, revised after red-team pass 1** (findings and resolutions at the end); slice 1
 (`proto`), slice 2 (`net`), slice 3 (`selection`) and slice 4 (`clip`, `store`) built; slice 5's
-daemon logic built (5a), its interfaces and two-daemon tests to come. Code facts are as read on 2026-10-31 at 2c9e386.
+daemon logic (5a) and interfaces (5b) built, its two-daemon tests to come. Code facts are as read on 2026-10-31 at 2c9e386.
 
 ## What exists to build on
 
@@ -277,7 +277,11 @@ A request for a pending target **waits**:
    - 5a: announce, receive, fetch, serve, re-select, empty, forget, replay on a new session, the
      loop guard (`jackstayd::sharing`, a state machine without I/O the clipboard thread drives,
      tested as two machines joined by a queue of messages). **Built.**
-   - 5b: control version 6, the CLI, the popup, the README.
+   - 5b: control version 6, the CLI, the popup, the README. **Built:** `Entries` (the list with
+     `from_peer`; `List` is unchanged for version 5's clients) and `Sharing` (on, paused, targets
+     still to come); `jackstay list` and the popup say "from xiphos"; `jackstay status` says
+     whether sharing runs, is paused, or has targets still to come; the control fuzz corpus
+     regrown (225 to 256 inputs, 180 s).
    - 5c: the two-daemon tests.
 6. Acceptance on the owner's LAN; the owner uninstalls Synergy (plan §6, M5).
 
@@ -371,3 +375,9 @@ running fetch, a deleted entry cancelling its fetch, the hash of fetched bytes, 
 for what failed, asking again for what a lost session dropped, an early announcement replaced in
 place, the early announcement on a timer, and a target already held not being fetched: all
 caught. Survived, and removed as redundant: checking inline bytes against their own hash, which the digest already covers.
+
+### Slice 5b plants, 2026-10-31
+
+Each control removed, and its crate's tests run: the summary's `from_peer`, `Entries` carrying it,
+`List` leaving it out (version 5's clients), the CLI's "from" and the popup's, and `jackstay status`
+asking about sharing: all caught.

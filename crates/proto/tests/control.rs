@@ -1,8 +1,8 @@
 use jackstay_proto::control::{
     Dialer, Error, InputState, InputStatus, Kinds, LinkStatus, MAX_LIST, MAX_NAME_FIELD, MAX_PEERS,
     MAX_PREVIEW_CHARS, MAX_SOURCE_LEN, MAX_THUMBNAIL_HEIGHT, MAX_THUMBNAIL_WIDTH, PairReason,
-    PeerState, PeerSummary, Request, Response, Status, Summary, Thumb, Thumbnail, VERSION,
-    decode_request, decode_response, encode_request, encode_response, preview, printable,
+    PeerState, PeerSummary, Request, Response, SharingStatus, Status, Summary, Thumb, Thumbnail,
+    VERSION, decode_request, decode_response, encode_request, encode_response, preview, printable,
 };
 use jackstay_proto::{DecodeError, LimitError};
 use proptest::prelude::*;
@@ -37,12 +37,13 @@ fn summary(id: u64) -> Summary {
         size: 1234,
         source: Some("Firefox".into()),
         preview: "héllo wörld".into(),
+        from_peer: false,
     }
 }
 
 #[test]
 fn the_layout_is_as_documented() {
-    assert_eq!(request_bytes(&Request::Hello { version: VERSION }), [0, 0, 0, 2, 1, 0, 5]);
+    assert_eq!(request_bytes(&Request::Hello { version: VERSION }), [0, 0, 0, 2, 1, 0, 6]);
     assert_eq!(request_bytes(&Request::Clear), [0, 0, 0, 0, 7]);
     assert_eq!(
         request_bytes(&Request::Pin { id: 258, pinned: true }),
@@ -296,27 +297,36 @@ fn arb_summary() -> impl Strategy<Value = Summary> {
         any::<u64>(),
         proptest::option::of("[a-zA-Z0-9 ]{0,40}"),
         ".{0,200}",
+        any::<bool>(),
     )
-        .prop_map(|(id, copied_at_ms, pinned, current, kinds, size, source, preview)| {
-            Summary {
-                id,
-                copied_at_ms,
-                pinned,
-                current,
-                kinds: Kinds(kinds),
-                size,
-                source,
-                preview,
-            }
-        })
+        .prop_map(
+            |(id, copied_at_ms, pinned, current, kinds, size, source, preview, from_peer)| {
+                Summary {
+                    id,
+                    copied_at_ms,
+                    pinned,
+                    current,
+                    kinds: Kinds(kinds),
+                    size,
+                    source,
+                    preview,
+                    from_peer,
+                }
+            },
+        )
 }
 
 proptest! {
     #[test]
     fn lists_round_trip(total in any::<u32>(), entries in proptest::collection::vec(arb_summary(), 0..20)) {
-        let r = Response::List { total, entries };
+        // Version 6's list says where each entry came from; version 5's leaves it out.
+        let r = Response::Entries { total, entries: entries.clone() };
         let bytes = response_bytes(&r);
         prop_assert_eq!(decode_response(&bytes), Ok(Some((r, bytes.len()))));
+        let r = Response::List { total, entries: entries.clone() };
+        let bytes = response_bytes(&r);
+        let entries = entries.into_iter().map(|e| Summary { from_peer: false, ..e }).collect();
+        prop_assert_eq!(decode_response(&bytes), Ok(Some((Response::List { total, entries }, bytes.len()))));
     }
 
     #[test]
@@ -705,4 +715,40 @@ fn every_input_request_and_response_round_trips() {
     }));
     bad[5] = 7;
     assert_eq!(decode_response(&bad), Err(DecodeError::Limit(LimitError::UnknownCode { code: 7 })));
+}
+
+#[test]
+fn clipboard_sharing_requests_and_responses_round_trip() {
+    for r in [Request::Entries { offset: 2, limit: 500 }, Request::Sharing] {
+        let bytes = request_bytes(&r);
+        assert_eq!(decode_request(&bytes), Ok(Some((r.clone(), bytes.len()))), "{r:?}");
+    }
+    assert_eq!(request_bytes(&Request::Sharing), [0, 0, 0, 0, 21]);
+    for s in [SharingStatus::default(), SharingStatus { on: true, paused: true, to_come: u32::MAX }]
+    {
+        let r = Response::Sharing(s);
+        let bytes = response_bytes(&r);
+        assert_eq!(decode_response(&bytes), Ok(Some((r, bytes.len()))));
+    }
+    assert_eq!(
+        response_bytes(&Response::Sharing(SharingStatus { on: true, paused: false, to_come: 3 })),
+        [0, 0, 0, 6, 79, 1, 0, 0, 0, 0, 3]
+    );
+    // An entry from another machine: its flag is the last byte, after the preview.
+    let peer = Summary {
+        source: Some("xiphos".into()),
+        preview: String::new(),
+        from_peer: true,
+        ..summary(1)
+    };
+    let entries = response_bytes(&Response::Entries { total: 1, entries: vec![peer.clone()] });
+    let list = response_bytes(&Response::List { total: 1, entries: vec![peer] });
+    assert_eq!(entries.len(), list.len() + 1);
+    assert_eq!(entries.last(), Some(&1));
+    // A flag other than 0 or 1 is refused.
+    let mut bad = entries;
+    if let Some(last) = bad.last_mut() {
+        *last = 2;
+    }
+    assert!(decode_response(&bad).is_err());
 }

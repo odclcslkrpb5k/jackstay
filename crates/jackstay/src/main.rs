@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use jackstay_proto::control::{
     Dialer, Error, InputState, InputStatus, Kinds, LinkStatus, PeerState, Request, Response,
-    Summary, printable,
+    SharingStatus, Summary, printable,
 };
 use jackstayd::client::{Client, ClientError};
 use jackstayd::ui_socket::{self, Ask};
@@ -16,7 +16,7 @@ use jackstayd::ui_socket::{self, Ask};
 const USAGE: &str = "\
 usage: jackstay [--runtime-dir DIR] COMMAND
 commands:
-  status                     whether jackstayd runs, and what it holds
+  status                     whether jackstayd runs, what it holds, and what it shares
   list [--all]               the history, newest first (the first 20 without --all)
   select ID                  put an entry back on the clipboard
   delete ID                  delete an entry (and clear the clipboard if it is on it)
@@ -124,10 +124,10 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
             window = Some(Ask::Settings);
             Request::Status
         }
-        ("list", []) => Request::List { offset: 0, limit: 20 },
+        ("list", []) => Request::Entries { offset: 0, limit: 20 },
         ("list", [flag]) if flag == "--all" => {
             all = true;
-            Request::List { offset: 0, limit: PAGE }
+            Request::Entries { offset: 0, limit: PAGE }
         }
         ("select", [_]) => Request::Select { id: id(rest.first())? },
         ("delete", [_]) => Request::Delete { id: id(rest.first())? },
@@ -187,8 +187,26 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
         if let Ok(Response::Input(i)) = client.ask(&Request::Input) {
             print_input(&i);
         }
+        if let Ok(Response::Sharing(s)) = client.ask(&Request::Sharing) {
+            print_sharing(s);
+        }
     }
     Ok(())
+}
+
+fn print_sharing(s: SharingStatus) {
+    if !s.on {
+        println!("clipboard sharing: off (the link is off)");
+    } else if s.paused {
+        println!(
+            "clipboard sharing: paused: more than 10 copies a second (another clipboard tool \
+             copying ours?); copies are not sent for 10 s"
+        );
+    } else if s.to_come > 0 {
+        println!("clipboard sharing: on, {} targets still to come", s.to_come);
+    } else {
+        println!("clipboard sharing: on");
+    }
 }
 
 fn text(arg: &OsString) -> Result<String, Failure> {
@@ -327,9 +345,11 @@ fn print_input(i: &InputStatus) {
 fn list_all(client: &mut Client) -> Result<(), Failure> {
     let mut offset = 0u32;
     loop {
-        let request = Request::List { offset, limit: PAGE };
+        let request = Request::Entries { offset, limit: PAGE };
         let response = client.ask(&request).map_err(|e| failed(&e))?;
-        let Response::List { total, entries } = response else { return show(&request, response) };
+        let Response::Entries { total, entries } = response else {
+            return show(&request, response);
+        };
         let count = u32::try_from(entries.len()).unwrap_or(u32::MAX);
         print_entries(&entries);
         offset = offset.saturating_add(count);
@@ -358,7 +378,7 @@ fn show(request: &Request, response: Response) -> Result<(), Failure> {
             }
             Ok(())
         }
-        (Request::List { .. }, Response::List { total, entries }) => {
+        (Request::Entries { .. }, Response::Entries { total, entries }) => {
             print_entries(&entries);
             let shown = entries.len();
             if usize::try_from(total).is_ok_and(|t| t > shown) {
@@ -433,7 +453,11 @@ fn print_entries(entries: &[Summary]) {
         let pinned = if e.pinned { "P" } else { " " };
         // The daemon cleans both fields; they are cleaned again here, so what reaches the terminal
         // never depends on what was sent.
-        let source = e.source.as_deref().map_or_else(|| "-".to_owned(), printable);
+        let source = match e.source.as_deref().map(printable) {
+            Some(machine) if e.from_peer => format!("from {machine}"),
+            Some(class) => class,
+            None => "-".to_owned(),
+        };
         println!(
             "{:>6} {current}{pinned} {:>4} {:>8} {:<11} {:<14} {}",
             e.id,

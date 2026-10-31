@@ -339,6 +339,7 @@ fn image_entry(id: u64) -> Summary {
     Summary {
         kinds: Kinds(Kinds::IMAGE),
         preview: String::new(),
+        from_peer: false,
         size: 5000,
         ..entry(id, "", false)
     }

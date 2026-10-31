@@ -8,7 +8,7 @@ use std::process::{Command, Output};
 
 use jackstay_proto::control::{
     self, Dialer, Error, InputState, InputStatus, Kinds, LinkStatus, PairReason, PeerState,
-    PeerSummary, Request, Response, Status, Summary, VERSION,
+    PeerSummary, Request, Response, SharingStatus, Status, Summary, VERSION,
 };
 
 #[track_caller]
@@ -262,6 +262,7 @@ fn summary(id: u64, ago_s: u64, size: u64, kinds: u8) -> Summary {
         size,
         source: Some("Fire\u{1b}fox".to_owned()),
         preview: format!("entry {id}"),
+        from_peer: false,
     }
 }
 
@@ -273,8 +274,8 @@ fn list_shows_each_entry_and_says_when_there_are_more() {
         summary(3, 7200, 3 << 20, Kinds::FILES | Kinds::RICH_TEXT | Kinds::OTHER),
         summary(4, 3 * 86_400, 0, 0),
     ];
-    let (code, out, got) = exchange(&["list"], vec![Response::List { total: 30, entries }]);
-    assert_eq!((code, got), (Some(0), vec![Request::List { offset: 0, limit: 20 }]));
+    let (code, out, got) = exchange(&["list"], vec![Response::Entries { total: 30, entries }]);
+    assert_eq!((code, got), (Some(0), vec![Request::Entries { offset: 0, limit: 20 }]));
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 5, "{out}");
     let fields = |l: &str| l.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
@@ -289,9 +290,54 @@ fn list_shows_each_entry_and_says_when_there_are_more() {
     assert_eq!(lines[4], "(4 of 30; jackstay list --all for every entry)");
     let (_, out, _) = exchange(
         &["list"],
-        vec![Response::List { total: 1, entries: vec![summary(1, 0, 1, Kinds::TEXT)] }],
+        vec![Response::Entries { total: 1, entries: vec![summary(1, 0, 1, Kinds::TEXT)] }],
     );
     assert_eq!(out.lines().count(), 1, "no note when all are shown");
+}
+
+#[test]
+fn list_names_the_machine_an_entry_came_from() {
+    let from = Summary {
+        source: Some("xiphos\u{1b}[2J".into()),
+        from_peer: true,
+        ..summary(1, 5, 10, Kinds::TEXT)
+    };
+    let (_, out, _) =
+        exchange(&["list"], vec![Response::Entries { total: 1, entries: vec![from] }]);
+    let fields: Vec<&str> = out.split_whitespace().collect();
+    assert_eq!(fields[6..9], ["from", "xiphos", "[2J"], "{out}");
+}
+
+#[test]
+fn status_says_whether_the_clipboard_is_shared() {
+    let status = Response::Status(Status {
+        entries: 0,
+        pinned: 0,
+        current: None,
+        owns_clipboard: false,
+        store_failing: false,
+    });
+    let input = InputStatus { state: InputState::Here, peer: String::new(), detail: String::new() };
+    for (sharing, says) in [
+        (SharingStatus::default(), "clipboard sharing: off (the link is off)\n"),
+        (SharingStatus { on: true, paused: false, to_come: 0 }, "clipboard sharing: on\n"),
+        (
+            SharingStatus { on: true, paused: false, to_come: 2 },
+            "clipboard sharing: on, 2 targets still to come\n",
+        ),
+        (SharingStatus { on: true, paused: true, to_come: 2 }, "copies are not sent for 10 s\n"),
+    ] {
+        let answers = vec![
+            status.clone(),
+            Response::Peers(link(Vec::new())),
+            Response::Input(input.clone()),
+            Response::Sharing(sharing),
+        ];
+        let (code, out, got) = exchange(&["status"], answers);
+        assert_eq!(got, vec![Request::Status, Request::Peers, Request::Input, Request::Sharing]);
+        assert_eq!(code, Some(0));
+        assert!(out.ends_with(says), "{out}");
+    }
 }
 
 #[test]
@@ -301,22 +347,22 @@ fn list_all_pages_until_every_entry_is_shown() {
     let (code, out, got) = exchange(
         &["list", "--all"],
         vec![
-            Response::List { total: 700, entries: page(0, 500) },
-            Response::List { total: 700, entries: page(500, 200) },
+            Response::Entries { total: 700, entries: page(0, 500) },
+            Response::Entries { total: 700, entries: page(500, 200) },
         ],
     );
     assert_eq!(code, Some(0));
     assert_eq!(
         got,
-        [Request::List { offset: 0, limit: 500 }, Request::List { offset: 500, limit: 500 }]
+        [Request::Entries { offset: 0, limit: 500 }, Request::Entries { offset: 500, limit: 500 }]
     );
     assert_eq!(out.lines().count(), 700);
     // An empty page ends it, whatever the total says.
     let (_, _, got) = exchange(
         &["list", "--all"],
         vec![
-            Response::List { total: 900, entries: page(0, 500) },
-            Response::List { total: 900, entries: vec![] },
+            Response::Entries { total: 900, entries: page(0, 500) },
+            Response::Entries { total: 900, entries: vec![] },
         ],
     );
     assert_eq!(got.len(), 2);
@@ -324,7 +370,7 @@ fn list_all_pages_until_every_entry_is_shown() {
     let (code, _, _) = exchange(
         &["list", "--all"],
         vec![
-            Response::List { total: 900, entries: page(0, 500) },
+            Response::Entries { total: 900, entries: page(0, 500) },
             Response::Error(Error::Internal),
         ],
     );
@@ -530,7 +576,7 @@ fn status_says_where_the_pointer_is() {
         let answers =
             vec![status.clone(), Response::Peers(link(Vec::new())), Response::Input(input)];
         let (code, out, got) = exchange(&["status"], answers);
-        assert_eq!(got, vec![Request::Status, Request::Peers, Request::Input]);
+        assert_eq!(got, vec![Request::Status, Request::Peers, Request::Input, Request::Sharing]);
         assert_eq!(code, Some(0));
         assert!(out.ends_with(says), "{out}");
     }

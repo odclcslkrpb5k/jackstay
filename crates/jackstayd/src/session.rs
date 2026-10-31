@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use jackstay_clip::EntryId;
 use jackstay_proto::control::{
-    Error, MAX_LIST, MAX_SOURCE_LEN, PairReason, Request, Response, Status, Thumb, printable,
+    Error, MAX_LIST, MAX_SOURCE_LEN, PairReason, Request, Response, SharingStatus, Status, Thumb,
+    printable,
 };
 use jackstay_selection::Report;
 use jackstay_x11_clip::Clipboard;
@@ -404,6 +405,26 @@ impl Session {
         }
     }
 
+    /// The history from `offset`, at most `limit` entries; `Entries` (saying which came from
+    /// peers) for a version 6 client, else `List`.
+    fn list(&self, offset: u32, limit: u32, from_peers: bool) -> Response {
+        let current = self.tracker.current();
+        let history = self.tracker.history();
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX).min(MAX_LIST);
+        let entries = history
+            .entries()
+            .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+            .take(limit)
+            .map(|e| summary(e, Some(e.id()) == current))
+            .collect();
+        let total = u32::try_from(history.entries().len()).unwrap_or(u32::MAX);
+        if from_peers {
+            Response::Entries { total, entries }
+        } else {
+            Response::List { total, entries }
+        }
+    }
+
     fn status(&self) -> Status {
         let history = self.tracker.history();
         Status {
@@ -423,18 +444,19 @@ impl Session {
                 let status = self.status();
                 respond(self, Response::Status(status));
             }
-            Request::List { offset, limit } => {
-                let current = self.tracker.current();
-                let history = self.tracker.history();
-                let limit = usize::try_from(limit).unwrap_or(usize::MAX).min(MAX_LIST);
-                let entries = history
-                    .entries()
-                    .skip(usize::try_from(offset).unwrap_or(usize::MAX))
-                    .take(limit)
-                    .map(|e| summary(e, Some(e.id()) == current))
-                    .collect();
-                let total = u32::try_from(history.entries().len()).unwrap_or(u32::MAX);
-                respond(self, Response::List { total, entries });
+            Request::List { offset, limit } | Request::Entries { offset, limit } => {
+                let peers = matches!(request, Request::Entries { .. });
+                let response = self.list(offset, limit, peers);
+                respond(self, response);
+            }
+            Request::Sharing => {
+                let status =
+                    self.sharing.as_ref().map_or_else(SharingStatus::default, |s| SharingStatus {
+                        on: true,
+                        paused: s.paused(Instant::now()),
+                        to_come: u32::try_from(s.to_come()).unwrap_or(u32::MAX),
+                    });
+                respond(self, Response::Sharing(status));
             }
             Request::Select { id } => {
                 let id = EntryId::new(id);

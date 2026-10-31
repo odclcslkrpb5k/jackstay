@@ -23,11 +23,15 @@
 //!
 //! Version 5 added input sharing (docs/input.md, "In the daemon"): [`Request::Input`] for its
 //! state, and [`Request::Switch`] and [`Request::SwitchHome`] to move the pointer.
+//!
+//! Version 6 added clipboard sharing (docs/sharing.md): [`Request::Entries`], the history as
+//! [`Request::List`] gives it with whether each entry came from another machine
+//! ([`Summary::from_peer`]), and [`Request::Sharing`] for its state.
 
 use crate::{DecodeError, FRAME_HEADER_LEN, LimitError, MAX_PAYLOAD_LEN, Reader};
 
 /// The control protocol version this code speaks.
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 6;
 /// The oldest version the daemon still answers: each version adds to the last, so a client of an
 /// older one (a UI still running across an upgrade) keeps working.
 pub const OLDEST_VERSION: u16 = 2;
@@ -57,11 +61,20 @@ pub enum Request {
         version: u16,
     },
     Status,
-    /// Entries newest first, from `offset`, at most `limit` (and at most [`MAX_LIST`]).
+    /// Entries newest first, from `offset`, at most `limit` (and at most [`MAX_LIST`]), without
+    /// where they came from: a version 5 client's reply.
     List {
         offset: u32,
         limit: u32,
     },
+    /// As [`Request::List`], with whether each entry came from another machine
+    /// ([`Response::Entries`]).
+    Entries {
+        offset: u32,
+        limit: u32,
+    },
+    /// Clipboard sharing's state ([`Response::Sharing`]).
+    Sharing,
     Select {
         id: u64,
     },
@@ -183,6 +196,17 @@ pub struct Status {
     pub owns_clipboard: bool,
     /// Whether the last save failed, so the history on disk is behind.
     pub store_failing: bool,
+}
+
+/// Clipboard sharing, as `jackstay status` shows it (docs/sharing.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SharingStatus {
+    /// Whether sharing runs: the link is on.
+    pub on: bool,
+    /// Copies are not being announced: more than 10 a second, a loop with another tool feared.
+    pub paused: bool,
+    /// Targets of entries from other machines still to come.
+    pub to_come: u32,
 }
 
 /// Input sharing, as `jackstay status` shows it.
@@ -335,8 +359,11 @@ pub struct Summary {
     pub kinds: Kinds,
     /// Bytes held across every target.
     pub size: u64,
-    /// The owner's `WM_CLASS`, at most [`MAX_SOURCE_LEN`] bytes.
+    /// The owner's `WM_CLASS`, at most [`MAX_SOURCE_LEN`] bytes; for an entry from another
+    /// machine, that machine's name.
     pub source: Option<String>,
+    /// Whether it came from another machine (version 6; `false` in a [`Response::List`]).
+    pub from_peer: bool,
     /// The start of the text, if any, at most [`MAX_PREVIEW_CHARS`] characters.
     pub preview: String,
 }
@@ -354,6 +381,12 @@ pub enum Response {
         total: u32,
         entries: Vec<Summary>,
     },
+    /// As [`Response::List`], with [`Summary::from_peer`].
+    Entries {
+        total: u32,
+        entries: Vec<Summary>,
+    },
+    Sharing(SharingStatus),
     Imported {
         added: u32,
         skipped: u32,
@@ -529,6 +562,8 @@ const PEERS: u8 = 16;
 const INPUT: u8 = 17;
 const SWITCH: u8 = 18;
 const SWITCH_HOME: u8 = 19;
+const ENTRIES: u8 = 20;
+const SHARING: u8 = 21;
 
 const WELCOME: u8 = 64;
 const OK: u8 = 65;
@@ -544,6 +579,8 @@ const PAIRED: u8 = 74;
 const PAIR_FAILED: u8 = 75;
 const PEERS_REPLY: u8 = 76;
 const INPUT_REPLY: u8 = 77;
+const ENTRIES_REPLY: u8 = 78;
+const SHARING_REPLY: u8 = 79;
 
 const ABSENT: u8 = 0;
 const PENDING: u8 = 1;
@@ -606,11 +643,12 @@ pub fn encode_request(request: &Request, out: &mut Vec<u8>) -> Result<(), LimitE
             HELLO
         }
         Request::Status => STATUS,
-        Request::List { offset, limit } => {
+        Request::List { offset, limit } | Request::Entries { offset, limit } => {
             p.extend_from_slice(&offset.to_be_bytes());
             p.extend_from_slice(&limit.to_be_bytes());
-            LIST
+            if matches!(request, Request::List { .. }) { LIST } else { ENTRIES }
         }
+        Request::Sharing => SHARING,
         Request::Select { id } => {
             p.extend_from_slice(&id.to_be_bytes());
             SELECT
@@ -678,6 +716,8 @@ pub fn decode_request(buf: &[u8]) -> Result<Option<(Request, usize)>, DecodeErro
         HELLO => Request::Hello { version: u16_be(&mut r)? },
         STATUS => Request::Status,
         LIST => Request::List { offset: r.u32()?, limit: r.u32()? },
+        ENTRIES => Request::Entries { offset: r.u32()?, limit: r.u32()? },
+        SHARING => Request::Sharing,
         SELECT => Request::Select { id: r.u64()? },
         DELETE => Request::Delete { id: r.u64()? },
         PIN => Request::Pin { id: r.u64()?, pinned: flag(&mut r)? },
@@ -825,7 +865,13 @@ fn pair_reason_of(code: u8) -> Result<PairReason, DecodeError> {
         .ok_or(DecodeError::Limit(LimitError::UnknownCode { code }))
 }
 
-fn put_list(p: &mut Vec<u8>, total: u32, entries: &[Summary]) -> Result<(), LimitError> {
+/// A list of summaries; `from_peer` (version 6's) says whether each says where it came from.
+fn put_list(
+    p: &mut Vec<u8>,
+    total: u32,
+    entries: &[Summary],
+    from_peer: bool,
+) -> Result<(), LimitError> {
     if entries.len() > MAX_LIST {
         return Err(LimitError::TooManyEntries { count: entries.len() });
     }
@@ -854,6 +900,9 @@ fn put_list(p: &mut Vec<u8>, total: u32, entries: &[Summary]) -> Result<(), Limi
             }
         }
         put_text(p, &e.preview, MAX_PREVIEW_BYTES)?;
+        if from_peer {
+            p.push(u8::from(e.from_peer));
+        }
     }
     Ok(())
 }
@@ -986,8 +1035,18 @@ pub fn encode_response(response: &Response, out: &mut Vec<u8>) -> Result<(), Lim
             STATUS_REPLY
         }
         Response::List { total, entries } => {
-            put_list(&mut p, *total, entries)?;
+            put_list(&mut p, *total, entries, false)?;
             LIST_REPLY
+        }
+        Response::Entries { total, entries } => {
+            put_list(&mut p, *total, entries, true)?;
+            ENTRIES_REPLY
+        }
+        Response::Sharing(s) => {
+            p.push(u8::from(s.on));
+            p.push(u8::from(s.paused));
+            p.extend_from_slice(&s.to_come.to_be_bytes());
+            SHARING_REPLY
         }
         Response::Imported { added, skipped } => {
             p.extend_from_slice(&added.to_be_bytes());
@@ -1059,41 +1118,19 @@ pub fn decode_response(buf: &[u8]) -> Result<Option<(Response, usize)>, DecodeEr
                 store_failing: flag(&mut r)?,
             })
         }
-        LIST_REPLY => {
-            let total = r.u32()?;
-            let count = usize::from(u16_be(&mut r)?);
-            if count > MAX_LIST {
-                return Err(LimitError::TooManyEntries { count }.into());
+        LIST_REPLY | ENTRIES_REPLY => {
+            let (total, entries) = list(&mut r, kind == ENTRIES_REPLY)?;
+            if kind == ENTRIES_REPLY {
+                Response::Entries { total, entries }
+            } else {
+                Response::List { total, entries }
             }
-            let mut entries = Vec::with_capacity(count);
-            for _ in 0..count {
-                let id = r.u64()?;
-                let copied_at_ms = r.u64()?;
-                let pinned = flag(&mut r)?;
-                let current = flag(&mut r)?;
-                let kinds = r.u8()?;
-                if kinds & !Kinds::ALL != 0 {
-                    return Err(LimitError::UnknownCode { code: kinds }.into());
-                }
-                let size = r.u64()?;
-                let source = if flag(&mut r)? { Some(text(&mut r, MAX_SOURCE_LEN)?) } else { None };
-                let preview = text(&mut r, MAX_PREVIEW_BYTES)?;
-                if preview.chars().count() > MAX_PREVIEW_CHARS {
-                    return Err(LimitError::TextTooLong { len: preview.len() }.into());
-                }
-                entries.push(Summary {
-                    id,
-                    copied_at_ms,
-                    pinned,
-                    current,
-                    kinds: Kinds(kinds),
-                    size,
-                    source,
-                    preview,
-                });
-            }
-            Response::List { total, entries }
         }
+        SHARING_REPLY => Response::Sharing(SharingStatus {
+            on: flag(&mut r)?,
+            paused: flag(&mut r)?,
+            to_come: r.u32()?,
+        }),
         IMPORTED => Response::Imported { added: r.u32()?, skipped: r.u32()? },
         CHANGED => Response::Changed,
         THUMBNAIL_REPLY => {
@@ -1192,4 +1229,42 @@ pub fn check_decoders(data: &[u8]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// A list of summaries, as [`put_list`] writes it.
+fn list(r: &mut Reader<'_>, from_peer: bool) -> Result<(u32, Vec<Summary>), DecodeError> {
+    let total = r.u32()?;
+    let count = usize::from(u16_be(r)?);
+    if count > MAX_LIST {
+        return Err(LimitError::TooManyEntries { count }.into());
+    }
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id = r.u64()?;
+        let copied_at_ms = r.u64()?;
+        let pinned = flag(r)?;
+        let current = flag(r)?;
+        let kinds = r.u8()?;
+        if kinds & !Kinds::ALL != 0 {
+            return Err(LimitError::UnknownCode { code: kinds }.into());
+        }
+        let size = r.u64()?;
+        let source = if flag(r)? { Some(text(r, MAX_SOURCE_LEN)?) } else { None };
+        let preview = text(r, MAX_PREVIEW_BYTES)?;
+        if preview.chars().count() > MAX_PREVIEW_CHARS {
+            return Err(LimitError::TextTooLong { len: preview.len() }.into());
+        }
+        entries.push(Summary {
+            id,
+            copied_at_ms,
+            pinned,
+            current,
+            kinds: Kinds(kinds),
+            size,
+            source,
+            preview,
+            from_peer: from_peer && flag(r)?,
+        });
+    }
+    Ok((total, entries))
 }

@@ -60,10 +60,11 @@ pub fn summary(entry: &Entry, current: bool) -> Summary {
         .iter()
         .filter(|t| matches!(t.data, TargetData::Kept(_) | TargetData::Remote(_)))
         .fold(0, |k, t| k | kind_of(t.name.as_str()));
-    // A peer's name until control version 6 says where an entry came from (docs/sharing.md).
-    let source = match entry.source() {
-        Source::Local { owner_class } => owner_class.as_deref(),
-        Source::Peer { name, .. } => Some(name.as_str()),
+    // An entry from another machine names that machine (docs/sharing.md, "In history, the store
+    // and the interfaces").
+    let (source, from_peer) = match entry.source() {
+        Source::Local { owner_class } => (owner_class.as_deref(), false),
+        Source::Peer { name, .. } => (Some(name.as_str()), true),
     };
     Summary {
         id: entry.id().get(),
@@ -76,5 +77,6 @@ pub fn summary(entry: &Entry, current: bool) -> Summary {
         // cleaning as a preview.
         source: source.map(|c| truncate(&printable(c), MAX_SOURCE_LEN)),
         preview: text_start(entry).map(|t| preview(&t)).unwrap_or_default(),
+        from_peer,
     }
 }
