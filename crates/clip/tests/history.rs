@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use jackstay_clip::{
     Content, ContentError, Entry, EntryId, Format, History, Kept, Limits, MAX_NAME_LEN, NotKept,
-    RestoreError, Source, Target, TargetData, TargetName,
+    Remote, RestoreError, Source, Target, TargetData, TargetName,
 };
 use proptest::prelude::*;
 
@@ -247,7 +247,7 @@ fn accessors() {
     assert_eq!(EntryId::new(5).get(), 5);
     assert_eq!(some(h.newest()).id(), id);
     assert_eq!(name("TEXT").to_string(), "TEXT");
-    assert_eq!(ContentError::NothingKept.to_string(), "no target held");
+    assert_eq!(ContentError::NothingKept.to_string(), "no target held or to come");
     assert_eq!(RestoreError::DuplicateId(EntryId::new(2)).to_string(), "entry id 2 appears twice");
 }
 
@@ -520,4 +520,30 @@ proptest! {
             prop_assert_eq!(&state, &m.entries);
         }
     }
+}
+
+fn remote(target: &str, size: u64) -> Target {
+    let r = Remote { type_name: name(target), format: Format::Bits8, size, sha256: [7; 32] };
+    Target { name: name(target), data: TargetData::Remote(r) }
+}
+
+#[test]
+fn targets_still_to_come_count_as_held_but_never_as_kept_bytes() {
+    // A screenshot from another machine, not yet fetched, is an entry of its own.
+    let image = ok(Content::new(vec![remote("image/png", 33_000_000)]));
+    assert_eq!(image.kept_len(), 0);
+    assert!(image.kept("image/png").is_none());
+    let none = Content::new(vec![Target {
+        name: name("image/png"),
+        data: TargetData::NotKept(NotKept::OwnerFailed),
+    }]);
+    assert_eq!(none, Err(ContentError::NothingKept));
+    // Text with an image to come is not the same as the text alone, nor as the image fetched:
+    // only its hash could say that (sharing slice 4).
+    let text_and_image = ok(Content::new(vec![kept("UTF8_STRING", b"a"), remote("image/png", 3)]));
+    let fetched = ok(Content::new(vec![kept("UTF8_STRING", b"a"), kept("image/png", b"png")]));
+    assert!(!text_and_image.same_kept(&text("a")));
+    assert!(!text_and_image.same_kept(&fetched));
+    let again = ok(Content::new(vec![remote("image/png", 3), kept("UTF8_STRING", b"a")]));
+    assert!(text_and_image.same_kept(&again));
 }

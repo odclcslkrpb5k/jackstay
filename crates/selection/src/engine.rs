@@ -53,6 +53,9 @@ pub enum Report {
     OwnerHung,
     /// An exiting application's `SAVE_TARGETS` was answered; `taken` if we took the clipboard.
     SaveAnswered { taken: bool },
+    /// A paste waits for `target`, still to come from a peer (docs/sharing.md, "Paste"): it is
+    /// answered when [`Engine::update`] brings it, or refused after 3 s.
+    Wanted { target: TargetName },
 }
 
 /// `CLIPBOARD_MANAGER` held by `other` (or by no one we could see, after a failed claim).
@@ -260,6 +263,7 @@ impl Engine {
             // Other selections: PRIMARY is neither captured nor served in M1.
             Event::OwnerChanged { .. } | Event::SelectionNotify { .. } => {}
         }
+        self.settle(port, now);
         reports
     }
 
@@ -275,6 +279,7 @@ impl Engine {
         }
         self.finish_save_if_ready(port, now, &mut reports);
         self.probe_tick(port, now, &mut reports);
+        self.settle(port, now);
         reports
     }
 
@@ -286,7 +291,9 @@ impl Engine {
         now: Millis,
     ) -> Vec<Report> {
         let time = port.server_time();
-        self.claim(port, Some(content), time, now)
+        let reports = self.claim(port, Some(content), time, now);
+        self.settle(port, now);
+        reports
     }
 
     /// Clears the clipboard: abandons any capture, forgets the keep-alive candidate, claims
@@ -295,6 +302,7 @@ impl Engine {
     pub fn clear(&mut self, port: &mut impl Port, now: Millis) -> Vec<Report> {
         let time = port.server_time();
         let reports = self.claim(port, None, time, now);
+        self.settle(port, now);
         let primary = self.known.primary;
         port.set_selection_owner(primary, Some(self.our_window), time);
         self.primary_cleared = (port.selection_owner(primary) == Some(self.our_window))
@@ -549,7 +557,30 @@ impl Engine {
                 self.primary_cleared.as_ref().filter(|_| req.selection == self.known.primary)
             }
         };
-        self.transfers.answer(port, &self.known, served, req, now);
+        let wanted = self.transfers.request(port, &self.known, served, req, now);
+        reports.extend(wanted.into_iter().map(|target| Report::Wanted { target }));
+    }
+
+    /// Requests waiting for targets still to come, settled against what is served now.
+    fn settle(&mut self, port: &mut impl Port, now: Millis) {
+        let served = match &self.ownership {
+            Ownership::Ours(served) => Some(served),
+            Ownership::Theirs { .. } | Ownership::Unowned => None,
+        };
+        self.transfers.settle(port, &self.known, served, now);
+    }
+
+    /// The content served now gained targets (fetched from a peer) or changed in place: served
+    /// from now on without claiming again, so applications see no `SelectionClear`, and the
+    /// pastes waiting for what came are answered. Nothing if the engine does not serve content.
+    pub fn update(&mut self, port: &mut impl Port, content: Arc<Content>, now: Millis) {
+        if let Ownership::Ours(served) = &self.ownership
+            && served.has_content()
+        {
+            let since = served.since;
+            self.ownership = Ownership::Ours(Served::new(port, Some(content), since));
+            self.settle(port, now);
+        }
     }
 
     /// `CLIPBOARD_MANAGER` requests: `TARGETS`, and `SAVE_TARGETS` from an exiting application

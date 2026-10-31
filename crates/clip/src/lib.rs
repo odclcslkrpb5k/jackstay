@@ -4,6 +4,7 @@ mod content;
 mod history;
 
 pub use content::{
-    Content, ContentError, Format, Kept, MAX_NAME_LEN, NotKept, Target, TargetData, TargetName,
+    Content, ContentError, Format, Kept, MAX_NAME_LEN, NotKept, Remote, Target, TargetData,
+    TargetName,
 };
 pub use history::{Entry, EntryId, History, Limits, Recorded, RestoreError, Source};

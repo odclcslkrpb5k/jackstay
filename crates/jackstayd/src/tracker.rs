@@ -99,7 +99,8 @@ impl Tracker {
             | Report::ManagerConflict { .. }
             | Report::ManagerLost
             | Report::OwnerHung
-            | Report::SaveAnswered { .. } => false,
+            | Report::SaveAnswered { .. }
+            | Report::Wanted { .. } => false,
         }
     }
 

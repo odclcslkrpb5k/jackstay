@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use jackstay_clip::{Content, Format, TargetData};
+use jackstay_clip::{Content, Format, TargetData, TargetName};
 
 use crate::atoms::{Known, MAX_ATOM_LIST_BYTES};
 use crate::text::{compound_text, from_latin1, latin1};
@@ -15,6 +15,9 @@ pub(crate) const TRANSFER_IDLE_MS: u64 = 10_000;
 /// The largest reply written in one property, and the INCR chunk size, unless the server's own
 /// request limit is lower (docs/selection.md, "Serving").
 pub(crate) const MAX_INCR_CHUNK: usize = 256 * 1024;
+/// How long a request for a target still to come from a peer waits for it (docs/sharing.md,
+/// "Paste"): refused after, before any byte is sent.
+pub(crate) const WAIT_MS: u64 = 3_000;
 
 /// One reply's value. Its `Debug` shows the data's length, never the data.
 #[derive(Clone)]
@@ -49,6 +52,8 @@ pub(crate) struct Served {
     content: Option<Arc<Content>>,
     /// Held targets by atom, with their type's atom, interned once.
     held: Vec<(Atom, Atom, usize)>,
+    /// Targets still to come from a peer, by atom: offered, and waited for when asked.
+    pending: Vec<(Atom, TargetName)>,
     /// The held text, decoded, if any text target is held.
     text: Option<String>,
 }
@@ -59,6 +64,7 @@ impl fmt::Debug for Served {
             .field("since", &self.since)
             .field("content", &self.content)
             .field("held", &self.held)
+            .field("pending", &self.pending)
             .field("text_len", &self.text.as_ref().map(String::len))
             .finish()
     }
@@ -71,16 +77,30 @@ impl Served {
         since: Timestamp,
     ) -> Self {
         let mut held = Vec::new();
+        let mut pending = Vec::new();
         let mut text = None;
         if let Some(c) = &content {
             for (i, t) in c.targets().iter().enumerate() {
-                if let TargetData::Kept(k) = &t.data {
-                    held.push((port.intern(&t.name), port.intern(k.type_name()), i));
+                match &t.data {
+                    TargetData::Kept(k) => {
+                        held.push((port.intern(&t.name), port.intern(k.type_name()), i));
+                    }
+                    TargetData::Remote(_) => pending.push((port.intern(&t.name), t.name.clone())),
+                    TargetData::NotKept(_) => {}
                 }
             }
             text = held_text(c);
         }
-        Served { since, content, held, text }
+        Served { since, content, held, pending, text }
+    }
+
+    pub(crate) fn has_content(&self) -> bool {
+        self.content.is_some()
+    }
+
+    /// The name of `target` if it is still to come from a peer.
+    fn pending(&self, target: Atom) -> Option<&TargetName> {
+        self.pending.iter().find(|p| p.0 == target).map(|p| &p.1)
     }
 
     /// Every target offered: held ones, text aliases, and the protocol's own. A cleared
@@ -91,6 +111,7 @@ impl Served {
         }
         let mut out = vec![known.targets, known.multiple, known.timestamp];
         out.extend(self.held.iter().map(|h| h.0));
+        out.extend(self.pending.iter().map(|p| p.0));
         if let Some(text) = &self.text {
             out.extend([known.utf8_string, known.text_plain_utf8, known.compound_text, known.text]);
             if latin1(text).is_some() {
@@ -154,10 +175,20 @@ fn held_text(content: &Content) -> Option<String> {
     utf8.or_else(|| content.kept("STRING").map(|k| from_latin1(k.bytes())))
 }
 
-/// Outgoing INCR transfers, keyed by (requestor, property).
+/// A request that waits for targets still to come: answered when they arrive, refused when its
+/// deadline passes or the clipboard moves on (another claim: a newer `since`).
+#[derive(Debug)]
+struct Waiting {
+    req: Request,
+    since: Timestamp,
+    deadline: Millis,
+}
+
+/// Outgoing INCR transfers, keyed by (requestor, property), and requests waiting.
 #[derive(Debug)]
 pub(crate) struct Transfers {
     live: HashMap<(Window, Atom), Transfer>,
+    waiting: Vec<Waiting>,
     /// The largest value written in one property; also the chunk size.
     chunk: usize,
 }
@@ -170,6 +201,7 @@ struct Dest {
     motif: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Request {
     pub requestor: Window,
     pub selection: Atom,
@@ -181,15 +213,106 @@ pub(crate) struct Request {
 impl Transfers {
     /// `max_property` is the most data the server takes in one `ChangeProperty`.
     pub(crate) fn new(max_property: usize) -> Self {
-        Transfers { live: HashMap::new(), chunk: MAX_INCR_CHUNK.min(max_property).max(1) }
+        Transfers {
+            live: HashMap::new(),
+            waiting: Vec::new(),
+            chunk: MAX_INCR_CHUNK.min(max_property).max(1),
+        }
     }
 
     pub(crate) fn deadline(&self) -> Option<Millis> {
-        self.live.values().map(|t| t.deadline).min()
+        let live = self.live.values().map(|t| t.deadline);
+        live.chain(self.waiting.iter().map(|w| w.deadline)).min()
+    }
+
+    /// The targets still to come that `req` asks for, alone or in a `MULTIPLE`: none if it can be
+    /// answered now.
+    fn wanted(
+        port: &mut impl Port,
+        known: &Known,
+        served: &Served,
+        req: &Request,
+    ) -> Vec<TargetName> {
+        if let Some(name) = served.pending(req.target) {
+            return vec![name.clone()];
+        }
+        if req.target != known.multiple || served.pending.is_empty() {
+            return Vec::new();
+        }
+        let property = req.property.unwrap_or(req.target);
+        let Read::Value(list) =
+            port.read_property(req.requestor, property, false, MAX_ATOM_LIST_BYTES)
+        else {
+            return Vec::new();
+        };
+        let pairs = list.data.as_chunks::<8>().0;
+        pairs
+            .iter()
+            .filter_map(|pair| atom_at(pair, 0))
+            .filter_map(|t| served.pending(t))
+            .cloned()
+            .collect()
+    }
+
+    /// Answers `req` with `served`, or holds it while targets it asks for are still to come; the
+    /// names of those it waits for.
+    pub(crate) fn request(
+        &mut self,
+        port: &mut impl Port,
+        known: &Known,
+        served: Option<&Served>,
+        req: &Request,
+        now: Millis,
+    ) -> Vec<TargetName> {
+        if let Some(s) = served
+            && (req.time == Timestamp::CURRENT_TIME || !req.time.is_earlier_than(s.since))
+        {
+            let wanted = Self::wanted(port, known, s, req);
+            if !wanted.is_empty() {
+                // Its window's end drops the request (`on_destroyed`).
+                port.watch_window(req.requestor, true);
+                let deadline = now.after(WAIT_MS);
+                self.waiting.push(Waiting { req: *req, since: s.since, deadline });
+                return wanted;
+            }
+        }
+        self.answer(port, known, served, req, now);
+        Vec::new()
+    }
+
+    /// What `served` now holds, after an update or another claim: the requests waiting are
+    /// answered if what they ask for has come, refused if the clipboard moved on or their
+    /// deadline passed, and otherwise left waiting.
+    pub(crate) fn settle(
+        &mut self,
+        port: &mut impl Port,
+        known: &Known,
+        served: Option<&Served>,
+        now: Millis,
+    ) {
+        let waiting = std::mem::take(&mut self.waiting);
+        for w in waiting {
+            let current = served.filter(|s| s.since == w.since);
+            match current {
+                Some(s) if w.deadline > now => {
+                    if Self::wanted(port, known, s, &w.req).is_empty() {
+                        self.answer(port, known, current, &w.req, now);
+                    } else {
+                        self.waiting.push(w);
+                        continue;
+                    }
+                }
+                _ => {
+                    let r = &w.req;
+                    port.send_selection_notify(r.requestor, r.selection, r.target, None, r.time);
+                }
+            }
+            self.unwatch_if_idle(port, w.req.requestor);
+        }
     }
 
     /// Answers a request for a selection we own with `served`, or refuses it.
-    pub(crate) fn answer(
+    fn answer(
         &mut self,
         port: &mut impl Port,
         known: &Known,
@@ -308,6 +431,7 @@ impl Transfers {
 
     pub(crate) fn on_destroyed(&mut self, window: Window) {
         self.live.retain(|k, _| k.0 != window);
+        self.waiting.retain(|w| w.req.requestor != window);
     }
 
     pub(crate) fn on_tick(&mut self, port: &mut impl Port, now: Millis) {
@@ -320,7 +444,9 @@ impl Transfers {
     }
 
     fn unwatch_if_idle(&mut self, port: &mut impl Port, window: Window) {
-        if !self.live.keys().any(|k| k.0 == window) {
+        if !self.live.keys().any(|k| k.0 == window)
+            && !self.waiting.iter().any(|w| w.req.requestor == window)
+        {
             port.watch_window(window, false);
         }
     }

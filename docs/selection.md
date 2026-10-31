@@ -245,6 +245,15 @@ A `SelectionRequest` for a selection we own:
   `DestroyNotify`. A slow or dead requestor stalls only its own transfer.
   Motif's `CLIP_TEMPORARY` requests never get INCR, which Motif cannot read
   (qxcbclipboard.cpp:443-446); a reply too large for one property is refused.
+- **Targets still to come** (clipboard sharing, docs/sharing.md, "Paste"): an entry from another
+  machine whose large targets are still being fetched offers them in `TARGETS`. A request for
+  one, or a `MULTIPLE` naming one, is held, its `SelectionNotify` not yet sent, and reported
+  (`Wanted`) so the daemon fetches it first. `Engine::update` serves the fuller content without
+  claiming again, and the held requests whose targets came are answered, as any other. A held
+  request is refused (`property None`, before any byte) 3 s after it came, or as soon as the
+  clipboard moves on (another claim, `SelectionClear`), even if the next entry has the same target
+  on its way; it is dropped if its requestor's window goes. This is the deferred reply the image
+  aliases above would also use; it is built for sharing first.
 - `SelectionClear` for a selection we own means we have lost it. The state becomes **Theirs**,
   and the XFixes notification that follows starts a capture.
 

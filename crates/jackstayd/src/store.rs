@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
-use jackstay_clip::{Content, Entry, EntryId, History, Kept, Limits, Target, TargetData};
+use jackstay_clip::{Content, Entry, EntryId, History, Kept, Limits, NotKept, Target, TargetData};
 use jackstay_store::{BlobHash, Index, SavedData, SavedEntry, SavedTarget, encode, parse};
 
 /// The longest index read; far beyond any history the limits allow.
@@ -360,7 +360,7 @@ impl Store {
             .iter()
             .map(|t| match &t.data {
                 TargetData::Kept(k) => Some(BlobHash::of(k.bytes())),
-                TargetData::NotKept(_) => None,
+                TargetData::Remote(_) | TargetData::NotKept(_) => None,
             })
             .collect();
         self.hashes.insert(entry.id(), (Arc::clone(entry.content()), names.clone()));
@@ -393,6 +393,9 @@ impl Store {
                         }
                     }
                     (TargetData::NotKept(reason), _) => SavedData::NotKept(*reason),
+                    // Nothing makes a target still to come before the daemon shares (sharing
+                    // slice 5); the index learns to keep one in slice 4 (docs/sharing.md).
+                    (TargetData::Remote(_), _) => SavedData::NotKept(NotKept::OwnerFailed),
                     (TargetData::Kept(_), None) => continue,
                 };
                 targets.push(SavedTarget { name: t.name.clone(), data });

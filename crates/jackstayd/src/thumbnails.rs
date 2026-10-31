@@ -93,7 +93,7 @@ fn images(content: &Content) -> Vec<&[u8]> {
         .filter(|t| t.name.as_str().starts_with("image/"))
         .filter_map(|t| match &t.data {
             TargetData::Kept(k) => Some(k.bytes()),
-            TargetData::NotKept(_) => None,
+            TargetData::Remote(_) | TargetData::NotKept(_) => None,
         })
         .take(MAX_TRIES)
         .collect()

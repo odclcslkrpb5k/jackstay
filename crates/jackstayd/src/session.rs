@@ -191,7 +191,9 @@ fn describe(report: &Report) -> Option<String> {
         | Report::Claimed
         | Report::ClaimFailed
         | Report::Lost
-        | Report::SaveAnswered { .. } => return None,
+        | Report::SaveAnswered { .. }
+        // The fetch it asks for is the sharing's (slice 5); never logged with the target.
+        | Report::Wanted { .. } => return None,
     })
 }
 

@@ -12,4 +12,5 @@ mod edges;
 mod liveness;
 mod races;
 mod scenarios;
+mod sharing;
 mod support;

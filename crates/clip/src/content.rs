@@ -144,9 +144,21 @@ pub enum NotKept {
     OwnerFailed,
 }
 
+/// A target another machine holds and announced, not yet fetched (docs/sharing.md,
+/// "Receiving"): served once its bytes arrive, and counted as held meanwhile.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Remote {
+    pub type_name: TargetName,
+    pub format: Format,
+    pub size: u64,
+    pub sha256: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TargetData {
     Kept(Kept),
+    /// Announced by a peer, not yet fetched.
+    Remote(Remote),
     NotKept(NotKept),
 }
 
@@ -158,7 +170,8 @@ pub struct Target {
 }
 
 /// What one copy offered: every target, held or not. Never empty, names never repeat, and at least
-/// one target is held, since an entry with nothing to paste is not an entry.
+/// one target is held or on its way from a peer, since an entry with nothing to paste is not an
+/// entry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Content {
     targets: Vec<Target>,
@@ -168,7 +181,7 @@ impl Content {
     /// # Errors
     /// [`ContentError::NothingKept`] if no target is held, or [`ContentError::DuplicateTarget`].
     pub fn new(targets: Vec<Target>) -> Result<Self, ContentError> {
-        if !targets.iter().any(|t| matches!(t.data, TargetData::Kept(_))) {
+        if !targets.iter().any(|t| matches!(t.data, TargetData::Kept(_) | TargetData::Remote(_))) {
             return Err(ContentError::NothingKept);
         }
         let mut names: Vec<&TargetName> = targets.iter().map(|t| &t.name).collect();
@@ -190,28 +203,28 @@ impl Content {
     pub fn kept(&self, name: &str) -> Option<&Kept> {
         self.targets.iter().find(|t| t.name.as_str() == name).and_then(|t| match &t.data {
             TargetData::Kept(k) => Some(k),
-            TargetData::NotKept(_) => None,
+            TargetData::Remote(_) | TargetData::NotKept(_) => None,
         })
     }
 
     /// Whether two copies hold the same thing: the same set of kept targets, with the same types,
-    /// formats and bytes. Target order and the reasons a target was not kept do not matter.
+    /// formats and bytes, and the same targets still to come from a peer. Target order and the
+    /// reasons a target was not kept do not matter. A target still to come never equals one kept:
+    /// that takes its hash (docs/sharing.md, "Shape").
     #[must_use]
     pub fn same_kept(&self, other: &Content) -> bool {
-        self.kept_sorted() == other.kept_sorted()
+        self.held_sorted() == other.held_sorted()
     }
 
-    fn kept_sorted(&self) -> Vec<(&TargetName, &Kept)> {
-        let mut kept: Vec<(&TargetName, &Kept)> = self
+    fn held_sorted(&self) -> Vec<(&TargetName, &TargetData)> {
+        let mut held: Vec<(&TargetName, &TargetData)> = self
             .targets
             .iter()
-            .filter_map(|t| match &t.data {
-                TargetData::Kept(k) => Some((&t.name, k)),
-                TargetData::NotKept(_) => None,
-            })
+            .filter(|t| !matches!(t.data, TargetData::NotKept(_)))
+            .map(|t| (&t.name, &t.data))
             .collect();
-        kept.sort_by(|a, b| a.0.cmp(b.0));
-        kept
+        held.sort_by(|a, b| a.0.cmp(b.0));
+        held
     }
 
     /// Bytes held across every target.
@@ -221,7 +234,7 @@ impl Content {
             .iter()
             .filter_map(|t| match &t.data {
                 TargetData::Kept(k) => u64::try_from(k.bytes.len()).ok(),
-                TargetData::NotKept(_) => None,
+                TargetData::Remote(_) | TargetData::NotKept(_) => None,
             })
             .fold(0, u64::saturating_add)
     }
@@ -244,7 +257,7 @@ impl fmt::Display for ContentError {
             ContentError::Misaligned { format, len } => {
                 write!(f, "{len} bytes is not a whole number of {}-bit units", format.bits())
             }
-            ContentError::NothingKept => write!(f, "no target held"),
+            ContentError::NothingKept => write!(f, "no target held or to come"),
             ContentError::DuplicateTarget(Some(name)) => write!(f, "duplicate target {name}"),
             ContentError::DuplicateTarget(None) => write!(f, "duplicate target"),
         }
