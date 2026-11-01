@@ -113,3 +113,31 @@ fn clipman_counts_only_in_our_pid_namespace() {
     assert!(clipman_running(&proc));
     let _ = std::fs::remove_dir_all(&proc);
 }
+
+#[test]
+fn a_rival_in_another_pid_namespace_counts_only_on_our_display() {
+    let proc = std::env::temp_dir().join(format!("jackstay-proc-rival-ns-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&proc);
+    let made = |r: std::io::Result<()>| r.unwrap_or_else(|e| panic!("{e}"));
+    for dir in ["self/ns", "42/ns"] {
+        made(std::fs::create_dir_all(proc.join(dir)));
+    }
+    made(std::fs::write(proc.join("42").join("comm"), "synergys\n"));
+    made(std::os::unix::fs::symlink("pid:[1]", proc.join("self").join("ns").join("pid")));
+    made(std::os::unix::fs::symlink("pid:[2]", proc.join("42").join("ns").join("pid")));
+    let environ = |env: &[u8]| made(std::fs::write(proc.join("42").join("environ"), env));
+    // In a container, naming no display (the gate's stand-in): not ours.
+    environ(b"HOME=/home/u\0");
+    assert_eq!(input_rival(&proc, Some(":0")), None);
+    // On our display (Deskflow's Flatpak): ours.
+    environ(b"DISPLAY=:0\0");
+    assert_eq!(input_rival(&proc, Some(":0")), Some("synergys"));
+    environ(b"DISPLAY=:5\0");
+    assert_eq!(input_rival(&proc, Some(":0")), None);
+    // In our namespace, naming no display, it counts as before.
+    made(std::fs::remove_file(proc.join("42").join("ns").join("pid")));
+    made(std::os::unix::fs::symlink("pid:[1]", proc.join("42").join("ns").join("pid")));
+    environ(b"HOME=/home/u\0");
+    assert_eq!(input_rival(&proc, Some(":0")), Some("synergys"));
+    let _ = std::fs::remove_dir_all(&proc);
+}

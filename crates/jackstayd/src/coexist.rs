@@ -126,9 +126,11 @@ pub fn input_rival_named(comm: &[u8]) -> Option<&'static str> {
 /// The first process in `proc` (normally `/proc`) that is one of [`INPUT_RIVALS`], whoever runs
 /// it, unless its environment shows it on an X display other than `display` (ours): one on
 /// another display grabs nothing of ours. One whose environment cannot be read, or names no
-/// display, counts.
+/// display, counts, unless it runs in another PID namespace: there it counts only if it names
+/// our display (Deskflow's Flatpak does; the gate's stand-in, in a container, does not).
 #[must_use]
 pub fn input_rival(proc: &Path, display: Option<&str>) -> Option<&'static str> {
+    let ours = fs::read_link(proc.join("self").join("ns").join("pid")).ok();
     let entries = fs::read_dir(proc).ok()?;
     entries.filter_map(Result::ok).find_map(|e| {
         let is_pid = e
@@ -140,8 +142,12 @@ pub fn input_rival(proc: &Path, display: Option<&str>) -> Option<&'static str> {
         }
         let rival = input_rival_named(&fs::read(e.path().join("comm")).unwrap_or_default())?;
         let theirs = fs::read(e.path().join("environ")).ok().and_then(|env| displayed(&env));
+        let ns = fs::read_link(e.path().join("ns").join("pid")).ok();
+        let elsewhere = ours.is_some() && ns.is_some() && ns != ours;
         match (display, theirs) {
-            (Some(ours), Some(theirs)) if !same_display(ours, &theirs) => None,
+            (Some(ours), Some(theirs)) if same_display(ours, &theirs) => Some(rival),
+            (Some(_), Some(_)) => None,
+            _ if elsewhere => None,
             _ => Some(rival),
         }
     })

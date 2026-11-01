@@ -293,7 +293,11 @@ Input sharing refuses to start while a process named `synergy`, `synergys`, `syn
 enough to start it. Synergy's own barriers and grabs would otherwise fight ours. The clipboard is
 unaffected. A rival whose environment names another X display than ours is ignored: it grabs
 nothing of ours (and the tests run one rival per Xvfb). One whose environment cannot be read
-(another user's), or names no display, counts.
+(another user's), or names no display, counts, unless it runs in another PID namespace: there it
+counts only if its environment names our display. Deskflow's Flatpak runs in a namespace of its
+own and names it; the gate's stand-in Synergy runs in the development container and names none.
+Before this (2026-10-31), every `./check` on the owner's machine turned its input sharing off for
+the stand-in's life, as it stopped its clipboard manager (docs/daemon.md, "Coexistence").
 
 ## In the daemon
 
@@ -309,7 +313,21 @@ nothing of ours (and the tests run one rival per Xvfb). One whose environment ca
 - `jackstay switch [PEER]` (Primary, above).
 - Configuration gains `[input]` (`primary`, `left`, `right`, `top`, `bottom`, `return_key`,
   `lock_key`); the settings window keeps it as it keeps the link's keys.
-- After `Leave`, the secondary's cursor stays where it left, at the edge, as Synergy's does.
+- **The cursor, and waking.** When the primary stops driving the secondary (`Leave`, `Exit`, the
+  session lost, a rival), the secondary hides its cursor where it was left: a 1×1 input-only,
+  unmanaged window showing the invisible cursor is mapped under the pointer, as Synergy's client
+  does. This machine's own mouse moving the pointer off it shows the cursor; its first raw motion
+  also takes the window away, so the pixel takes clicks again. When the primary drives it again,
+  the window goes. When it starts driving, and at most once a second while it does, the
+  secondary wakes its screens: `ForceScreenSaver(Reset)`, and with DPMS enabled and the displays
+  not on, `DPMSForceLevel(On)`. *Observed* by the owner (2026-10-31): Synergy woke xiphos's
+  sleeping displays and Jackstay's injected input did not, and Jackstay left the cursor showing
+  at xiphos's edge. Tested in the two-daemon harness: the hiding window and the invisible cursor
+  after a crossing back, a warp off it showing the cursor, the window gone when driven again.
+  Not testable there: Xvfb has no DPMS, and its screen saver is reset by XTest input anyway (a
+  test asserts the screen wakes, but passes with the wake removed); nor can a test move Xvfb's
+  pointer other than through XTest, so taking the window away on this machine's own motion is
+  untested. The wake is checked on xiphos at acceptance.
 
 ## Latency
 
@@ -419,7 +437,7 @@ server read-only.
 | 12 | Return key consumed?; lock-to-screen and cross-to keys missing | Consumed, never forwarded; `lock_key`; `jackstay switch PEER` |
 | 13 | Grab retries per barrier hit | At most one per 50 ms |
 | 14 | Synergy's GUI and forks' process names | Full list |
-| 15 | Cursor left visible at the secondary's edge; Synergy's mapping differs | Kept, as Synergy does; mapping difference checked at acceptance |
+| 15 | Cursor left visible at the secondary's edge; Synergy's mapping differs | Kept, as Synergy does; mapping difference checked at acceptance. **Wrong:** the owner saw Synergy hide it (2026-10-31); now hidden ("Secondary") |
 
 ### Pass 2 (code review of slice 1), 2026-10-29
 

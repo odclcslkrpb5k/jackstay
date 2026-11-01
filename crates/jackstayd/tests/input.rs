@@ -14,6 +14,8 @@ use jackstay_proto::control::{Error, InputState, InputStatus, Request, Response}
 use support::link::{Faults, Machine, Rig};
 use support::{Xvfb, ask, ok};
 use x11rb::connection::Connection as _;
+use x11rb::protocol::screensaver::{self, ConnectionExt as _};
+use x11rb::protocol::xfixes::ConnectionExt as _;
 use x11rb::protocol::xproto::{self, ConnectionExt as _};
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
@@ -72,7 +74,33 @@ impl Hands {
     fn on(x: &Xvfb) -> Hands {
         let (conn, screen) = ok(x11rb::connect(Some(&x.display)));
         let root = conn.setup().roots[screen].root;
+        ok(ok(conn.xfixes_query_version(5, 0)).reply());
         Hands { conn, root }
+    }
+
+    /// Whether the cursor shown is invisible: every pixel transparent.
+    fn cursor_hidden(&self) -> bool {
+        let image = ok(ok(self.conn.xfixes_get_cursor_image()).reply());
+        image.cursor_image.iter().all(|argb| argb >> 24 == 0)
+    }
+
+    /// Whether a window hiding the cursor is mapped: 1×1, input-only, unmanaged.
+    fn hider_mapped(&self) -> bool {
+        let tree = ok(ok(self.conn.query_tree(self.root)).reply());
+        tree.children.iter().any(|&w| {
+            let attrs = ok(ok(self.conn.get_window_attributes(w)).reply());
+            let geometry = ok(ok(self.conn.get_geometry(w)).reply());
+            attrs.map_state == xproto::MapState::VIEWABLE
+                && attrs.class == xproto::WindowClass::INPUT_ONLY
+                && attrs.override_redirect
+                && (geometry.width, geometry.height) == (1, 1)
+        })
+    }
+
+    /// Whether the screen saver is on.
+    fn saver_on(&self) -> bool {
+        let info = ok(ok(self.conn.screensaver_query_info(self.root)).reply());
+        info.state == u8::from(screensaver::State::ON)
     }
 
     /// Relative motion, as a mouse makes.
@@ -216,6 +244,39 @@ fn the_pointer_crosses_out_and_back_on_the_owners_layouts() {
     }
     assert_eq!(a.pointer(), (1, 2000));
     assert_eq!(input(&rig.b).state, InputState::Secondary);
+}
+
+#[test]
+fn b_wakes_when_driven_and_hides_its_cursor_when_left() {
+    let _turn = no_rival();
+    let rig = owners();
+    let (a, b) = (Hands::on(&rig.a.x), Hands::on(&rig.b.x));
+    // B's screen asleep (Xvfb has no DPMS; its screen saver stands for it).
+    ok(b.conn.force_screen_saver(xproto::ScreenSaver::ACTIVE));
+    ok(b.conn.sync());
+    soon("B's screen saver on", SOON, || b.saver_on());
+    cross_left(&rig, &a, 2000);
+    input_in(&rig.b, InputState::Driven, SOON);
+    soon("B's screen awake", SOON, || !b.saver_on());
+    assert!(!b.cursor_hidden(), "the cursor shows on B while A drives it");
+    assert!(!b.hider_mapped());
+    // Back: the cursor at B's edge is hidden.
+    b_to_x(&a, &b, 3439);
+    let until = Instant::now() + SOON;
+    while input(&rig.a).state != InputState::Here {
+        assert!(Instant::now() < until, "not back: B {:?}", input(&rig.b));
+        a.nudge(5, 0);
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    soon("B's cursor hidden", SOON, || b.cursor_hidden() && b.hider_mapped());
+    // B's own pointer moving off the spot shows it again.
+    b.warp(1000, 2000);
+    soon("B's cursor shown", SOON, || !b.cursor_hidden());
+    // And A driving B again takes the hiding window away, wherever it was left.
+    assert!(b.hider_mapped(), "a warp is not B's own mouse moving");
+    cross_left(&rig, &a, 2000);
+    input_in(&rig.b, InputState::Driven, SOON);
+    soon("B's cursor shown when driven", SOON, || !b.hider_mapped() && !b.cursor_hidden());
 }
 
 #[test]

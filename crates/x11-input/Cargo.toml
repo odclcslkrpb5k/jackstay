@@ -14,4 +14,4 @@ workspace = true
 [dependencies]
 jackstay-input = { path = "../input", version = "=0.0.0" }
 jackstay-proto = { path = "../proto", version = "=0.0.0" }
-x11rb = { version = "=0.14.0", default-features = false, features = ["xfixes", "xinput", "xtest", "randr", "xkb"] }
+x11rb = { version = "=0.14.0", default-features = false, features = ["xfixes", "xinput", "xtest", "randr", "xkb", "dpms"] }

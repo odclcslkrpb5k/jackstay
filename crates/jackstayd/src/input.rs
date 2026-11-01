@@ -275,6 +275,8 @@ fn run(start: Start, shared: &Mutex<Published>) -> Result<(), String> {
         for report in plumbing.reports.try_iter() {
             worker.report(&mut display, report)?;
         }
+        // Before the events are read: waking asks the server, which can queue events.
+        worker.follow(&mut display)?;
         // Until none are queued: any request waiting for a reply reads events into the
         // connection's queue, where poll cannot see them.
         loop {
@@ -356,6 +358,8 @@ struct Worker {
     last: Option<Where<PublicKey>>,
     /// When the pointer went onto the peer it is on.
     on_since: Option<Instant>,
+    /// A secondary: whether the primary drove it at the last turn.
+    was_driven: bool,
 }
 
 fn layout(display: &Display) -> Result<Layout, String> {
@@ -392,6 +396,7 @@ impl Worker {
             asleep: false,
             last: None,
             on_since: None,
+            was_driven: false,
         })
     }
 
@@ -416,6 +421,26 @@ impl Worker {
                 self.unresolved.clone().unwrap_or_else(|| "waiting for the peers".to_owned()),
             ),
         }
+    }
+
+    /// A secondary's cursor and screens follow whether the primary drives it (docs/input.md,
+    /// "Secondary"): the cursor hidden when it stops, shown and the screens woken when it starts,
+    /// and woken again while it goes on.
+    fn follow(&mut self, display: &mut Display) -> Result<(), String> {
+        let Role::Secondary(_, s) = &self.role else { return Ok(()) };
+        let driven = s.active() && !self.asleep;
+        if driven != self.was_driven {
+            self.was_driven = driven;
+            if driven {
+                display.show_cursor().map_err(x)?;
+                display.wake(true).map_err(x)?;
+            } else {
+                display.hide_cursor().map_err(x)?;
+            }
+        } else if driven {
+            display.wake(false).map_err(x)?;
+        }
+        Ok(())
     }
 
     /// A rival started: everything this thread holds is let go.
@@ -674,6 +699,8 @@ impl Worker {
                     let (px, py, _) = display.pointer().map_err(x)?;
                     s.moved(px, py);
                 }
+                // This machine's own mouse, not driven: its cursor shows wherever it goes.
+                Role::Secondary(..) if !xtest => display.show_cursor().map_err(x)?,
                 Role::Secondary(..) => {}
             },
             Event::Button { button, down } => {

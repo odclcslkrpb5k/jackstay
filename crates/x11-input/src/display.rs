@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::time::{Duration, Instant};
 
 use jackstay_input::{Action, Keymap, Set, Syms};
 use jackstay_proto::link::{
@@ -10,6 +11,7 @@ use jackstay_proto::link::{
 };
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::Event as XEvent;
+use x11rb::protocol::dpms::{self, ConnectionExt as _};
 use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::xfixes::{self, ConnectionExt as _};
 use x11rb::protocol::xinput::{self, ConnectionExt as _};
@@ -19,6 +21,8 @@ use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
 /// The master pointer and keyboard every X server has.
+/// How often the screens are woken while the primary drives this machine.
+const WAKE_EVERY: Duration = Duration::from_secs(1);
 const MASTER_POINTER: u16 = 2;
 const MASTER_KEYBOARD: u16 = 3;
 /// The keysym of Num Lock, to find which modifier it is.
@@ -130,6 +134,14 @@ pub struct Display {
     last: Option<(i32, i32)>,
     /// The keymap as last read, to tell a real change from a device switch.
     map: Option<KeyboardMap>,
+    /// A secondary's 1×1 window showing the invisible cursor, mapped under the pointer to hide
+    /// it when the primary stops driving this machine (docs/input.md, "Secondary").
+    hider: Option<xproto::Window>,
+    cursor_hidden: bool,
+    /// Whether the server has DPMS, to turn displays back on.
+    dpms: bool,
+    /// When the screens were last woken.
+    woken: Option<Instant>,
 }
 
 /// An `Fp3232` in 1/256 px.
@@ -240,7 +252,12 @@ impl Display {
             grabbed: false,
             last: None,
             map: None,
+            hider: None,
+            cursor_hidden: false,
+            dpms: false,
+            woken: None,
         };
+        d.dpms = d.conn.extension_information(dpms::X11_EXTENSION_NAME).map_err(x)?.is_some();
         d.read_devices()?;
         d.map = Some(d.keyboard_map()?);
         d.conn.flush().map_err(x)?;
@@ -601,6 +618,71 @@ impl Display {
             )
             .map_err(x)?;
         Ok(())
+    }
+
+    /// Hides the cursor where the pointer is, as the primary stops driving this machine: a
+    /// window showing the invisible cursor goes under it. This machine's own mouse moving the
+    /// pointer off it shows the cursor again; [`Display::show_cursor`] takes it away.
+    ///
+    /// # Errors
+    /// The connection failed.
+    pub fn hide_cursor(&mut self) -> Result<(), Error> {
+        let (px, py, _) = self.pointer()?;
+        let hider = self.hider()?;
+        let place =
+            xproto::ConfigureWindowAux::new().x(px).y(py).stack_mode(xproto::StackMode::ABOVE);
+        self.conn.configure_window(hider, &place).map_err(x)?;
+        self.conn.map_window(hider).map_err(x)?;
+        self.conn.flush().map_err(x)?;
+        self.cursor_hidden = true;
+        Ok(())
+    }
+
+    /// The window that hides the cursor, made the first time: input-only, unmanaged, 1×1.
+    fn hider(&mut self) -> Result<xproto::Window, Error> {
+        if let Some(w) = self.hider {
+            return Ok(w);
+        }
+        let w = self.conn.generate_id().map_err(x)?;
+        let aux = xproto::CreateWindowAux::new().override_redirect(1).cursor(self.invisible);
+        let class = xproto::WindowClass::INPUT_ONLY;
+        self.conn.create_window(0, w, self.root, 0, 0, 1, 1, 0, class, 0, &aux).map_err(x)?;
+        self.hider = Some(w);
+        Ok(w)
+    }
+
+    /// Takes the window hiding the cursor away, if it is there.
+    ///
+    /// # Errors
+    /// The connection failed.
+    pub fn show_cursor(&mut self) -> Result<(), Error> {
+        if let Some(w) = self.hider.filter(|_| self.cursor_hidden) {
+            self.conn.unmap_window(w).map_err(x)?;
+            self.conn.flush().map_err(x)?;
+        }
+        self.cursor_hidden = false;
+        Ok(())
+    }
+
+    /// Wakes the screens, as input from this machine's own mouse and keyboard would: resets the
+    /// screen saver, and turns displays that DPMS put to sleep back on. Injected input does not
+    /// (*measured* on xiphos, 2026-10-31). At most once a second unless `now_too`.
+    ///
+    /// # Errors
+    /// The connection failed.
+    pub fn wake(&mut self, now_too: bool) -> Result<(), Error> {
+        if !now_too && self.woken.is_some_and(|t| t.elapsed() < WAKE_EVERY) {
+            return Ok(());
+        }
+        self.woken = Some(Instant::now());
+        self.conn.force_screen_saver(xproto::ScreenSaver::RESET).map_err(x)?;
+        if self.dpms {
+            let info = self.conn.dpms_info().map_err(x)?.reply().map_err(x)?;
+            if info.state && info.power_level != dpms::DPMSMode::ON {
+                self.conn.dpms_force_level(dpms::DPMSMode::ON).map_err(x)?;
+            }
+        }
+        self.conn.flush().map_err(x)
     }
 
     /// Releases every key and button `XTest` holds: a daemon that died mid-keypress leaves them
