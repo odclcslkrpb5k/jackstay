@@ -28,18 +28,25 @@ pub fn is_clipman(comm: &[u8], cmdline: &[u8]) -> bool {
         })
 }
 
-/// Whether a process of this user is clipman, looking in `proc` (normally `/proc`).
+/// Whether a process of this user is clipman, looking in `proc` (normally `/proc`). Only processes
+/// in this daemon's PID namespace count: one in a container is not this session's clipman, even
+/// run by the same user (the gate's tests run a stand-in under clipman's name, in a container, as
+/// the developer; it stopped the developer's own daemon). One whose namespace cannot be read
+/// counts.
 #[must_use]
 pub fn clipman_running(proc: &Path) -> bool {
     let uid = rustix::process::getuid().as_raw();
+    let ours = fs::read_link(proc.join("self").join("ns").join("pid")).ok();
     let Ok(entries) = fs::read_dir(proc) else { return false };
     entries.filter_map(Result::ok).any(|e| {
         let is_pid = e
             .file_name()
             .to_str()
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        let theirs = || fs::read_link(e.path().join("ns").join("pid")).ok();
         is_pid
             && fs::metadata(e.path()).is_ok_and(|m| m.uid() == uid)
+            && (ours.is_none() || theirs().is_none() || theirs() == ours)
             && is_clipman(
                 &fs::read(e.path().join("comm")).unwrap_or_default(),
                 &fs::read(e.path().join("cmdline")).unwrap_or_default(),

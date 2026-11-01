@@ -274,7 +274,9 @@ At start, after the lock:
   disconnects, so a dead clipman cannot leave it owned.
 - A process of this user that is clipman (`/proc/*/comm` exactly `xfce4-clipman`, or a command
   line naming the panel plugin, `xfce4-clipman-plugin` or `libclipman.so`, as the panel's
-  `wrapper-2.0` is given it), or the plugin in the panel's plugin list (`xfconf-query -c
+  `wrapper-2.0` is given it) in this daemon's PID namespace (`/proc/PID/ns/pid`, counted if unreadable:
+  a process in a container is not this session's clipman, and the gate's own stand-in runs in
+  one, as the developer), or the plugin in the panel's plugin list (`xfconf-query -c
   xfce4-panel -p /plugins -lv`, read on a thread, 2 s timeout, a `/plugins/plugin-N` whose value is
   `xfce4-clipman-plugin`): exit 3. These names are from xfce4-panel's and clipman's sources. On
   the owner's Xubuntu 26.04 (2026-10-24) clipman runs as the stand-alone `xfce4-clipman` from

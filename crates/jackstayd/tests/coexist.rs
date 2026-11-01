@@ -1,5 +1,5 @@
 use jackstayd::coexist::{
-    input_rival, input_rival_named, is_clipman, panel_lists_clipman, same_display,
+    clipman_running, input_rival, input_rival_named, is_clipman, panel_lists_clipman, same_display,
 };
 
 #[test]
@@ -85,4 +85,31 @@ fn displays_are_compared_without_their_screen() {
     assert!(!same_display(":1", ":10"));
     assert!(!same_display("host:0", ":0"));
     assert!(!same_display("", ":0"));
+}
+
+#[test]
+fn clipman_counts_only_in_our_pid_namespace() {
+    let proc = std::env::temp_dir().join(format!("jackstay-proc-ns-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&proc);
+    let made = |r: std::io::Result<()>| r.unwrap_or_else(|e| panic!("{e}"));
+    for dir in ["self/ns", "7/ns"] {
+        made(std::fs::create_dir_all(proc.join(dir)));
+    }
+    made(std::fs::write(proc.join("7").join("comm"), "xfce4-clipman\n"));
+    made(std::fs::write(proc.join("7").join("cmdline"), "xfce4-clipman\0"));
+    let link = |pid: &str, ns: &str| {
+        let at = proc.join(pid).join("ns").join("pid");
+        let _ = std::fs::remove_file(&at);
+        made(std::os::unix::fs::symlink(ns, at));
+    };
+    link("self", "pid:[4026531836]");
+    // A stand-in in a container, run by this user: not this session's clipman.
+    link("7", "pid:[4026532901]");
+    assert!(!clipman_running(&proc));
+    link("7", "pid:[4026531836]");
+    assert!(clipman_running(&proc));
+    // Its namespace unreadable: it counts.
+    made(std::fs::remove_file(proc.join("7").join("ns").join("pid")));
+    assert!(clipman_running(&proc));
+    let _ = std::fs::remove_dir_all(&proc);
 }
