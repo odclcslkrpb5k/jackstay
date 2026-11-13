@@ -23,7 +23,7 @@ jackstay-input = { path = "../input", version = "=0.0.0" }
 jackstay-x11-input = { path = "../x11-input", version = "=0.0.0" }
 signal-hook = { version = "=0.4.5", default-features = false }
 toml = { version = "=1.1.8", default-features = false, features = ["std", "parse", "serde"] }
-rustix = { version = "=1.1.5", default-features = false, features = ["std", "event", "fs", "net", "process", "system"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "event", "fs", "net", "process", "system"] }
 
 [dev-dependencies]
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
