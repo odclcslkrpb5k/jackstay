@@ -24,23 +24,24 @@ Early development. Working now: the clipboard manager (`jackstayd`), its history
 icon and settings window (`jackstay-ui`) and the `jackstay` command: CLIPBOARD copies kept after
 their application quits and restored after a restart, a searchable history at the pointer or from
 the tray, clearing, pinning, and xfce4-clipman's history imported; paired machines linked, the
-keyboard and mouse shared between them, and the clipboard shared (being finished, milestone M5).
+keyboard and mouse shared between them, and the clipboard shared.
 See [the plan](docs/plan.md), [the daemon](docs/daemon.md), [the desktop side](docs/ui.md),
 [input sharing](docs/input.md) and [clipboard sharing](docs/sharing.md).
 
 ## Install
 
-Needs Docker (the build runs in the development container) and Xubuntu 26.04 or another system
-whose glibc is at least the container's (2.43).
+On Xubuntu 26.04 (x86_64), the latest release, into your home directory, no root needed:
 
 ```sh
-tools/install --replace-clipman --hotkey '<Primary><Alt>h' --start
+curl -fsSL https://raw.githubusercontent.com/odclcslkrpb5k/jackstay/main/install.sh \
+  | bash -s -- --replace-clipman --hotkey '<Primary><Alt>h' --start
 ```
 
-- Builds `jackstayd`, `jackstay` and `jackstay-ui` and copies them, with `jackstay-session`, to
-  `~/.local/bin`; their systemd user units to `~/.config/systemd/user`; an autostart entry to `~/.config/autostart`.
+- Copies `jackstayd`, `jackstay`, `jackstay-ui` and `jackstay-session` to `~/.local/bin`; their
+  systemd user units to `~/.config/systemd/user`; an autostart entry to `~/.config/autostart`.
   Nothing outside your home directory is touched. Running it again upgrades, restarting a
-  running daemon.
+  running daemon. The download is checked against the release's `SHA256SUMS`, and each program
+  must run and say it is the release's build before anything is copied.
 - It also adds `export XFSETTINGSD_NO_CLIPBOARD=1` to `~/.xsessionrc`, in a block marked
   `jackstay`: Xfce's settings daemon otherwise runs a clipboard manager of its own, which Jackstay
   cannot run beside. That takes effect at the next login; for this session, run
@@ -52,6 +53,22 @@ tools/install --replace-clipman --hotkey '<Primary><Alt>h' --start
 - `--hotkey KEYS` binds the history popup to KEYS in Xfce's keyboard shortcuts (here Ctrl+Alt+H;
   leave it out to bind one yourself to `~/.local/bin/jackstay popup`).
 - `--start` starts it now; otherwise it starts at the next login.
+- `GBK_VERSION=<hash>` before `bash` installs that release instead of the latest (releases are
+  named by their commit); `GBK_ANY_OS=1` tries another system than Ubuntu 26.04.
+- `jackstay --version` says which build is installed.
+
+Machines that share input or the clipboard must run the same link protocol, so install the same
+release (or build) on each.
+
+### Building from source
+
+Needs Docker (the build runs in the development container) and Xubuntu 26.04 or another system
+whose glibc is at least the container's (2.43). `tools/install` takes the same options, builds,
+and installs the build with `install.sh`:
+
+```sh
+tools/install --replace-clipman --hotkey '<Primary><Alt>h' --start
+```
 
 On its first start Jackstay imports clipman's saved history behind its own. clipman's files are
 left in place until `jackstay import-clipman --remove`.
@@ -100,18 +117,21 @@ background, and a paste of one still on its way waits up to 3 s for it.
 ## Uninstall
 
 ```sh
-tools/install --uninstall
+curl -fsSL https://raw.githubusercontent.com/odclcslkrpb5k/jackstay/main/install.sh | bash -s -- --uninstall
 ```
 
-Stops `jackstayd` and removes what `tools/install` added. The history stays in
-`~/.local/state/jackstay`; delete that directory to remove it. Running `xfce4-clipman` turns its
-autostart back on.
+(or `tools/install --uninstall` in a checkout). Stops `jackstayd` and removes what the install
+added. The history stays in `~/.local/state/jackstay`; delete that directory to remove it.
+Running `xfce4-clipman` turns its autostart back on.
 
 ## Development
 
 The only requirement is Docker. `./dev <command>` runs a command in the pinned development
 container (Ubuntu 26.04, Rust 1.99.1), for example `./dev cargo build`. `./check` is the one gate,
 the same one CI runs; `./dev tools/prove-checks` shows each of its checks catching a planted bug.
+`./dev tools/third-party` writes `THIRD-PARTY-NOTICES.md` when the dependencies change (the gate
+fails while it is out of date). `tools/publish` releases a commit the gate passed and that is on
+`main`.
 
 ## License
 

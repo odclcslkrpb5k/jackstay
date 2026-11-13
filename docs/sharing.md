@@ -7,7 +7,8 @@ link (docs/link.md) and on the selection engine (docs/selection.md).
 
 Status: **design, revised after red-team pass 1** (findings and resolutions at the end); slice 1
 (`proto`), slice 2 (`net`), slice 3 (`selection`) and slice 4 (`clip`, `store`) built; slice 5 built
-(5a the daemon's logic, 5b its interfaces, 5c the two-daemon tests). Code facts are as read on 2026-10-31 at 2c9e386.
+(5a the daemon's logic, 5b its interfaces, 5c the two-daemon tests); slice 6, acceptance, done
+2026-11-12: the owner runs athena and xiphos without Synergy, reported flawless. Code facts are as read on 2026-10-31 at 2c9e386.
 
 ## What exists to build on
 

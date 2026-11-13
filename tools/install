@@ -1,243 +1,43 @@
 #!/usr/bin/env bash
-# Installs Jackstay for this user (README, "Install"): builds in the dev container, then copies the
-# binaries to ~/.local/bin, the systemd user units and an XDG autostart entry to ~/.config, the
-# tray's icon to ~/.local/share/icons, and to ~/.xsessionrc the switch that keeps Xfce's settings
-# daemon from running a clipboard manager of its own. Nothing
-# outside the home directory is touched, and the history in ~/.local/state/jackstay is kept by
-# --uninstall.
+# Installs this checkout for this user (README, "Building from source"): builds in the dev
+# container, stages the programs and data files as a release lays them out, and installs them with
+# install.sh, the piped installer, so a build and a release are installed by the same code. Takes
+# install.sh's options (tools/install --help).
 set -euo pipefail
 IFS=$'\n\t'
-
-usage() {
-  cat <<'EOF'
-usage: tools/install [--replace-clipman] [--hotkey KEYS] [--start]
-       tools/install --uninstall
-  --replace-clipman  stop xfce4-clipman and turn off its autostart, as its own Quit does
-                     (running xfce4-clipman again turns it back on)
-  --hotkey KEYS      bind KEYS (Xfce's notation, such as '<Primary><Alt>h') to the history popup
-  --start            start jackstayd and jackstay-ui now, in this graphical session
-  --uninstall        stop both and remove what this installed (and a --hotkey binding); the
-                     history stays
-Xfce's settings daemon, xfsettingsd, runs a clipboard manager of its own, which jackstayd cannot
-run beside, unless XFSETTINGSD_NO_CLIPBOARD is set; this sets it in ~/.xsessionrc, for every
-login from the next.
-EOF
-}
 
 cd "$(dirname "$0")/.."
 tree=$PWD
 
 from=""
-replace_clipman=0
-hotkey=""
-start=0
+args=()
 uninstall=0
 while (($#)); do
   case "$1" in
-    --replace-clipman) replace_clipman=1 ;;
-    --start) start=1 ;;
-    --hotkey) hotkey=${2:?--hotkey needs keys, such as "<Primary><Alt>h"}; shift ;;
-    --uninstall) uninstall=1 ;;
     # Install already-built binaries from DIR instead of building (for testing this script).
     --from) from=${2:?--from needs a directory}; shift ;;
-    -h | --help) usage; exit 0 ;;
-    *) usage >&2; exit 2 ;;
+    --uninstall) uninstall=1; args+=("$1") ;;
+    -h | --help) bash install.sh --help; exit 0 ;;
+    *) args+=("$1") ;;
   esac
   shift
 done
-
-: "${HOME:?HOME is not set}"
-config=${XDG_CONFIG_HOME:-$HOME/.config}
-[[ "$config" == /* ]] || config=$HOME/.config
-bin=$HOME/.local/bin
-data=${XDG_DATA_HOME:-$HOME/.local/share}
-[[ "$data" == /* ]] || data=$HOME/.local/share
-icon_dir=$data/icons/hicolor/scalable/apps
-icons=(jackstay.svg jackstay-symbolic.svg)
-unit_dir=$config/systemd/user
-autostart_dir=$config/autostart
-programs=(jackstayd jackstay jackstay-ui)
-units=(jackstayd.service jackstay-ui.service)
-
-# systemctl --user, if there is a user manager to talk to.
-user_systemctl() {
-  local IFS=' '
-  if command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then
-    systemctl --user "$@"
-  else
-    printf 'no systemd user manager here; skipped: systemctl --user %s\n' "$*"
-  fi
-}
-
-# Writes stdin to $1 through a temporary file renamed over it, so a reader never sees half of it.
-write_file() {
-  local dest=$1 mode=$2 tmp
-  mkdir -p "$(dirname "$dest")"
-  tmp=$(mktemp "$dest.tmp-XXXXXX")
-  cat >"$tmp"
-  chmod "$mode" "$tmp"
-  mv -f "$tmp" "$dest"
-}
-
-# ~/.xsessionrc, which the X session sources at login (Xsession.d's 40x11-common_xsessionrc), so
-# its exports reach xfce4-session and every program it starts or restores: xfsettingsd among them.
-# A symbolic link (dotfiles kept in a repository) is followed: the file it names is edited, and
-# the link stays.
-xsessionrc=$HOME/.xsessionrc
-[[ -L "$xsessionrc" ]] && xsessionrc=$(readlink -f "$xsessionrc")
-begin='# jackstay begin: no clipboard manager in xfsettingsd (tools/install)'
-end='# jackstay end'
-
-# ~/.xsessionrc without Jackstay's block, on stdout. A block whose end line was lost is refused,
-# not taken to run to the end of the file.
-without_block() {
-  [[ -f "$xsessionrc" ]] || return 0
-  # A line is compared without a carriage return, which an editor may have added.
-  awk -v b="$begin" -v e="$end" '{ l = $0; sub(/\r$/, "", l) } l == b { skip = 1 } !skip { print }
-    l == e { skip = 0 } END { exit skip }' "$xsessionrc" || {
-    printf '%s: "%s" has no "%s" after it; fix it by hand\n' "$xsessionrc" "$begin" "$end" >&2
-    return 1
-  }
-}
-
-# Xfce's keyboard shortcuts bound to the popup, one a line.
-popup_bindings() {
-  command -v xfconf-query >/dev/null || return 0
-  xfconf-query -c xfce4-keyboard-shortcuts -p /commands/custom -l -v 2>/dev/null \
-    | awk -v want="$bin/jackstay popup" '{ p = $1; $1 = ""; sub(/^ +/, ""); if ($0 == want) print p }'
-}
-
 if ((uninstall)); then
-  without_block >/dev/null
-  user_systemctl stop "${units[@]}" || true
-  while IFS= read -r binding; do
-    [[ -n "$binding" ]] && xfconf-query -c xfce4-keyboard-shortcuts -p "$binding" -r
-  done < <(popup_bindings)
-  if [[ -f "$xsessionrc" ]]; then
-    rest=$(without_block)
-    if [[ -n "$rest" ]]; then
-      printf '%s\n' "$rest" | write_file "$xsessionrc" "$(stat -c %a "$xsessionrc")"
-    elif grep -qF "$begin" "$xsessionrc"; then
-      rm -f "$xsessionrc" # it held only the block
-    fi
-  fi
-  rm -f "$autostart_dir/jackstay.desktop" "${units[@]/#/$unit_dir/}" \
-    "$bin/jackstay-session" "${programs[@]/#/$bin/}" "${icons[@]/#/$icon_dir/}"
-  user_systemctl daemon-reload
-  printf 'removed; the history is still in %s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/jackstay"
-  printf 'to have xfce4-clipman back, run it: xfce4-clipman &\n'
-  exit 0
+  exec bash install.sh "${args[@]}"
 fi
-
-# A desktop entry's Exec takes a quoted path only with escapes; refuse a home that would need them.
-if [[ "$bin" =~ [^A-Za-z0-9_./-] ]]; then
-  printf '%s: a home directory with spaces or quotes is not supported\n' "$bin" >&2
-  exit 1
-fi
-
-# Before anything is built or written: a broken block refuses the whole install.
-without_block >/dev/null
 
 if [[ -z "$from" ]]; then
   ./dev env CARGO_TARGET_DIR=/work/.cache/target \
     cargo build --release --locked -p jackstayd -p jackstay -p jackstay-ui
   from=$tree/.cache/target/release
 fi
-for p in "${programs[@]}"; do
+staged=$(mktemp -d)
+trap 'rm -rf "$staged"' EXIT
+for p in jackstayd jackstay jackstay-ui; do
   [[ -x "$from/$p" ]] || { printf '%s/%s: not built\n' "$from" "$p" >&2; exit 1; }
+  cp "$from/$p" "$staged/"
 done
-
-for p in "${programs[@]}"; do
-  write_file "$bin/$p" 0755 <"$from/$p"
-done
-write_file "$bin/jackstay-session" 0755 <data/jackstay-session
-for unit in "${units[@]}"; do
-  write_file "$unit_dir/$unit" 0644 <"data/systemd/$unit"
-done
-# The tray's icon, named by its IconName and found through its IconThemePath (docs/ui.md).
-for icon in "${icons[@]}"; do
-  write_file "$icon_dir/$icon" 0644 <"data/icons/$icon"
-done
-# Starting at login turned off (the settings window, or Xfce's Session and Startup) stays off.
-hidden=""
-if grep -qE '^Hidden *= *true *$' "$autostart_dir/jackstay.desktop" 2>/dev/null; then
-  hidden='Hidden=true'
-fi
-sed "s|^Exec=jackstay-session\$|Exec=$bin/jackstay-session|" data/autostart/jackstay.desktop \
-  | { if [[ -n "$hidden" ]]; then sed '/^\[Desktop Entry\]$/a Hidden=true'; else cat; fi; } \
-  | write_file "$autostart_dir/jackstay.desktop" 0644
-grep -qx "Exec=$bin/jackstay-session" "$autostart_dir/jackstay.desktop" || {
-  printf 'autostart entry: Exec not set to %s/jackstay-session\n' "$bin" >&2
-  exit 1
-}
-# Written again on every install, so it is there once, last.
-mode=644
-[[ -f "$xsessionrc" ]] && mode=$(stat -c %a "$xsessionrc")
-rest=$(without_block)
-{
-  [[ -n "$rest" ]] && printf '%s\n' "$rest"
-  printf '%s\nexport XFSETTINGSD_NO_CLIPBOARD=1\n%s\n' "$begin" "$end"
-} | write_file "$xsessionrc" "$mode"
-user_systemctl daemon-reload
-# A running daemon is restarted on the new binary; its history is saved on the way down.
-user_systemctl try-restart "${units[@]}"
-printf 'installed jackstayd, jackstay, jackstay-ui and jackstay-session in %s\n' "$bin"
-
-if [[ -n "$hotkey" ]]; then
-  command -v xfconf-query >/dev/null || { printf 'xfconf-query not found: no hotkey bound\n' >&2; exit 1; }
-  xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/$hotkey" -n -t string \
-    -s "$bin/jackstay popup"
-  printf 'bound %s to the history popup\n' "$hotkey"
-fi
-
-if ((replace_clipman)); then
-  # What clipman's own Quit does: Hidden=true in its autostart entry. Running clipman again sets
-  # it back to false. Its history files are written on every copy, so stopping it loses nothing.
-  entry=$autostart_dir/xfce4-clipman-plugin-autostart.desktop
-  if [[ -f "$entry" ]]; then
-    if grep -q '^Hidden=' "$entry"; then
-      sed 's/^Hidden=.*/Hidden=true/' "$entry" | write_file "$entry" 0644
-    else
-      sed '/^\[Desktop Entry\]$/a Hidden=true' "$entry" | write_file "$entry" 0644
-    fi
-  elif [[ -f /etc/xdg/autostart/xfce4-clipman-plugin-autostart.desktop ]]; then
-    sed 's/^Hidden=.*/Hidden=true/' /etc/xdg/autostart/xfce4-clipman-plugin-autostart.desktop \
-      | write_file "$entry" 0644
-    grep -q '^Hidden=true$' "$entry" \
-      || sed -i '/^\[Desktop Entry\]$/a Hidden=true' "$entry"
-  fi
-  if pkill -x -u "$(id -u)" xfce4-clipman; then
-    for _ in $(seq 50); do
-      pgrep -x -u "$(id -u)" xfce4-clipman >/dev/null || break
-      sleep 0.1
-    done
-    printf 'stopped xfce4-clipman and turned off its autostart\n'
-  else
-    printf 'xfce4-clipman was not running; its autostart is off\n'
-  fi
-  printf 'if clipman is also in the panel as a plugin, remove it there (Panel > Panel Preferences > Items)\n'
-fi
-
-# This session's xfsettingsd started before the switch was set, if it runs without it.
-for pid in $(pgrep -x -u "$(id -u)" xfsettingsd || true); do
-  if ! grep -qzx 'XFSETTINGSD_NO_CLIPBOARD=.*' "/proc/$pid/environ" 2>/dev/null; then
-    printf 'xfsettingsd is running with its clipboard manager until the next login; to restart it\n'
-    printf 'without one now: XFSETTINGSD_NO_CLIPBOARD=1 xfsettingsd --replace --daemon\n'
-    break
-  fi
-done
-
-if ((start)); then
-  [[ -n "${DISPLAY:-}" ]] || { printf 'DISPLAY is not set: not in a graphical session\n' >&2; exit 1; }
-  "$bin/jackstay-session"
-  for _ in $(seq 50); do
-    if "$bin/jackstay" status >/dev/null 2>&1; then
-      "$bin/jackstay" status
-      exit 0
-    fi
-    sleep 0.2
-  done
-  printf 'jackstayd did not answer; see: journalctl --user -u jackstayd\n' >&2
-  exit 1
-fi
-printf 'it starts at the next login; to start it now: %s/jackstay-session\n' "$bin"
+cp data/jackstay-session data/systemd/jackstayd.service data/systemd/jackstay-ui.service \
+  data/autostart/jackstay.desktop data/icons/jackstay.svg data/icons/jackstay-symbolic.svg \
+  "$staged/"
+GBK_FROM=$staged bash install.sh "${args[@]}"

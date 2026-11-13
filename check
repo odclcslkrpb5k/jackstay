@@ -98,6 +98,14 @@ install_script() {
   tools/test-install
 }
 
+# The tree being checked, if the files are exactly what git would commit (nothing unstaged, nothing
+# untracked): passing then stamps it in .cache/gate/, which tools/publish requires of the commit it
+# releases. A tree with other changes is checked the same, and stamped nothing.
+committable_tree() {
+  git diff --quiet && [[ -z "$(git ls-files --others --exclude-standard)" ]] && git write-tree
+}
+tree=$(committable_tree || true)
+
 # Every decoder crate's fuzz targets: a separate package each, with its own lockfile.
 shopt -s nullglob
 fuzz=(crates/*/fuzz/Cargo.toml)
@@ -120,6 +128,9 @@ for f in "${fuzz[@]}"; do
   step "dependencies (cargo-deny, fuzz targets, ${f%/Cargo.toml})" \
     cargo deny --manifest-path "$f" --config deny.toml --locked check
 done
+# After cargo-deny: a plant that adds a dependency changes the notices too, and must be refused for
+# the dependency itself.
+step "third-party notices" tools/third-party --check
 # Every test binary, past a failing one: a flaky test elsewhere then cannot hide a real failure
 # (a planted one, in prove-checks: CI, 2026-10-30). The daemon's own last: they take four of the
 # five minutes (two machines, the browsers and office suites), and a failure elsewhere stops the
@@ -127,3 +138,8 @@ done
 step "tests" cargo test --workspace --exclude jackstayd --locked --no-fail-fast
 step "tests (the daemon)" cargo test --package jackstayd --locked --no-fail-fast
 printf '\n== all checks passed\n'
+if [[ -n "$tree" && "$(committable_tree || true)" == "$tree" ]]; then
+  mkdir -p .cache/gate
+  touch ".cache/gate/$tree"
+  printf 'stamped tree %s\n' "$tree"
+fi

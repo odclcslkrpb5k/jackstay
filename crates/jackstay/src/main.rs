@@ -15,6 +15,7 @@ use jackstayd::ui_socket::{self, Ask};
 
 const USAGE: &str = "\
 usage: jackstay [--runtime-dir DIR] COMMAND
+       jackstay --version
 commands:
   status                     whether jackstayd runs, what it holds, and what it shares
   list [--all]               the history, newest first (the first 20 without --all)
@@ -142,6 +143,10 @@ fn run(args: &[OsString]) -> Result<(), Failure> {
         ("unpair", [peer]) => Request::Unpair { peer: text(peer)? },
         ("switch", [peer]) => Request::Switch { peer: text(peer)? },
         ("switch", []) => Request::SwitchHome,
+        ("--version", []) => {
+            println!("jackstay {}", jackstayd::BUILD);
+            return Ok(());
+        }
         ("help" | "--help" | "-h", []) => {
             println!("{USAGE}");
             return Ok(());

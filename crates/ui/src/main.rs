@@ -78,6 +78,10 @@ fn places() -> Result<Places, String> {
 
 fn main() {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if args == ["--version"] {
+        println!("jackstay-ui {}", jackstayd::BUILD);
+        return;
+    }
     let runtime = match runtime(&args) {
         Ok(r) => r,
         Err(why) => {

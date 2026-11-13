@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Publishes a release build of HEAD as a GitHub release, named by its 12-character commit hash:
+# what install.sh fetches. Maintainer only.
+#
+#   tools/publish
+#
+# Refuses unless the tree is clean, the gate passed for exactly HEAD's tree (its stamp in
+# .cache/gate), HEAD is on origin/main, and no release of it exists. Then builds the programs in
+# the dev container with HEAD's hash built in, checks each says it is that build, installs them
+# with install.sh into a throwaway home in the container, and uploads them with their data files,
+# LICENSE, THIRD-PARTY-NOTICES.md and SHA256SUMS of them all.
+set -euo pipefail
+IFS=$'\n\t'
+
+cd "$(dirname "$0")/.."
+repo=odclcslkrpb5k/jackstay
+die() { printf 'publish: %s\n' "$*" >&2; exit 1; }
+
+[[ -z "$(git status --porcelain)" ]] || die "the tree is not clean; commit first, so the hash names exact source"
+hash=$(git rev-parse --short=12 HEAD)
+full=$(git rev-parse HEAD)
+tree=$(git rev-parse 'HEAD^{tree}')
+[[ -e ".cache/gate/$tree" ]] || die "the gate has not passed for $hash's tree; run ./check"
+git fetch -q origin
+git merge-base --is-ancestor HEAD origin/main || die "$hash is not on origin/main; push first"
+if gh release view "$hash" --repo "$repo" >/dev/null 2>&1; then die "release $hash already exists"; fi
+
+programs=(jackstayd jackstay jackstay-ui)
+./dev env JACKSTAY_BUILD="$hash" CARGO_TARGET_DIR=/work/.cache/target \
+  cargo build --release --locked -p jackstayd -p jackstay -p jackstay-ui
+dist=.cache/dist/$hash
+rm -rf "$dist"
+mkdir -p "$dist"
+for p in "${programs[@]}"; do
+  cp ".cache/target/release/$p" "$dist/"
+done
+cp data/jackstay-session data/systemd/jackstayd.service data/systemd/jackstay-ui.service \
+  data/autostart/jackstay.desktop data/icons/jackstay.svg data/icons/jackstay-symbolic.svg \
+  LICENSE THIRD-PARTY-NOTICES.md "$dist/"
+files=("${programs[@]}" jackstay-session jackstayd.service jackstay-ui.service jackstay.desktop
+  jackstay.svg jackstay-symbolic.svg LICENSE THIRD-PARTY-NOTICES.md)
+(cd "$dist" && sha256sum -- "${files[@]}" >SHA256SUMS)
+# As a user would install it, from the files as uploaded, sums and build checked by install.sh.
+# shellcheck disable=SC2016 # expanded by the container's shell
+./dev bash -c 'home=$(mktemp -d) && HOME=$home GBK_FROM=$1 GBK_VERSION=$2 bash install.sh >/dev/null' \
+  _ "/work/$dist" "$hash" || die "install.sh refused the release it would upload"
+
+gh release create "$hash" --repo "$repo" --target "$full" --latest --title "Jackstay $hash" \
+  --notes "Built from $full on Ubuntu 26.04 (x86_64); the full gate passed.
+
+Install or update: \`curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | bash\`" \
+  "${files[@]/#/$dist/}" "$dist/SHA256SUMS"
+printf 'publish: released %s\n' "$hash"

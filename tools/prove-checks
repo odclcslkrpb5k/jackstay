@@ -101,6 +101,10 @@ plant_unquoted_shell_variable() {
 plant_broken_install() {
   sed -i 's/^Exec=jackstay-session$/Exec=jackstay-session --planted/' data/autostart/jackstay.desktop
 }
+# A dependency's licence text changed (an upgrade) without the notices written again.
+plant_stale_third_party_notices() {
+  sed -i '0,/^MIT License$/s//MIT Licence/' THIRD-PARTY-NOTICES.md
+}
 plant_empty_fuzz_corpus() {
   rm -f crates/proto/fuzz/corpus/link/*
 }
@@ -131,6 +135,7 @@ plants=(
   "advisory_in_dependency|dependencies (cargo-deny, whole graph)|RUSTSEC-2020-0071"
   "advisory_in_dev_dependency|dependencies (cargo-deny, whole graph)|RUSTSEC-2020-0071"
   "disallowed_license_in_dev_dependency|dependencies (cargo-deny, whole graph)|license = \"MPL-2.0\""
+  "stale_third_party_notices|third-party notices|THIRD-PARTY-NOTICES.md is out of date"
 )
 
 shard=""

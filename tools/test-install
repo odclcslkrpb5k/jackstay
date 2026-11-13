@@ -164,4 +164,51 @@ rm "$home/.xsessionrc"
 install >/dev/null
 install --uninstall >/dev/null
 [[ ! -e "$home/.xsessionrc" ]] || fail "an .xsessionrc of Jackstay's alone left behind"
-printf 'install, reinstall, .xsessionrc, --replace-clipman, --hotkey and --uninstall did what they say\n'
+
+# install.sh from a directory laid out as a release, sums included, as tools/publish makes one.
+stage() {
+  rm -rf "$1"
+  mkdir -p "$1"
+  cp "$built/jackstayd" "$built/jackstay" "$built/jackstay-ui" data/jackstay-session \
+    data/systemd/jackstayd.service data/systemd/jackstay-ui.service \
+    data/autostart/jackstay.desktop data/icons/jackstay.svg data/icons/jackstay-symbolic.svg \
+    LICENSE THIRD-PARTY-NOTICES.md "$1/"
+  (cd "$1" && sha256sum -- * >SHA256SUMS)
+}
+fresh=$home/fresh
+release() { # staged directory, environment...
+  local from=$1
+  shift
+  env HOME="$fresh" XDG_CONFIG_HOME="" XDG_DATA_HOME="" PATH="$fakes:$PATH" "$@" \
+    GBK_FROM="$from" bash install.sh
+}
+staged=$home/staged
+stage "$staged"
+release "$staged" >/dev/null || fail "install.sh refused a release with good sums"
+cmp -s "$built/jackstay-ui" "$fresh/.local/bin/jackstay-ui" || fail "install.sh did not install it"
+rm -rf "$fresh"
+# Refused, touching nothing.
+refused() { # what, staged directory, environment...
+  local what=$1
+  shift
+  if release "$@" >/dev/null 2>&1; then fail "install.sh accepted $what"; fi
+  [[ ! -e "$fresh" ]] || fail "install.sh wrote files for $what"
+}
+refused "a version that is not a build hash" "$staged" GBK_VERSION=latest
+refused "another build than the one asked for" "$staged" GBK_VERSION=0123456789ab
+printf 'x' >>"$staged/jackstay.desktop"
+refused "a file that does not match its sum" "$staged"
+stage "$staged"
+printf 'nothing to see here\n' >"$staged/SHA256SUMS"
+refused "sums that list nothing" "$staged"
+# Programs that are not one build, or do not run here, with sums that match them.
+stage "$staged"
+printf '#!/bin/sh\necho jackstay 0123456789ab\n' >"$staged/jackstay"
+(cd "$staged" && sha256sum -- * >SHA256SUMS.new && grep -v ' SHA256SUMS$' SHA256SUMS.new >SHA256SUMS && rm SHA256SUMS.new)
+refused "programs from two builds" "$staged"
+stage "$staged"
+printf '#!/bin/sh\nexit 127\n' >"$staged/jackstay-ui"
+(cd "$staged" && sha256sum -- * >SHA256SUMS.new && grep -v ' SHA256SUMS$' SHA256SUMS.new >SHA256SUMS && rm SHA256SUMS.new)
+refused "a program that does not run" "$staged"
+printf 'install, reinstall, .xsessionrc, --replace-clipman, --hotkey and --uninstall did what they say;\n'
+printf 'install.sh refused bad sums, versions and programs, writing nothing\n'

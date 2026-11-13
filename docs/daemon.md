@@ -313,8 +313,10 @@ At start, after the lock:
   daemon ends with the session through the X server going away (status 4). No
   `ProtectSystem=` or other sandboxing that needs user namespaces (restricted by AppArmor on
   Ubuntu) and no `PrivateNetwork=` (it would cut the abstract X socket).
-- Installed by `tools/install` (README, "Install"), tested by the gate against a home of its
-  own (`tools/test-install`).
+- Installed by `install.sh`, piped from curl with a release's files or run by `tools/install`
+  with a build's (README, "Install"), tested by the gate against a home of its own
+  (`tools/test-install`). A release (`tools/publish`) is named by its commit, which each program
+  prints for `--version` (`dev` for any other build).
 - Started from XDG autostart by `jackstay-session`, which runs `systemctl --user start
   jackstayd.service`. xfce4-session's xinitrc already exports `DISPLAY` and `XAUTHORITY` to systemd
   (xinitrc.in:86-95); the script imports them again anyway, which is harmless.

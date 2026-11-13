@@ -7,7 +7,7 @@ Status: **design, revised after red-team pass 1** (findings and their resolution
 slice 1 (the `input` crate, the `proto::link` input messages, `[input]` configuration),
 slice 2 (`x11-input`, tested against Xvfb) and slice 3 (the link's input path, the primary's
 state machine, the daemon's input thread, `jackstay status` and `switch`, the hotkeys, two-daemon
-tests and the latency gate) built. Acceptance on the owner's machines (slice 4) is next.
+tests and the latency gate) built. Acceptance on the owner's machines (slice 4) done 2026-11-12 (Acceptance).
 Facts marked *measured* come from `spikes/x11-probes` (`run-input.sh` and `run.sh`, Xvfb 21.1.22,
 2026-10-29), from the reviewer's probes, or were read from the owner's X server (athena,
 read-only, 2026-10-29).
@@ -401,6 +401,10 @@ device of its own.
 as Synergy"; the trackball's wheel "works great on xiphos"; xiphos's top monitor does not cross on
 its edges, as expected (athena is beside xiphos's lower monitors only). Still to measure: the
 added latency p99 on the LAN, and whether athena's processed motion is accelerated.
+
+*Owner's report, 2026-11-12:* at least two weeks on athena and xiphos without Synergy,
+"flawless". Accepted on that use. The two measurements above were never taken; with no complaint
+of latency or of motion, they are left unless one comes.
 
 ## Slices
 
