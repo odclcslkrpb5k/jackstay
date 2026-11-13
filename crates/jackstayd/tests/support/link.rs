@@ -15,11 +15,15 @@ use jackstayd::client::Client;
 
 use super::{Daemon, Home, Xvfb, ask, ok};
 
-/// Two ports, the second for pairing, from a range of this process's own, never reused.
+/// Two ports, the second for pairing, from a range of this process's own, never reused. Every
+/// range lies below 32768, where Linux's ephemeral ports begin: a socket bound to port 0 meanwhile
+/// once took a port found free here before the test bound it (`AddrInUse`, 2026-11-12, with a
+/// range at 48300).
 pub fn ports() -> u16 {
     const SPAN: u32 = 300;
+    const _: () = assert!(15_000 + 59 * SPAN <= 32_768);
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let base = 15_000 + (std::process::id() % 150) * SPAN;
+    let base = 15_000 + (std::process::id() % 59) * SPAN;
     loop {
         let n = NEXT.fetch_add(2, Ordering::Relaxed);
         assert!(n < SPAN, "this process's ports are used up");
