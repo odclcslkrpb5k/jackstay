@@ -6,7 +6,7 @@
 # with options after `bash -s --`, such as:
 #
 #   curl -fsSL https://raw.githubusercontent.com/odclcslkrpb5k/jackstay/main/install.sh \
-#     | bash -s -- --replace-clipman --hotkey '<Super>h' --start
+#     | bash -s -- --replace-clipman --start
 #
 # Copies the programs to ~/.local/bin, the systemd user units and an XDG autostart entry to
 # ~/.config, the tray's icons to ~/.local/share/icons, and to ~/.xsessionrc the switch that keeps
@@ -37,11 +37,13 @@ main() {
   die() { say "jackstay install: $*"; exit 1; }
   usage() {
     cat <<'EOF'
-usage: install.sh [--replace-clipman] [--hotkey KEYS] [--start]
+usage: install.sh [--replace-clipman] [--hotkey KEYS | --no-hotkey] [--start]
        install.sh --uninstall
   --replace-clipman  stop xfce4-clipman and turn off its autostart, as its own Quit does
                      (running xfce4-clipman again turns it back on)
-  --hotkey KEYS      bind KEYS (Xfce's notation, such as '<Primary><Alt>h') to the history popup
+  --hotkey KEYS      bind KEYS (Xfce's notation, such as '<Primary><Alt>h') to the history popup;
+                     without it, Super+H is bound, unless a key already is or Super+H is taken
+  --no-hotkey        bind no key to the popup
   --start            start jackstayd and jackstay-ui now, in this graphical session
   --uninstall        stop both and remove what this installed (and a --hotkey binding); the
                      history stays
@@ -51,12 +53,13 @@ login from the next.
 EOF
   }
 
-  local replace_clipman=0 hotkey="" start=0 uninstall=0
+  local replace_clipman=0 hotkey="" no_hotkey=0 start=0 uninstall=0
   while (($#)); do
     case "$1" in
       --replace-clipman) replace_clipman=1 ;;
       --start) start=1 ;;
       --hotkey) hotkey=${2:?--hotkey needs keys, such as "<Primary><Alt>h"}; shift ;;
+      --no-hotkey) no_hotkey=1 ;;
       --uninstall) uninstall=1 ;;
       -h | --help) usage; exit 0 ;;
       *) usage >&2; exit 2 ;;
@@ -72,7 +75,8 @@ EOF
   local bin=$HOME/.local/bin
   local data=${XDG_DATA_HOME:-$HOME/.local/share}
   [[ "$data" == /* ]] || data=$HOME/.local/share
-  local icon_dir=$data/icons/hicolor/scalable/apps
+  local theme=$data/icons/hicolor
+  local icon_dir=$theme/scalable/apps
   local unit_dir=$config/systemd/user
   local autostart_dir=$config/autostart
 
@@ -125,6 +129,21 @@ EOF
       | awk -v want="$bin/jackstay popup" '{ p = $1; $1 = ""; sub(/^ +/, ""); if ($0 == want) print p }'
   }
 
+  # GTK trusts a theme's icon-theme.cache while it is newer than the theme's own directory, which
+  # a file added to scalable/apps does not change: on a machine where some other install made
+  # one, the tray's icon was not found and the panel showed a blank (the owner's flapper,
+  # 2026-11-12). So a cache found there is made again, or, without the tool, the directory is
+  # touched, which leaves the cache older and GTK reads the directory instead. Where there is no
+  # cache, GTK reads the directory anyway.
+  refresh_icon_cache() {
+    [[ -f $theme/icon-theme.cache ]] || return 0
+    if command -v gtk-update-icon-cache >/dev/null \
+      && gtk-update-icon-cache --force --ignore-theme-index --quiet "$theme" 2>/dev/null; then
+      return 0
+    fi
+    touch "$theme"
+  }
+
   if ((uninstall)); then
     without_block >/dev/null
     user_systemctl stop "${units[@]}" || true
@@ -142,6 +161,7 @@ EOF
     fi
     rm -f "$autostart_dir/jackstay.desktop" "${units[@]/#/$unit_dir/}" \
       "$bin/jackstay-session" "${programs[@]/#/$bin/}" "${icons[@]/#/$icon_dir/}"
+    refresh_icon_cache
     user_systemctl daemon-reload
     printf 'removed; the history is still in %s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/jackstay"
     printf 'to have xfce4-clipman back, run it: xfce4-clipman &\n'
@@ -229,6 +249,7 @@ Or build from source: see https://github.com/$repo#building-from-source"
   for icon in "${icons[@]}"; do
     write_file "$icon_dir/$icon" 0644 <"$src/$icon"
   done
+  refresh_icon_cache
   # Starting at login turned off (the settings window, or Xfce's Session and Startup) stays off.
   local hidden=""
   if grep -qE '^Hidden *= *true *$' "$autostart_dir/jackstay.desktop" 2>/dev/null; then
@@ -258,6 +279,22 @@ Or build from source: see https://github.com/$repo#building-from-source"
     xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/$hotkey" -n -t string \
       -s "$bin/jackstay popup"
     printf 'bound %s to the history popup\n' "$hotkey"
+  elif ((!no_hotkey)) && command -v xfconf-query >/dev/null; then
+    # The default, Super+H: never over a key the popup has (an upgrade changes nothing), nor
+    # over one another command or a window manager action has.
+    local default='<Super>h' taken
+    if [[ -z "$(popup_bindings)" ]]; then
+      taken=$(xfconf-query -c xfce4-keyboard-shortcuts -l -v 2>/dev/null \
+        | awk -v k="$default" '{ n = split($1, part, "/"); if (part[n] == k) print }')
+      if [[ -n "$taken" ]]; then
+        printf '%s is taken, so the history popup has no key; choose one with --hotkey:\n%s\n' \
+          "$default" "$taken"
+      else
+        xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/$default" -n -t string \
+          -s "$bin/jackstay popup"
+        printf 'bound %s to the history popup\n' "$default"
+      fi
+    fi
   fi
 
   if ((replace_clipman)); then

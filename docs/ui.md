@@ -69,6 +69,11 @@ popup's second press cannot work from a menu), and **Settings…**.
   restarted, or started after the UI.
 - The icon is `jackstay` (data/icons), installed by `tools/install` into
   `~/.local/share/icons/hicolor/scalable/apps` and named to the panel through `IconThemePath`.
+  GTK trusts a theme's `icon-theme.cache` while it is newer than the theme's directory, and a
+  file added to `scalable/apps` leaves that directory's time alone: on the owner's laptop
+  (2026-11-12) a cache made by another program's install hid the icon, and the panel showed a
+  blank that still opened the menu. `install.sh` makes such a cache again (or, without
+  `gtk-update-icon-cache`, touches the directory) on install and uninstall.
 - Without a session bus there is no tray, and the journal says so; the popup still works from
   its hotkey.
 - A reply of the wrong D-Bus type is dropped by GLib, and the host shows no menu: the menu's

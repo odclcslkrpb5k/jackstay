@@ -52,7 +52,15 @@ install() {
 # A session file of the user's own, kept around Jackstay's block.
 printf 'export LANG=en_CA.UTF-8\n' >"$home/.xsessionrc"
 chmod 600 "$home/.xsessionrc"
+# An icon cache another install made, before Jackstay's icons: GTK trusts it while it is newer
+# than the theme's directory, and then finds no icon of Jackstay's.
+theme=$home/.local/share/icons/hicolor
+mkdir -p "$theme/scalable/apps"
+cp data/icons/jackstay.svg "$theme/scalable/apps/another-program.svg"
+gtk-update-icon-cache --force --ignore-theme-index --quiet "$theme"
+[[ -f "$theme/icon-theme.cache" ]] || fail "no icon cache to start from"
 install
+grep -qa 'jackstay-symbolic' "$theme/icon-theme.cache" || fail "the icon cache was not made again"
 for p in jackstayd jackstay jackstay-ui jackstay-session; do
   [[ -x "$home/.local/bin/$p" ]] || fail "$p not installed"
 done
@@ -70,7 +78,10 @@ grep -qx "Exec=$home/.local/bin/jackstay-session" "$home/.config/autostart/jacks
 grep -qx 'export LANG=en_CA.UTF-8' "$home/.xsessionrc" || fail "the user's .xsessionrc lost"
 grep -qx 'export XFSETTINGSD_NO_CLIPBOARD=1' "$home/.xsessionrc" || fail "xfsettingsd's switch unset"
 [[ "$(stat -c %a "$home/.xsessionrc")" == 600 ]] || fail ".xsessionrc mode changed"
+grep -qxF "/commands/custom/<Super>h $home/.local/bin/jackstay popup" "$xfconf" \
+  || fail "Super+H not bound by default: $(cat "$xfconf")"
 install # again, over the first
+[[ "$(grep -c 'jackstay popup' "$xfconf")" == 1 ]] || fail "the default key bound twice"
 [[ "$(grep -c XFSETTINGSD_NO_CLIPBOARD "$home/.xsessionrc")" == 1 ]] || fail "switch set twice"
 sh -n "$home/.xsessionrc" || fail ".xsessionrc is not valid sh"
 [[ "$(env -i sh -c ". '$home/.xsessionrc'; echo \$XFSETTINGSD_NO_CLIPBOARD")" == 1 ]] \
@@ -117,6 +128,23 @@ grep -qxF "/commands/custom/<Primary><Alt>h $home/.local/bin/jackstay popup" "$x
 install --uninstall >/dev/null
 ! grep -qF 'jackstay popup' "$xfconf" || fail "hotkey left bound"
 grep -qxF '/commands/custom/<Alt>F2 xfce4-appfinder' "$xfconf" || fail "the user's binding removed"
+! grep -qa 'jackstay' "$theme/icon-theme.cache" || fail "the icon cache still lists Jackstay's icons"
+# Super+H taken by another command, or --no-hotkey: no key bound. Without the cache tool (a
+# stand-in that fails), the theme's directory is made newer than the cache.
+printf '/commands/custom/<Super>h xfce4-appfinder\n' >>"$xfconf"
+printf '#!/bin/sh\nexit 1\n' >"$fakes/gtk-update-icon-cache"
+chmod +x "$fakes/gtk-update-icon-cache"
+touch -d '2026-01-01' "$theme/icon-theme.cache" "$theme"
+install >/dev/null
+! grep -qF 'jackstay popup' "$xfconf" || fail "a taken Super+H was bound: $(cat "$xfconf")"
+grep -qxF '/commands/custom/<Super>h xfce4-appfinder' "$xfconf" || fail "the taken key was changed"
+[[ "$theme" -nt "$theme/icon-theme.cache" ]] || fail "the stale icon cache was left trusted"
+rm "$fakes/gtk-update-icon-cache"
+grep -vF '<Super>h' "$xfconf" >"$xfconf.new" || true
+mv "$xfconf.new" "$xfconf"
+install --no-hotkey >/dev/null
+! grep -qF 'jackstay popup' "$xfconf" || fail "--no-hotkey bound a key"
+install --uninstall >/dev/null
 for f in .local/bin/jackstayd .local/bin/jackstay .local/bin/jackstay-ui \
   .local/bin/jackstay-session .config/systemd/user/jackstayd.service \
   .config/systemd/user/jackstay-ui.service .config/autostart/jackstay.desktop \

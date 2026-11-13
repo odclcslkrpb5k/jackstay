@@ -34,14 +34,16 @@ On Xubuntu 26.04 (x86_64), the latest release, into your home directory, no root
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/odclcslkrpb5k/jackstay/main/install.sh \
-  | bash -s -- --replace-clipman --hotkey '<Primary><Alt>h' --start
+  | bash -s -- --replace-clipman --start
 ```
 
 - Copies `jackstayd`, `jackstay`, `jackstay-ui` and `jackstay-session` to `~/.local/bin`; their
   systemd user units to `~/.config/systemd/user`; an autostart entry to `~/.config/autostart`.
   Nothing outside your home directory is touched. Running it again upgrades, restarting a
   running daemon. The download is checked against the release's `SHA256SUMS`, and each program
-  must run and say it is the release's build before anything is copied.
+  must run and say it is the release's build before anything is copied. An icon cache that
+  another program's install left in `~/.local/share/icons/hicolor` is made again, or the tray
+  would find no icon.
 - It also adds `export XFSETTINGSD_NO_CLIPBOARD=1` to `~/.xsessionrc`, in a block marked
   `jackstay`: Xfce's settings daemon otherwise runs a clipboard manager of its own, which Jackstay
   cannot run beside. That takes effect at the next login; for this session, run
@@ -50,8 +52,10 @@ curl -fsSL https://raw.githubusercontent.com/odclcslkrpb5k/jackstay/main/install
 - `--replace-clipman` stops xfce4-clipman and turns off its autostart, as clipman's own Quit
   does. Two clipboard managers fight, so `jackstayd` refuses to run beside clipman. If clipman
   is in the panel as a plugin, remove it there too (Panel Preferences, Items).
-- `--hotkey KEYS` binds the history popup to KEYS in Xfce's keyboard shortcuts (here Ctrl+Alt+H;
-  leave it out to bind one yourself to `~/.local/bin/jackstay popup`).
+- The history popup is bound to Super+H in Xfce's keyboard shortcuts, unless a key is bound to it
+  already or Super+H belongs to something else (the install then says so). `--hotkey KEYS` binds
+  KEYS instead (Xfce's notation, such as `'<Primary><Alt>h'`); `--no-hotkey` binds none, to bind
+  one yourself to `~/.local/bin/jackstay popup`.
 - `--start` starts it now; otherwise it starts at the next login.
 - `GBK_VERSION=<hash>` before `bash` installs that release instead of the latest (releases are
   named by their commit); `GBK_ANY_OS=1` tries another system than Ubuntu 26.04.
@@ -67,7 +71,7 @@ whose glibc is at least the container's (2.43). `tools/install` takes the same o
 and installs the build with `install.sh`:
 
 ```sh
-tools/install --replace-clipman --hotkey '<Primary><Alt>h' --start
+tools/install --replace-clipman --start
 ```
 
 On its first start Jackstay imports clipman's saved history behind its own. clipman's files are
