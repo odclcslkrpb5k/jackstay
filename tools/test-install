@@ -144,6 +144,13 @@ grep -vF '<Super>h' "$xfconf" >"$xfconf.new" || true
 mv "$xfconf.new" "$xfconf"
 install --no-hotkey >/dev/null
 ! grep -qF 'jackstay popup' "$xfconf" || fail "--no-hotkey bound a key"
+# Xfce's settings daemon not answering (no session bus): the install succeeds, binding no key.
+mv "$fakes/xfconf-query" "$fakes/xfconf-query.real"
+printf '#!/bin/sh\nexit 1\n' >"$fakes/xfconf-query"
+chmod +x "$fakes/xfconf-query"
+install >/dev/null || fail "an install failed when Xfce's shortcuts could not be read"
+mv "$fakes/xfconf-query.real" "$fakes/xfconf-query"
+! grep -qF 'jackstay popup' "$xfconf" || fail "a key was bound without reading the shortcuts"
 install --uninstall >/dev/null
 for f in .local/bin/jackstayd .local/bin/jackstay .local/bin/jackstay-ui \
   .local/bin/jackstay-session .config/systemd/user/jackstayd.service \

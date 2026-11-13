@@ -10,7 +10,8 @@ way. The settings are the exception: they are files, and Xfce's own shortcuts (b
 `xfce4-popup-clipman`.
 
 - A popup window (override-redirect) of about 520 pixels wide, kept within the pointer's monitor's
-  work area. It lists the newest 100 entries, newest first; the one on the clipboard is bold. A row
+  work area. Its list is 420 pixels tall however few entries it holds, so the popup is the same
+  size on every machine and does not grow as the history fills (2026-11-13). It lists the newest 100 entries, newest first; the one on the clipboard is bold. A row
   is the start of the entry's text on one line (60 characters), or what it holds when it has no
   text (Image, Files, Rich text), with its size, "pinned" and where it was copied from. An image
   entry also shows its thumbnail, left of the title; with no text, the title is its image's size

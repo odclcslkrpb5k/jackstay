@@ -99,8 +99,9 @@ impl Popup {
         list.set_activate_on_single_click(true);
         let scroll = gtk::ScrolledWindow::new(None::<&gtk::Adjustment>, None::<&gtk::Adjustment>);
         scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        // The same height however long the history, so the popup never changes size as it fills.
+        scroll.set_min_content_height(420);
         scroll.set_max_content_height(420);
-        scroll.set_propagate_natural_height(true);
         scroll.add(&list);
         let status = gtk::Label::new(None);
         status.set_xalign(0.0);

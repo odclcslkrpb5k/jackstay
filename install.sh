@@ -282,17 +282,23 @@ Or build from source: see https://github.com/$repo#building-from-source"
   elif ((!no_hotkey)) && command -v xfconf-query >/dev/null; then
     # The default, Super+H: never over a key the popup has (an upgrade changes nothing), nor
     # over one another command or a window manager action has.
-    local default='<Super>h' taken
-    if [[ -z "$(popup_bindings)" ]]; then
-      taken=$(xfconf-query -c xfce4-keyboard-shortcuts -l -v 2>/dev/null \
-        | awk -v k="$default" '{ n = split($1, part, "/"); if (part[n] == k) print }')
+    # Xfce's settings daemon may not answer (no session bus, as in a container, or outside a
+    # session): then no key is bound, and the install still succeeds.
+    local default='<Super>h' listing taken
+    if ! listing=$(xfconf-query -c xfce4-keyboard-shortcuts -l -v 2>/dev/null); then
+      printf "Xfce's keyboard shortcuts could not be read, so the history popup has no key;\n"
+      printf 'bind one with --hotkey, or in jackstay settings\n'
+    elif [[ -z "$(popup_bindings)" ]]; then
+      taken=$(awk -v k="$default" '{ n = split($1, part, "/"); if (part[n] == k) print }' \
+        <<<"$listing")
       if [[ -n "$taken" ]]; then
         printf '%s is taken, so the history popup has no key; choose one with --hotkey:\n%s\n' \
           "$default" "$taken"
-      else
-        xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/$default" -n -t string \
-          -s "$bin/jackstay popup"
+      elif xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/$default" -n -t string \
+        -s "$bin/jackstay popup"; then
         printf 'bound %s to the history popup\n' "$default"
+      else
+        printf 'could not bind %s to the history popup; bind one with --hotkey\n' "$default"
       fi
     fi
   fi
