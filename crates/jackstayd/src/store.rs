@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use jackstay_clip::{
-    Content, Entry, EntryId, History, Kept, Limits, Remote, Saved, Target, TargetData,
+    Content, Entry, EntryId, Forgotten, History, Kept, Limits, Remote, Saved, Target, TargetData,
 };
 use jackstay_store::{BlobHash, Index, SavedData, SavedEntry, SavedTarget, encode, parse};
 
@@ -30,7 +30,7 @@ pub struct Snapshot {
     pub entries: Vec<Entry>,
     pub next_id: u64,
     pub clock: u64,
-    pub forgotten: Vec<([u8; 32], u64)>,
+    pub forgotten: Vec<Forgotten>,
     pub cleared: bool,
 }
 

@@ -7,8 +7,8 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use jackstay_clip::{
-    Content, Entry, EntryId, Format, History, Kept, Limits, NotKept, Remote, Source, Target,
-    TargetData, TargetName,
+    Content, Entry, EntryId, Format, History, Kept, Limits, NotKept, Origin, Remote, Source,
+    Target, TargetData, TargetName,
 };
 use jackstay_store::BlobHash;
 use jackstayd::store::{Loaded, Paths, Reply, Request, Snapshot, Store, load, run};
@@ -131,7 +131,8 @@ fn a_copy_from_a_peer_with_a_target_to_come_loads_back_as_it_was() {
     let peer = Source::Peer { key: [7; 32], name: "xiphos".into() };
     let at = h.clock() + 10;
     assert!(h.record_received(shared, peer, 2_000, at).is_some());
-    h.remember_forgotten([9; 32], 3);
+    h.remember_forgotten([9; 32], 3, Origin::Peer([7; 32]));
+    h.remember_forgotten([8; 32], 4, Origin::Here);
     let mut store = Store::new(Paths::new(dir.clone()), &loaded(&dir));
     ok(store.save(&Snapshot::of(&h, false), false));
     let back = loaded(&dir);

@@ -47,9 +47,43 @@ Status: **design, revised after red-team pass 1** (findings and resolutions at t
 - **Each change is announced to every connected peer** and ordered the same way everywhere
   (Order). A change is a copy captured, a re-select, or the clipboard emptied. Clears and
   deletions travel too, and are remembered for a peer that is away (Forget).
-- **Two machines.** Messages go to each connected peer and are not relayed. With three or more,
-  a machine that was away while the third was off can lag until the next change; M5 is accepted
-  on two, and says so.
+- **Nothing is relayed.** An entry is announced to every connected peer if it was copied here,
+  and only back to its own peer if it came from one (Who hears what). M5 was accepted on two
+  machines; three, with no pairing between two of them, is the owner's setup since 2026-11-13.
+
+## Who hears what
+
+Added 2026-11-13, before flapper (the owner's laptop) was paired with athena, which is paired with
+xiphos (the owner's work machine): xiphos's copies must never reach flapper, nor flapper's xiphos.
+The design said nothing is relayed; three paths did relay, and are closed.
+
+- **The rule:** an entry's **origin** is here (copied on this machine) or the peer that announced
+  it (`clip::Origin`, from its `Source`). A peer hears of an entry only if the entry was copied
+  here or came from that peer. One rule, `Origin::reaches`, decides every message below.
+- **Announcements:** a capture goes to every peer; a re-select (the popup, `jackstay select`) goes
+  to the peers its entry reaches, so a peer's entry picked again goes back to that peer only.
+  Before, a re-select went to every peer.
+- **A new session's clipboard:** the clipboard is sent only if its entry reaches that peer; an
+  emptying only if it was made here or by that peer. Before, every new session (a laptop waking)
+  was sent whatever was on the clipboard.
+- **Deletions:** each remembered deletion records its entry's origin (the index's `forgot` line
+  ends `local` or `peer <key>`). A deletion goes to the peers its entry reaches, live and on a new
+  session. A deletion received for an entry not held here, or remembered before origins were
+  recorded, has no known origin and goes to no one: those are the peers' own, or older than this
+  rule. Before, every peer was sent every deletion's digest, and a short password's digest can be
+  guessed offline.
+- **Fetches:** a target still to come is fetched only from the peer that announced its entry, on a
+  new session and when a paste waits for it; it is never asked of another peer. Before, a new
+  session queued every entry's pending targets from the peer now here, which answered "not held",
+  and the target was then not fetched from its own peer until jackstayd restarted. A peer asking
+  for a target of an entry that does not reach it is answered "not held".
+- **Not covered:** the same content copied on two machines is one entry, whose origin is the latest
+  copy here, or the first announcement received. Another clipboard tool on athena (CopyQ) taking
+  the clipboard while athena serves a xiphos entry records it as copied here, so a later re-select
+  would announce it to every peer; the owner runs none. Entries a peer already holds from before
+  this rule stay there.
+- **Tested:** three machines in `jackstayd`'s sharing tests (athena between xiphos and flapper);
+  each of the nine checks, removed alone, fails a test.
 
 ## Order
 
@@ -343,7 +377,7 @@ given finding 1; fetching everything is right, given bounds (finding 8).
 | 8 | Memory and disk were unbounded (16 fetches of 64 MiB, unbounded announcements, a size field the peer chose); eviction during a fetch unspecified | One fetch at a time, 64 announcements held, no size field (the announcement's, checked with the hash), eviction cancels |
 | 9 | An image-only announcement could not be an entry; deduplication ignored pending targets | `Remote` targets count as held; per-target hashes and digests; blobs already held are not fetched |
 | 10 | Acknowledgements, re-announce requests, a repeated `Announce`, in-place updates and the target count were undefined | Forgets replayed whole (idempotent); a re-select announces; a repeated `Announce` adds only what is missing; `update` in place |
-| 11 | With three machines, nothing is relayed, and states can lag | M5 is two machines, said so |
+| 11 | With three machines, nothing is relayed, and states can lag | M5 is two machines, said so. 2026-11-13: three paths did relay; closed, and nothing relayed is now the rule (Who hears what) |
 | 12 | `clear-history` staying local contradicts §5.2; unpairing and the forgets' overflow were undefined; secrets now persist on every machine | Marked **Departs**; unpairing keeps history; the last 1000; the README says it |
 | 13 | An older received entry went to the front of history | Placed by tick |
 | 14 | No test for the above | Each has a test above |

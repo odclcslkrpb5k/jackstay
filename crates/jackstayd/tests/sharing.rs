@@ -1,5 +1,5 @@
-//! Clipboard sharing between two machines (docs/sharing.md), each a tracker and its sharing, the
-//! link between them a queue of messages delivered when a test says, so every order the link's
+//! Clipboard sharing between machines (docs/sharing.md), each a tracker and its sharing, the link
+//! between them a queue of messages delivered when a test says, so every order the link's
 //! unordered streams allow can be tried.
 
 use std::num::NonZeroUsize;
@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jackstay_clip::{
-    Content, EntryId, Format, History, Kept, Limits, Source, Target, TargetData, TargetName,
+    Content, EntryId, Format, History, Kept, Limits, Origin, Source, Target, TargetData, TargetName,
 };
 use jackstay_net::{Clip, FetchFailed, PublicKey};
 use jackstay_proto::link::Message;
@@ -198,21 +198,19 @@ fn pair() -> (Machine, Machine) {
     (a, b)
 }
 
-/// Delivers what `from` sent `to`, in the order sent.
+/// Delivers what `from` sent `to`, in the order sent; what it sent others stays.
 fn deliver(from: &mut Machine, to: &mut Machine) {
-    let messages: Vec<Message> = std::mem::take(&mut from.outbox)
-        .into_iter()
-        .filter(|(k, _)| *k == to.key)
-        .map(|(_, m)| m)
-        .collect();
-    for message in messages {
+    let (messages, others): (Vec<_>, Vec<_>) =
+        std::mem::take(&mut from.outbox).into_iter().partition(|(k, _)| *k == to.key);
+    from.outbox = others;
+    for (_, message) in messages {
         to.clip(Clip::Received { key: from.key, session: 1, message });
     }
 }
 
 /// Delivers both ways until nothing is left.
 fn settle(a: &mut Machine, b: &mut Machine) {
-    while !a.outbox.is_empty() || !b.outbox.is_empty() {
+    while a.outbox.iter().any(|(k, _)| *k == b.key) || b.outbox.iter().any(|(k, _)| *k == a.key) {
         deliver(a, b);
         deliver(b, a);
     }
@@ -383,7 +381,7 @@ fn a_delete_deletes_everywhere_pinned_or_not() {
     let on_b = b.held(&text("password")).unwrap_or_else(|| panic!("held"));
     assert!(b.tracker.pin(on_b, true).is_ok());
     let tick = a.tracker.next_tick(a.wall);
-    let dos = a.sharing.deleted(&mut a.tracker, &[text("password").digest()], tick);
+    let dos = a.sharing.deleted(&mut a.tracker, &[(text("password").digest(), Origin::Here)], tick);
     a.act(dos);
     settle(&mut a, &mut b);
     assert_eq!(b.held(&text("password")), None);
@@ -396,7 +394,7 @@ fn a_delete_that_overtakes_its_announcement_still_wins() {
     let (mut a, mut b) = pair();
     a.copy(&text("secret"));
     let tick = a.tracker.next_tick(a.wall);
-    let dos = a.sharing.deleted(&mut a.tracker, &[text("secret").digest()], tick);
+    let dos = a.sharing.deleted(&mut a.tracker, &[(text("secret").digest(), Origin::Here)], tick);
     a.act(dos);
     // The Forget arrives first.
     let mut sent = std::mem::take(&mut a.outbox);
@@ -422,7 +420,7 @@ fn a_delete_while_away_arrives_on_return() {
     b.clip(Clip::Down { key: a.key, session: 1 });
     a.clip(Clip::Down { key: b.key, session: 1 });
     let tick = a.tracker.next_tick(a.wall);
-    let dos = a.sharing.deleted(&mut a.tracker, &[text("one").digest()], tick);
+    let dos = a.sharing.deleted(&mut a.tracker, &[(text("one").digest(), Origin::Here)], tick);
     a.act(dos);
     assert_eq!(a.outbox.len(), 0, "{:?}", a.outbox);
     a.clip(Clip::Up { key: b.key, session: 2 });
@@ -477,7 +475,7 @@ fn an_owner_giving_the_clipboard_up_empties_it_everywhere() {
 }
 
 #[test]
-fn a_reselect_is_a_change_whatever_its_origin() {
+fn a_reselect_goes_back_to_the_peer_an_entry_came_from() {
     let (mut a, mut b) = pair();
     a.copy(&text("first"));
     a.later(10);
@@ -547,7 +545,7 @@ fn an_entry_deleted_while_fetched_cancels_its_fetch() {
     settle(&mut a, &mut b);
     let (fetch, ..) = b.fetches.first().cloned().unwrap_or_else(|| panic!("a fetch"));
     let tick = a.tracker.next_tick(a.wall);
-    let dos = a.sharing.deleted(&mut a.tracker, &[shot.digest()], tick);
+    let dos = a.sharing.deleted(&mut a.tracker, &[(shot.digest(), Origin::Here)], tick);
     a.act(dos);
     settle(&mut a, &mut b);
     assert_eq!(b.cancelled, [fetch]);
@@ -630,4 +628,167 @@ fn a_peer_asking_for_a_target_gets_its_bytes_or_not_held() {
         Some((1, Some(BIG)))
     );
     assert_eq!(a.answers.get(1).map(|(r, b)| (*r, b.is_none())), Some((2, true)));
+}
+
+/// Athena (1) between xiphos (2) and flapper (3), which are not paired with each other: the
+/// owner's three machines (docs/sharing.md, "Who hears what").
+fn three() -> (Machine, Machine, Machine) {
+    let start = Instant::now();
+    let (mut athena, mut xiphos, mut flapper) =
+        (Machine::new(1, start), Machine::new(2, start), Machine::new(3, start));
+    athena.up(&xiphos);
+    athena.up(&flapper);
+    xiphos.up(&athena);
+    flapper.up(&athena);
+    (athena, xiphos, flapper)
+}
+
+/// What `from` has queued for `to`.
+fn queued_for<'a>(from: &'a Machine, to: &Machine) -> Vec<&'a Message> {
+    from.outbox.iter().filter(|(k, _)| *k == to.key).map(|(_, m)| m).collect()
+}
+
+/// `m`'s session with `peer` ends, and a new one starts.
+fn reconnect(m: &mut Machine, peer: &Machine, session: u64) {
+    m.clip(Clip::Down { key: peer.key, session: session - 1 });
+    m.clip(Clip::Up { key: peer.key, session });
+}
+
+#[test]
+fn a_copy_from_one_peer_never_reaches_another() {
+    let (mut athena, mut xiphos, mut flapper) = three();
+    xiphos.copy(&text("work secret"));
+    settle(&mut xiphos, &mut athena);
+    assert_eq!(athena.clipboard, Some(text("work secret").digest()));
+    assert!(queued_for(&athena, &flapper).is_empty(), "{:?}", athena.outbox);
+    // Flapper wakes: athena sends its clipboard, which is xiphos's; it is not sent.
+    reconnect(&mut athena, &flapper, 2);
+    reconnect(&mut flapper, &athena, 2);
+    assert!(queued_for(&athena, &flapper).is_empty(), "{:?}", athena.outbox);
+    // Picked again on athena: back to xiphos only.
+    athena.later(10);
+    let id = athena.held(&text("work secret")).unwrap_or_else(|| panic!("held"));
+    let tick = athena.tracker.next_tick(athena.wall);
+    assert!(athena.tracker.select(id, tick).is_some());
+    let dos = athena.sharing.selected(&athena.tracker, id);
+    athena.act(dos);
+    assert_eq!(queued_for(&athena, &xiphos).len(), 1);
+    assert!(queued_for(&athena, &flapper).is_empty(), "{:?}", athena.outbox);
+    settle(&mut athena, &mut flapper);
+    assert!(flapper.texts().is_empty(), "{:?}", flapper.texts());
+    // Xiphos's owner gives its clipboard up: athena empties, flapper hears nothing of it.
+    settle(&mut athena, &mut xiphos);
+    xiphos.later(10);
+    xiphos.reports(&[Report::Emptied]);
+    settle(&mut xiphos, &mut athena);
+    assert_eq!(athena.clipboard, None);
+    reconnect(&mut athena, &flapper, 3);
+    assert!(queued_for(&athena, &flapper).is_empty(), "{:?}", athena.outbox);
+    // A copy on athena reaches both, and flapper's reaches athena only.
+    athena.later(10);
+    athena.copy(&text("home"));
+    settle(&mut athena, &mut flapper);
+    settle(&mut athena, &mut xiphos);
+    assert_eq!(
+        (xiphos.clipboard, flapper.clipboard),
+        (Some(text("home").digest()), Some(text("home").digest()))
+    );
+    flapper.later(20);
+    flapper.copy(&text("laptop"));
+    settle(&mut flapper, &mut athena);
+    assert_eq!(athena.clipboard, Some(text("laptop").digest()));
+    assert!(queued_for(&athena, &xiphos).is_empty(), "{:?}", athena.outbox);
+    assert_eq!(flapper.texts(), ["laptop", "home"]);
+    assert_eq!(xiphos.texts(), ["home", "work secret"]);
+}
+
+#[test]
+fn a_deletion_reaches_only_the_peers_its_entry_may_have_reached() {
+    let (mut athena, mut xiphos, mut flapper) = three();
+    xiphos.copy(&text("work"));
+    settle(&mut xiphos, &mut athena);
+    athena.later(10);
+    athena.copy(&text("home"));
+    settle(&mut athena, &mut xiphos);
+    settle(&mut athena, &mut flapper);
+    let origin = |m: &Machine, c: &Arc<Content>| {
+        let id = m.held(c).unwrap_or_else(|| panic!("held"));
+        Origin::of(m.tracker.history().get(id).unwrap_or_else(|| panic!("entry")).source())
+    };
+    let gone = [
+        (text("work").digest(), origin(&athena, &text("work"))),
+        (text("home").digest(), origin(&athena, &text("home"))),
+    ];
+    assert_eq!(gone[0].1, Origin::Peer(raw_key(&xiphos.key)));
+    let tick = athena.tracker.next_tick(athena.wall);
+    let dos = athena.sharing.deleted(&mut athena.tracker, &gone, tick);
+    athena.act(dos);
+    let forgets = |m: &Machine, to: &Machine| -> Vec<[u8; 32]> {
+        queued_for(m, to)
+            .into_iter()
+            .flat_map(|msg| match msg {
+                Message::Forget { digests, .. } => digests.clone(),
+                _ => Vec::new(),
+            })
+            .collect()
+    };
+    assert_eq!(forgets(&athena, &xiphos), [text("work").digest(), text("home").digest()]);
+    assert_eq!(forgets(&athena, &flapper), [text("home").digest()]);
+    settle(&mut athena, &mut xiphos);
+    settle(&mut athena, &mut flapper);
+    assert!(xiphos.texts().is_empty() && flapper.texts().is_empty());
+    // Replayed on a new session, the same: what flapper may have held, and no more.
+    reconnect(&mut athena, &flapper, 2);
+    assert_eq!(forgets(&athena, &flapper), [text("home").digest()]);
+    athena.outbox.clear();
+    // A deletion xiphos sends of its own entry is remembered as xiphos's; one of an entry not
+    // held here, as nobody's: neither goes on to flapper.
+    xiphos.later(10);
+    xiphos.copy(&text("more work"));
+    settle(&mut xiphos, &mut athena);
+    let tick = xiphos.tracker.next_tick(xiphos.wall);
+    let ours = (text("more work").digest(), Origin::Here);
+    let dos = xiphos.sharing.deleted(&mut xiphos.tracker, &[ours, ([9; 32], Origin::Here)], tick);
+    xiphos.act(dos);
+    settle(&mut xiphos, &mut athena);
+    let remembered: Vec<Origin> =
+        athena.tracker.history().forgotten().filter(|f| f.tick == tick).map(|f| f.origin).collect();
+    assert_eq!(remembered, [Origin::Peer(raw_key(&xiphos.key)), Origin::Unknown]);
+    reconnect(&mut athena, &flapper, 3);
+    assert_eq!(forgets(&athena, &flapper), [text("home").digest()]);
+}
+
+#[test]
+fn another_peers_entry_is_neither_fetched_from_nor_given_to_a_peer() {
+    let (mut athena, mut xiphos, mut flapper) = three();
+    let shot = with_image("work shot", 7);
+    xiphos.copy(&shot);
+    deliver(&mut xiphos, &mut athena);
+    // Xiphos goes mid-fetch: the image is still to come from it, and from it only.
+    let (fetch, from, ..) = athena.fetches.remove(0);
+    assert_eq!(from, xiphos.key);
+    athena.clip(Clip::Down { key: xiphos.key, session: 1 });
+    athena.clip(Clip::Fetched { fetch, result: Err(FetchFailed::Lost) });
+    // Flapper arrives: not asked for it.
+    reconnect(&mut athena, &flapper, 2);
+    assert!(athena.fetches.is_empty(), "{:?}", athena.fetches);
+    // A paste on athena waits for it; flapper is not asked.
+    athena.reports(&[Report::Wanted { target: name("image/png") }]);
+    assert!(athena.fetches.is_empty(), "{:?}", athena.fetches);
+    // Xiphos back: asked of it.
+    athena.clip(Clip::Up { key: xiphos.key, session: 2 });
+    assert_eq!(athena.fetches.iter().map(|f| f.1).collect::<Vec<_>>(), [xiphos.key]);
+    // Flapper asking for its text by digest is told it is not held.
+    let utf8 = Name::new(b"UTF8_STRING").unwrap_or_else(|e| panic!("{e:?}"));
+    athena.clip(Clip::Wanted {
+        key: flapper.key,
+        request: 9,
+        digest: shot.digest(),
+        name: utf8.clone(),
+    });
+    assert_eq!(athena.answers.last().map(|(r, b)| (*r, b.is_none())), Some((9, true)));
+    // Xiphos itself is answered.
+    athena.clip(Clip::Wanted { key: xiphos.key, request: 10, digest: shot.digest(), name: utf8 });
+    assert_eq!(athena.answers.last().map(|(r, b)| (*r, b.is_some())), Some((10, true)));
+    let _ = &mut flapper;
 }

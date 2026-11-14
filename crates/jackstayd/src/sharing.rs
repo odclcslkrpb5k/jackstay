@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jackstay_clip::{
-    Content, EntryId, Format, Kept, Remote, Source, Target, TargetData, TargetName,
+    Content, EntryId, Format, Kept, Origin, Remote, Source, Target, TargetData, TargetName,
 };
 use jackstay_net::{Clip, FetchFailed, PublicKey};
 use jackstay_proto::link::Message;
@@ -263,9 +263,14 @@ impl Sharing {
         [early, self.paused_until].into_iter().flatten().min()
     }
 
-    fn share(&self, out: &mut Vec<Do>, message: &Message) {
+    /// Sends `message`, about an entry from `origin`, to each peer it may reach: every peer for
+    /// one copied here, only its own peer for one from a peer. Nothing is relayed
+    /// (docs/sharing.md, "Who hears what").
+    fn share(&self, out: &mut Vec<Do>, origin: Origin, message: &Message) {
         for (&key, &session) in &self.sessions {
-            out.push(Do::Share { key, session, message: message.clone() });
+            if origin.reaches(&raw_key(&key)) {
+                out.push(Do::Share { key, session, message: message.clone() });
+            }
         }
     }
 
@@ -307,7 +312,7 @@ impl Sharing {
                     let tick = tracker.next_tick(wall_ms);
                     self.state = Some(Change { tick, origin: self.us, digest: None });
                     log("clipboard given up by its owner; announced empty");
-                    self.share(&mut out, &Message::Emptied { tick });
+                    self.share(&mut out, Origin::Here, &Message::Emptied { tick });
                 }
                 Report::Wanted { target } => self.wanted(tracker, target, &mut out),
                 Report::KeptAlive
@@ -386,13 +391,14 @@ impl Sharing {
                     a.targets.len(),
                     if early.is_some() { ", completing an early announcement" } else { "" }
                 ));
-                self.share(out, &Message::Announce(Box::new(a)));
+                self.share(out, Origin::of(entry.source()), &Message::Announce(Box::new(a)));
             }
             None => log(&format!("{}: too many long target names to announce", short(&digest))),
         }
     }
 
-    /// The user re-selected entry `id` at `tick`: a change, announced whatever its origin.
+    /// The user re-selected entry `id` at `tick`: a change, announced to the peers its entry may
+    /// reach (one from a peer, back to that peer only).
     pub fn selected(&mut self, tracker: &Tracker, id: EntryId) -> Vec<Do> {
         let mut out = Vec::new();
         let Some(entry) = tracker.history().get(id) else { return out };
@@ -400,25 +406,42 @@ impl Sharing {
         self.state = Some(Change { tick: entry.tick(), origin: self.us, digest: Some(digest) });
         if let Some(a) = announcement(entry.content(), entry.tick(), None, entry.copied_at_ms()) {
             log(&format!("announced {}: selected again", short(&digest)));
-            self.share(&mut out, &Message::Announce(Box::new(a)));
+            self.share(&mut out, Origin::of(entry.source()), &Message::Announce(Box::new(a)));
         }
         out
     }
 
     /// The user deleted entries here at `tick` (`jackstay delete`, or `jackstay clear` deleting
-    /// the clipboard's): deleted everywhere, and remembered.
-    pub fn deleted(&mut self, tracker: &mut Tracker, digests: &[[u8; 32]], tick: u64) -> Vec<Do> {
+    /// the clipboard's), each with where it came from: deleted on every peer it may have reached,
+    /// and remembered.
+    pub fn deleted(
+        &mut self,
+        tracker: &mut Tracker,
+        digests: &[([u8; 32], Origin)],
+        tick: u64,
+    ) -> Vec<Do> {
         let mut out = Vec::new();
-        for d in digests {
-            tracker.remember_forgotten(*d, tick);
-            if let Some(s) = self.state.as_mut().filter(|s| s.digest == Some(*d)) {
+        for &(d, origin) in digests {
+            tracker.remember_forgotten(d, tick, origin);
+            if let Some(s) = self.state.as_mut().filter(|s| s.digest == Some(d)) {
                 s.digest = None;
             }
         }
         self.settle(tracker, &mut out);
         if !digests.is_empty() {
             log(&format!("forgot {} entries everywhere", digests.len()));
-            self.share(&mut out, &Message::Forget { tick, digests: digests.to_vec() });
+            for (&key, &session) in &self.sessions {
+                let peer = raw_key(&key);
+                let digests: Vec<[u8; 32]> =
+                    digests.iter().filter(|(_, o)| o.reaches(&peer)).map(|(d, _)| *d).collect();
+                if !digests.is_empty() {
+                    out.push(Do::Share {
+                        key,
+                        session,
+                        message: Message::Forget { tick, digests },
+                    });
+                }
+            }
         }
         out
     }
@@ -428,7 +451,7 @@ impl Sharing {
     pub fn emptied(&mut self, tick: u64) -> Vec<Do> {
         let mut out = Vec::new();
         self.state = Some(Change { tick, origin: self.us, digest: None });
-        self.share(&mut out, &Message::Emptied { tick });
+        self.share(&mut out, Origin::Here, &Message::Emptied { tick });
         out
     }
 
@@ -445,11 +468,13 @@ impl Sharing {
             Clip::Up { key, session } => {
                 self.sessions.insert(key, session);
                 self.replay(tracker, key, session, &mut out);
-                // Everything still to come, from the peer now here (two machines: the one
-                // that announced it).
+                // Everything still to come from the peer now here: what it announced, never
+                // another peer's.
+                let peer = raw_key(&key);
                 let entries: Vec<(Arc<Content>, [u8; 32])> = tracker
                     .history()
                     .entries()
+                    .filter(|e| matches!(e.source(), Source::Peer { key, .. } if *key == peer))
                     .filter(|e| {
                         e.content()
                             .targets()
@@ -470,9 +495,15 @@ impl Sharing {
             Clip::Received { key, message, .. } => {
                 self.received(tracker, key, message, name, wall_ms, &mut out);
             }
-            Clip::Wanted { request, digest, name, .. } => {
+            Clip::Wanted { key, request, digest, name } => {
+                let peer = raw_key(&key);
                 let bytes = tracker.history().find_digest(&digest).and_then(|id| {
-                    let content = tracker.history().get(id)?.content();
+                    let entry = tracker.history().get(id)?;
+                    // Not held, as far as a peer the entry may not reach can tell.
+                    if !Origin::of(entry.source()).reaches(&peer) {
+                        return None;
+                    }
+                    let content = entry.content();
                     let name = TargetName::from_latin1(name.latin1()).ok()?;
                     content.kept(name.as_str()).map(Kept::shared)
                 });
@@ -488,10 +519,12 @@ impl Sharing {
     /// catches up (docs/sharing.md, "Forget").
     fn replay(&self, tracker: &Tracker, key: PublicKey, session: u64, out: &mut Vec<Do>) {
         let history = tracker.history();
-        // One message per deletion's tick, so each is remembered at its own.
+        let peer = raw_key(&key);
+        // One message per deletion's tick, so each is remembered at its own; only those of
+        // entries that may have reached this peer.
         let mut by_tick: BTreeMap<u64, Vec<[u8; 32]>> = BTreeMap::new();
-        for (digest, tick) in history.forgotten() {
-            by_tick.entry(*tick).or_default().push(*digest);
+        for f in history.forgotten().filter(|f| f.origin.reaches(&peer)) {
+            by_tick.entry(f.tick).or_default().push(f.digest);
         }
         for (tick, digests) in by_tick {
             for chunk in digests.chunks(MAX_FORGETS) {
@@ -501,11 +534,18 @@ impl Sharing {
         }
         let Some(state) = self.state else { return };
         let message = match state.digest {
-            None => Message::Emptied { tick: state.tick },
+            // Emptied here, or by this peer: another peer's emptying is not relayed either.
+            None if state.origin == self.us || state.origin == key => {
+                Message::Emptied { tick: state.tick }
+            }
+            None => return,
             Some(d) => {
                 let Some(entry) = history.find_digest(&d).and_then(|id| history.get(id)) else {
                     return;
                 };
+                if !Origin::of(entry.source()).reaches(&peer) {
+                    return;
+                }
                 let Some(a) = announcement(entry.content(), state.tick, None, entry.copied_at_ms())
                 else {
                     return;
@@ -544,8 +584,12 @@ impl Sharing {
                 tracker.observe(tick);
                 let mut forgot = 0usize;
                 for d in &digests {
-                    tracker.remember_forgotten(*d, tick);
-                    let Some(id) = tracker.history().find_digest(d) else { continue };
+                    let found = tracker.history().find_digest(d);
+                    let origin = found
+                        .and_then(|id| tracker.history().get(id))
+                        .map_or(Origin::Unknown, |e| Origin::of(e.source()));
+                    tracker.remember_forgotten(*d, tick, origin);
+                    let Some(id) = found else { continue };
                     forgot = forgot.saturating_add(1);
                     if tracker.delete(id) == Some(true) {
                         out.push(Do::Empty);
@@ -716,15 +760,15 @@ impl Sharing {
         if !self.wants.iter().any(|w| w.digest == digest && w.name == *target)
             && let Some(entry) = history.find_digest(&digest).and_then(|id| history.get(id))
         {
-            // Failed before, or its session ended: asked for once more, from whoever announced
-            // it.
+            // Failed before, or its session ended: asked for once more, from the peer that
+            // announced it, and only from it.
             let from = match entry.source() {
                 Source::Peer { key, .. } => {
                     self.sessions.keys().find(|k| raw_key(k) == *key).copied()
                 }
                 Source::Local { .. } => None,
             };
-            if let Some(key) = from.or_else(|| self.sessions.keys().next().copied()) {
+            if let Some(key) = from {
                 for t in entry.content().targets().iter().filter(|t| t.name == *target) {
                     if let TargetData::Remote(r) = &t.data {
                         self.failed.remove(&r.sha256);

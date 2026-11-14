@@ -6,7 +6,8 @@
 //! next-id 44
 //! tick 1761300000123
 //! cleared 0
-//! forgot <64 hex digits> 1761200000000
+//! forgot <64 hex digits> 1761200000000 local
+//! forgot <64 hex digits> 1761200000500 peer <64 hex digits>
 //! entry 43 1761300000100 0 1761300000123
 //! source peer <64 hex digits> xiphos
 //! target UTF8_STRING kept UTF8_STRING 8 <64 hex digits>
@@ -21,13 +22,17 @@
 //! Version 2 added the clock (`tick`, and each entry's last), the deletions remembered (`forgot`),
 //! a peer as a source, and targets still to come from one (`remote`), for clipboard sharing
 //! (docs/sharing.md). Version 1, without them, is read too: each entry's tick is its copy time.
+//! A `forgot` line ends with where the deleted entry came from, `local` or `peer <key>`
+//! (2026-11-13, still version 2), or with nothing when that is not known: a line written before, or
+//! the deletion of an entry not held. A Jackstay from before drops such a line, alone, as
+//! unreadable.
 //!
 //! Every field is one token in the canonical escaping of `escape.rs`. Reading salvages what it can:
 //! a bad record is dropped and counted, and the rest are kept; only a bad header refuses the file.
 
 use std::collections::HashSet;
 
-use jackstay_clip::{EntryId, Format, NotKept, Source, TargetName};
+use jackstay_clip::{EntryId, Forgotten, Format, NotKept, Origin, Source, TargetName};
 
 use crate::BlobHash;
 use crate::escape::{escape, unescape};
@@ -48,8 +53,8 @@ pub struct Index {
     pub next_id: u64,
     /// The hybrid clock's last tick (docs/sharing.md, "Order").
     pub clock: u64,
-    /// Deletions remembered, oldest first: each entry's digest and the deletion's tick.
-    pub forgotten: Vec<([u8; 32], u64)>,
+    /// Deletions remembered, oldest first.
+    pub forgotten: Vec<Forgotten>,
     /// Whether the clipboard was cleared after the newest entry was copied, so nothing is to be put
     /// back on it at start.
     pub cleared: bool,
@@ -140,8 +145,15 @@ pub fn encode(index: &Index) -> Vec<u8> {
         format!("tick {}", index.clock),
         format!("cleared {}", u8::from(index.cleared)),
     ];
-    for (digest, tick) in &index.forgotten {
-        lines.push(format!("forgot {} {tick}", BlobHash::from_bytes(*digest).hex()));
+    for f in &index.forgotten {
+        let digest = BlobHash::from_bytes(f.digest).hex();
+        lines.push(match f.origin {
+            Origin::Here => format!("forgot {digest} {} local", f.tick),
+            Origin::Peer(key) => {
+                format!("forgot {digest} {} peer {}", f.tick, BlobHash::from_bytes(key).hex())
+            }
+            Origin::Unknown => format!("forgot {digest} {}", f.tick),
+        });
     }
     for e in &index.entries {
         lines.push(format!(
@@ -335,6 +347,17 @@ impl Record {
     }
 }
 
+/// A `forgot` line's fields: digest, tick, and the origin if known.
+fn forgot(fields: &[&[u8]]) -> Option<Forgotten> {
+    let (hex, tick, origin) = match fields {
+        [hex, tick] => (hex, tick, Origin::Unknown),
+        [hex, tick, b"local"] => (hex, tick, Origin::Here),
+        [hex, tick, b"peer", key] => (hex, tick, Origin::Peer(BlobHash::from_hex(key)?.bytes())),
+        _ => return None,
+    };
+    Some(Forgotten { digest: BlobHash::from_hex(hex)?.bytes(), tick: number(tick)?, origin })
+}
+
 fn close(
     record: Option<Record>,
     ids: &mut HashSet<EntryId>,
@@ -412,16 +435,14 @@ pub fn parse(bytes: &[u8]) -> Result<Parsed, HeaderError> {
                 record = Some(Record::start(count, rest, version));
             }
             // Before the first entry; one unreadable is dropped alone.
-            (Some((&b"forgot", [hex, tick])), None) if version >= 2 => {
-                match (BlobHash::from_hex(hex), number(tick)) {
-                    (Some(d), Some(t)) => forgotten.push((d.bytes(), t)),
-                    _ => {
-                        if !dropped.contains(&0) {
-                            dropped.push(0);
-                        }
+            (Some((&b"forgot", rest)), None) if version >= 2 => match forgot(rest) {
+                Some(f) => forgotten.push(f),
+                None => {
+                    if !dropped.contains(&0) {
+                        dropped.push(0);
                     }
                 }
-            }
+            },
             (Some((&b"source", rest)), Some(r)) => r.source(rest),
             (Some((&b"target", rest)), Some(r)) => r.target(rest),
             (Some((&b"end", [])), _) => {

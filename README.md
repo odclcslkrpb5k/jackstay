@@ -104,9 +104,11 @@ A copy on one paired machine becomes the clipboard on the other at once, and joi
 `jackstay list` and the popup say which machine it came from. Large copies (images) follow in the
 background, and a paste of one still on its way waits up to 3 s for it.
 
-- **Every copy, passwords included, is kept on every paired machine's disk.** Deleting an entry
-  (`jackstay delete`) deletes it on every machine, pinned or not, including one that was away,
-  when it next connects. `jackstay clear` clears the clipboard everywhere and deletes its entry
+- **Every copy, passwords included, is kept on the disk of every machine paired with the one it
+  was copied on.** Nothing is passed on: with A paired to both B and C, but B and C not paired,
+  B's copies reach A and never C, and C's never B. Deleting an entry
+  (`jackstay delete`) deletes it on every machine that may hold it, pinned or not, including one
+  that was away, when it next connects. `jackstay clear` clears the clipboard everywhere and deletes its entry
   everywhere, unless it is pinned here. `jackstay clear-history` empties the history on this
   machine only (and the clipboard everywhere).
 - A password manager that clears the clipboard clears it everywhere; history keeps the entry, as

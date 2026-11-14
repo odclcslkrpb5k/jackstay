@@ -35,6 +35,47 @@ pub enum Source {
 /// The most deletions remembered (docs/sharing.md, "Forget").
 pub const MAX_FORGOTTEN: usize = 1000;
 
+/// Where an entry came from, as far as which machines may hear of it: nothing is relayed
+/// (docs/sharing.md, "Who hears what").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// Copied here: every peer may hear of it.
+    Here,
+    /// Announced by the peer with this key: only that peer may.
+    Peer([u8; 32]),
+    /// Not known: a deletion of an entry not held here, or one remembered before deletions
+    /// recorded their entry's origin (2026-11-13). No peer hears of it.
+    Unknown,
+}
+
+impl Origin {
+    #[must_use]
+    pub fn of(source: &Source) -> Origin {
+        match source {
+            Source::Local { .. } => Origin::Here,
+            Source::Peer { key, .. } => Origin::Peer(*key),
+        }
+    }
+
+    /// Whether the peer with key `peer` may hear of the entry.
+    #[must_use]
+    pub fn reaches(self, peer: &[u8; 32]) -> bool {
+        match self {
+            Origin::Here => true,
+            Origin::Peer(key) => key == *peer,
+            Origin::Unknown => false,
+        }
+    }
+}
+
+/// A deletion remembered: the entry's digest, the deletion's tick, and where the entry came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Forgotten {
+    pub digest: [u8; 32],
+    pub tick: u64,
+    pub origin: Origin,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     id: EntryId,
@@ -145,7 +186,7 @@ pub struct Saved {
     /// The hybrid clock's last tick ([`History::clock`]).
     pub clock: u64,
     /// Deletions remembered, oldest first ([`History::forgotten`]).
-    pub forgotten: Vec<([u8; 32], u64)>,
+    pub forgotten: Vec<Forgotten>,
 }
 
 #[derive(Debug)]
@@ -154,7 +195,7 @@ pub struct History {
     limits: Limits,
     next_id: u64,
     clock: u64,
-    forgotten: VecDeque<([u8; 32], u64)>,
+    forgotten: VecDeque<Forgotten>,
 }
 
 impl History {
@@ -227,16 +268,17 @@ impl History {
         self.clock = self.clock.max(tick);
     }
 
-    /// Deletions remembered, oldest first: each entry's digest and the deletion's tick.
-    pub fn forgotten(&self) -> impl ExactSizeIterator<Item = &([u8; 32], u64)> {
+    /// Deletions remembered, oldest first.
+    pub fn forgotten(&self) -> impl ExactSizeIterator<Item = &Forgotten> {
         self.forgotten.iter()
     }
 
-    /// Remembers that the entry with `digest` was deleted at `tick`: an announcement of it no
-    /// newer is refused ([`History::was_forgotten`]). The last [`MAX_FORGOTTEN`] are kept.
-    pub fn remember_forgotten(&mut self, digest: [u8; 32], tick: u64) {
-        self.forgotten.retain(|(d, _)| *d != digest);
-        self.forgotten.push_back((digest, tick));
+    /// Remembers that the entry with `digest`, from `origin`, was deleted at `tick`: an
+    /// announcement of it no newer is refused ([`History::was_forgotten`]). The last
+    /// [`MAX_FORGOTTEN`] are kept.
+    pub fn remember_forgotten(&mut self, digest: [u8; 32], tick: u64, origin: Origin) {
+        self.forgotten.retain(|f| f.digest != digest);
+        self.forgotten.push_back(Forgotten { digest, tick, origin });
         while self.forgotten.len() > MAX_FORGOTTEN {
             self.forgotten.pop_front();
         }
@@ -245,7 +287,7 @@ impl History {
     /// Whether an announcement of `digest` at `tick` comes from before its deletion.
     #[must_use]
     pub fn was_forgotten(&self, digest: &[u8; 32], tick: u64) -> bool {
-        self.forgotten.iter().any(|(d, t)| d == digest && tick <= *t)
+        self.forgotten.iter().any(|f| f.digest == *digest && tick <= f.tick)
     }
 
     /// Entries, newest first.

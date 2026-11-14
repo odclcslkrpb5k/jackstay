@@ -1,4 +1,4 @@
-use jackstay_clip::{EntryId, Format, NotKept, Source, TargetName};
+use jackstay_clip::{EntryId, Forgotten, Format, NotKept, Origin, Source, TargetName};
 use jackstay_store::{
     BlobHash, HeaderError, Index, MAX_ID, Parsed, SavedData, SavedEntry, SavedTarget, encode,
     invariants, parse,
@@ -372,12 +372,25 @@ fn arb_entry() -> impl Strategy<Value = SavedEntry> {
         )
 }
 
+fn arb_forgotten() -> impl Strategy<Value = Forgotten> {
+    let origin = prop_oneof![
+        Just(Origin::Here),
+        Just(Origin::Unknown),
+        any::<[u8; 32]>().prop_map(Origin::Peer),
+    ];
+    (any::<[u8; 32]>(), any::<u64>(), origin).prop_map(|(digest, tick, origin)| Forgotten {
+        digest,
+        tick,
+        origin,
+    })
+}
+
 proptest! {
     #[test]
     fn every_valid_index_round_trips(
         next_id in 0..=MAX_ID,
         clock in any::<u64>(),
-        forgotten in proptest::collection::vec((any::<[u8; 32]>(), any::<u64>()), 0..4),
+        forgotten in proptest::collection::vec(arb_forgotten(), 0..4),
         cleared in any::<bool>(),
         entries in proptest::collection::vec(arb_entry(), 0..6),
     ) {
@@ -445,13 +458,23 @@ fn peers_targets_to_come_and_deletions_remembered_are_kept() {
     let i = Index {
         next_id: 8,
         clock: 12,
-        forgotten: vec![([1; 32], 5), ([2; 32], 6)],
+        forgotten: vec![
+            Forgotten { digest: [1; 32], tick: 5, origin: Origin::Unknown },
+            Forgotten { digest: [2; 32], tick: 6, origin: Origin::Here },
+            Forgotten { digest: [3; 32], tick: 7, origin: Origin::Peer([0xcd; 32]) },
+        ],
         cleared: false,
         entries: vec![e],
     };
     let t = text(&i);
-    let (one, two, key) = ("01".repeat(32), "02".repeat(32), "ab".repeat(32));
-    assert!(t.contains(&format!("forgot {one} 5\nforgot {two} 6\nentry 7")), "{t}");
+    let (one, two, three) = ("01".repeat(32), "02".repeat(32), "03".repeat(32));
+    let (key, by) = ("ab".repeat(32), "cd".repeat(32));
+    assert!(
+        t.contains(&format!(
+            "forgot {one} 5\nforgot {two} 6 local\nforgot {three} 7 peer {by}\nentry 7"
+        )),
+        "{t}"
+    );
     assert!(t.contains(&format!("source peer {key} xiphos%20box\n")), "{t}");
     assert!(
         t.contains(&format!("target image/png remote image/png 8 33177600 {}", sha.hex())),
@@ -462,5 +485,11 @@ fn peers_targets_to_come_and_deletions_remembered_are_kept() {
     // An unreadable deletion is dropped alone.
     let bad = t.replacen("forgot 01", "forgot zz", 1);
     let p = parsed(bad.as_bytes());
-    assert_eq!((p.index.forgotten.len(), p.dropped, p.index.entries.len()), (1, vec![0], 1));
+    assert_eq!((p.index.forgotten.len(), p.dropped, p.index.entries.len()), (2, vec![0], 1));
+    // So is one whose origin is unreadable.
+    for wrong in [" 6 elsewhere\n", " 6 local x\n", " 6 peer zz\n", " 6 peer\n"] {
+        let bad = t.replacen(" 6 local\n", wrong, 1);
+        let p = parsed(bad.as_bytes());
+        assert_eq!((p.index.forgotten.len(), p.dropped.clone()), (2, vec![0]), "{wrong}");
+    }
 }

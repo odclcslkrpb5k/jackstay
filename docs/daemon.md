@@ -103,7 +103,8 @@ not a document; `~/.local/state` is less often backed up than `~/.local/share`.
   O_EXCL` (temporary names) and mode `0600`, then renamed.
 - `blobs/<sha256 hex>`: one file per distinct kept target's bytes.
 - `index`: a version line, the next entry id, the clock's last tick, a `cleared` flag, the
-  deletions remembered (`forgot <digest> <tick>`), then one record per entry, newest first: id,
+  deletions remembered (`forgot <digest> <tick> [local | peer <key>]`, the end saying where the
+  deleted entry came from, docs/sharing.md, "Who hears what"), then one record per entry, newest first: id,
   copied-at, pinned, tick, source (`local [class]` or `peer <key> <name>`), and per target its
   name and either `kept <type> <format> <sha256>`, `remote <type> <format> <size> <sha256>` (still
   to come from a peer) or `not-kept <reason>`, then an `end` line. Version 2 (clipboard sharing,

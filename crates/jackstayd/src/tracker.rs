@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use jackstay_clip::{Content, Entry, EntryId, History, Source};
+use jackstay_clip::{Content, Entry, EntryId, History, Origin, Source};
 use jackstay_selection::Report;
 
 /// What the capture being recorded has become.
@@ -227,9 +227,10 @@ impl Tracker {
         self.history.get(id).map(|_| ())
     }
 
-    /// Remembers a deletion, so an older announcement of it is refused ([`History::was_forgotten`]).
-    pub fn remember_forgotten(&mut self, digest: [u8; 32], tick: u64) {
-        self.history.remember_forgotten(digest, tick);
+    /// Remembers a deletion, so an older announcement of it is refused ([`History::was_forgotten`]),
+    /// with where the entry came from, which says who hears of it.
+    pub fn remember_forgotten(&mut self, digest: [u8; 32], tick: u64, origin: Origin) {
+        self.history.remember_forgotten(digest, tick, origin);
     }
 
     /// Records whether serving `id` (after [`Tracker::select`] or at a restore) took the

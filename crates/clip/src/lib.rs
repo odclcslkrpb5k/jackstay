@@ -8,5 +8,6 @@ pub use content::{
     TargetName,
 };
 pub use history::{
-    Entry, EntryId, History, Limits, MAX_FORGOTTEN, Recorded, RestoreError, Saved, Source,
+    Entry, EntryId, Forgotten, History, Limits, MAX_FORGOTTEN, Origin, Recorded, RestoreError,
+    Saved, Source,
 };

@@ -2,8 +2,9 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use jackstay_clip::{
-    Content, ContentError, Entry, EntryId, Format, History, Kept, Limits, MAX_FORGOTTEN,
-    MAX_NAME_LEN, NotKept, Remote, RestoreError, Saved, Source, Target, TargetData, TargetName,
+    Content, ContentError, Entry, EntryId, Forgotten, Format, History, Kept, Limits, MAX_FORGOTTEN,
+    MAX_NAME_LEN, NotKept, Origin, Remote, RestoreError, Saved, Source, Target, TargetData,
+    TargetName,
 };
 use proptest::prelude::*;
 
@@ -586,7 +587,7 @@ fn a_received_copy_goes_where_its_tick_puts_it() {
     assert_eq!(Some(again.id), h.find(&text("old")));
     // Deleted after it was announced: refused; announced again later: kept.
     let gone = text("gone");
-    h.remember_forgotten(gone.digest(), 11_000);
+    h.remember_forgotten(gone.digest(), 11_000, Origin::Here);
     assert!(h.record_received(Arc::clone(&gone), peer.clone(), 1, 10_500).is_none());
     assert!(h.record_received(Arc::clone(&gone), peer.clone(), 1, 11_000).is_none());
     assert!(h.record_received(gone, peer, 1, 11_001).is_some());
@@ -618,7 +619,7 @@ fn deletions_are_remembered_up_to_a_thousand() {
     for i in 0..=MAX_FORGOTTEN {
         let mut digest = [0u8; 32];
         digest[..8].copy_from_slice(&(i as u64).to_be_bytes());
-        h.remember_forgotten(digest, i as u64);
+        h.remember_forgotten(digest, i as u64, Origin::Unknown);
     }
     assert_eq!(h.forgotten().len(), MAX_FORGOTTEN);
     // The oldest went first.
@@ -630,6 +631,23 @@ fn deletions_are_remembered_up_to_a_thousand() {
     let saved = Saved { next_id: 1, clock: 77, forgotten: h.forgotten().copied().collect() };
     let (r, _) = ok(History::restore(limits(10, 1_000), vec![], saved));
     assert_eq!((r.clock(), r.forgotten().len()), (77, MAX_FORGOTTEN));
+    // Remembered again: once, newest, with its new origin.
+    h.remember_forgotten(last, 5_000, Origin::Peer([3; 32]));
+    assert_eq!(h.forgotten().len(), MAX_FORGOTTEN);
+    assert_eq!(
+        h.forgotten().last(),
+        Some(&Forgotten { digest: last, tick: 5_000, origin: Origin::Peer([3; 32]) })
+    );
+}
+
+#[test]
+fn an_entry_reaches_every_peer_from_here_and_only_its_own_peer_otherwise() {
+    let (a, b) = ([1; 32], [2; 32]);
+    assert!(Origin::of(&local()).reaches(&a) && Origin::of(&local()).reaches(&b));
+    let from_a = Origin::of(&Source::Peer { key: a, name: "a".to_owned() });
+    assert_eq!(from_a, Origin::Peer(a));
+    assert!(from_a.reaches(&a) && !from_a.reaches(&b));
+    assert!(!Origin::Unknown.reaches(&a));
 }
 
 #[test]

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use jackstay_clip::EntryId;
+use jackstay_clip::{Entry, EntryId, Origin};
 use jackstay_proto::control::{
     Error, MAX_LIST, MAX_SOURCE_LEN, PairReason, Request, Response, SharingStatus, Status, Thumb,
     printable,
@@ -481,7 +481,7 @@ impl Session {
             }
             Request::Delete { id } => {
                 let id = EntryId::new(id);
-                let digest = self.tracker.history().get(id).map(|e| e.content().digest());
+                let digest = self.tracker.history().get(id).map(Self::forgettable);
                 match self.tracker.delete(id) {
                     None => respond(self, Response::Error(Error::NoSuchEntry)),
                     Some(was_current) => {
@@ -506,7 +506,7 @@ impl Session {
                 // spared everywhere if pinned here).
                 let current = self.tracker.current();
                 let digest = current.and_then(|id| self.tracker.history().get(id));
-                let digest = digest.map(|e| e.content().digest());
+                let digest = digest.map(Self::forgettable);
                 let failure = self.clear_clipboard()?;
                 let deleted = current.is_some_and(|id| self.tracker.history().get(id).is_none());
                 log("clipboard cleared");
@@ -544,8 +544,14 @@ impl Session {
         Ok(())
     }
 
-    /// Deletes entries on every peer too, remembered here (docs/sharing.md, "Forget").
-    fn forget(&mut self, digests: Vec<[u8; 32]>) -> Result<(), Exit> {
+    /// What a deletion of `entry` needs once it is gone: its digest and where it came from.
+    fn forgettable(entry: &Entry) -> ([u8; 32], Origin) {
+        (entry.content().digest(), Origin::of(entry.source()))
+    }
+
+    /// Deletes entries on the peers that may hold them too, remembered here (docs/sharing.md,
+    /// "Forget").
+    fn forget(&mut self, digests: Vec<([u8; 32], Origin)>) -> Result<(), Exit> {
         if digests.is_empty() {
             return Ok(());
         }
@@ -553,8 +559,8 @@ impl Session {
         let dos = if let Some(sharing) = &mut self.sharing {
             sharing.deleted(&mut self.tracker, &digests, tick)
         } else {
-            for d in digests {
-                self.tracker.remember_forgotten(d, tick);
+            for (d, origin) in digests {
+                self.tracker.remember_forgotten(d, tick, origin);
             }
             Vec::new()
         };
